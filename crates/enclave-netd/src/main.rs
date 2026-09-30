@@ -44,6 +44,8 @@ fn main() -> ExitCode {
     let _ = enclave_sandbox::process();
     // Nothing on disk is needed from here on.
     let _ = enclave_sandbox::filesystem(&[], &[], false);
+    // IPv4 and IPv6 sockets only; no programs, no debugging.
+    let _ = enclave_sandbox::syscalls(enclave_sandbox::Profile::Netd, false);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let transport = Arc::new(TcpTransport::new(parse_servers(&args)));
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()

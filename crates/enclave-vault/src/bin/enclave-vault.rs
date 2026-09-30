@@ -74,6 +74,15 @@ fn run(
                 // netd) no TCP connection can be opened.
                 let (rw, ro) = enclave_vault::harden::paths_for(&mode);
                 report.filesystem = enclave_vault::harden::filesystem(&rw, &ro, net.is_some());
+                // And no new sockets (or IP sockets only, when the network
+                // stayed in this process), no programs, no debugging.
+                let profile = match (&mode, net.is_some()) {
+                    (enclave_vault::Mode::Server { .. }, false) => {
+                        enclave_vault::harden::Profile::Netd
+                    }
+                    _ => enclave_vault::harden::Profile::Vault,
+                };
+                report.syscalls = enclave_vault::harden::syscalls(profile, false);
                 enclave_vault::serve_with(mode, net, s, &token)
                     .await
                     .is_ok()

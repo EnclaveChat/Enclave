@@ -138,6 +138,7 @@ async fn vault_process_serves_the_ui() {
     if cfg!(target_os = "linux") {
         assert!(report.contains("not_dumpable: true"), "{report}");
         assert!(report.contains("no_new_privs: true"), "{report}");
+        assert!(report.contains("syscalls: \"filtered\""), "{report}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -300,6 +301,9 @@ async fn sandboxed_vault_keeps_its_profile() {
     let netd = std::path::Path::new(BIN).with_file_name("enclave-netd");
     if cfg!(target_os = "linux") && netd.exists() {
         assert!(report.contains("network: \"netd\""), "{report}");
+    }
+    if cfg!(target_os = "linux") {
+        assert!(report.contains("syscalls: \"filtered\""), "{report}");
     }
     eprintln!("{report}");
 

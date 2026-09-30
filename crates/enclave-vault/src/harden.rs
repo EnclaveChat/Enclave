@@ -1,7 +1,7 @@
 //! Vault hardening (`docs/15-client.md` §1.1a); the mechanisms are in
 //! [`enclave_sandbox`], shared with netd.
 
-pub use enclave_sandbox::{Report, filesystem, process};
+pub use enclave_sandbox::{Profile, Report, filesystem, process, syscalls};
 use std::path::PathBuf;
 
 /// The paths the engine needs for `mode`: (read-write, read-only).
