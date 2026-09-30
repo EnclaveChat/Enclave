@@ -1,15 +1,19 @@
 //! `enclave-vault --connect SOCKET [--server HOST:PORT --profile DIR
-//! [--kt-pins FILE] | --demo]`
+//! [--kt-pins FILE] | --demo] [--report]`
 //!
-//! Started by the Enclave UI, never by hand. Reads the connection token (hex)
-//! from stdin, connects to the UI's socket, proves itself with the token and
-//! runs the engine until the UI disconnects.
+//! Started by the Enclave UI, never by hand. Hardens itself (no core dumps,
+//! not dumpable, `no_new_privs`), reads the connection token (hex) from
+//! stdin, connects to the UI's socket, proves itself with the token, confines
+//! itself to its profile directory (Landlock) and runs the engine until the
+//! UI disconnects. `--report` prints what hardening took effect.
 
 use std::io::BufRead;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let mut report = enclave_vault::harden::process();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let verbose = args.iter().any(|a| a == "--report");
     let Some(socket) = args
         .iter()
         .position(|a| a == "--connect")
@@ -31,7 +35,13 @@ fn main() -> ExitCode {
     let worker = std::thread::Builder::new()
         .name("enclave-vault".into())
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || run(&socket, mode, token));
+        .spawn(move || {
+            let ok = run(&socket, mode, token, &mut report);
+            if verbose {
+                eprintln!("enclave-vault: {report:?}");
+            }
+            ok
+        });
     match worker.map(|h| h.join()) {
         Ok(Ok(true)) => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
@@ -39,7 +49,12 @@ fn main() -> ExitCode {
 }
 
 #[cfg(unix)]
-fn run(socket: &str, mode: enclave_vault::Mode, token: [u8; 32]) -> bool {
+fn run(
+    socket: &str,
+    mode: enclave_vault::Mode,
+    token: [u8; 32],
+    report: &mut enclave_vault::harden::Report,
+) -> bool {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -48,7 +63,12 @@ fn run(socket: &str, mode: enclave_vault::Mode, token: [u8; 32]) -> bool {
     };
     rt.block_on(async {
         match tokio::net::UnixStream::connect(socket).await {
-            Ok(s) => enclave_vault::serve(mode, s, &token).await.is_ok(),
+            Ok(s) => {
+                // Connected: from here on only the profile is reachable.
+                let (rw, ro) = enclave_vault::harden::paths_for(&mode);
+                report.filesystem = enclave_vault::harden::filesystem(&rw, &ro);
+                enclave_vault::serve(mode, s, &token).await.is_ok()
+            }
             Err(e) => {
                 eprintln!("enclave-vault: can't reach the app: {e}");
                 false
@@ -58,7 +78,12 @@ fn run(socket: &str, mode: enclave_vault::Mode, token: [u8; 32]) -> bool {
 }
 
 #[cfg(not(unix))]
-fn run(_: &str, _: enclave_vault::Mode, _: [u8; 32]) -> bool {
+fn run(
+    _: &str,
+    _: enclave_vault::Mode,
+    _: [u8; 32],
+    _: &mut enclave_vault::harden::Report,
+) -> bool {
     eprintln!("enclave-vault: separate vault process not supported on this platform yet");
     false
 }

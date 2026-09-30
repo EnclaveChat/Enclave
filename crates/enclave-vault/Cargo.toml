@@ -26,3 +26,9 @@ enclave-sim = { path = "../enclave-sim" }
 enclave-server = { path = "../enclave-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "thread"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"

@@ -26,7 +26,9 @@ Today the desktop app runs as **two** processes: the Slint UI (`enclave`) and th
 - **Framing**: `u32 BE length ‖ body`, at most 16 MiB.
 - **Launch and authentication** (Unix): the UI creates a directory with mode 0700 under the temp dir, listens on `vault.sock` inside it, and starts `enclave-vault --connect <socket> <mode args>` from next to its own executable with a fresh 32-byte token (from the hedged RNG) written to the child's **stdin**. The vault connects and sends the token first; the UI compares it in constant time, then unlinks the socket and the directory, so no other process can connect. A command that does not decode ends the connection. When the UI goes away the vault's engine loop ends and it exits; when the vault dies the UI says so ("Enclave's vault stopped… Restart Enclave.").
 - **Fallback**: where the vault binary is missing, on non-Unix platforms (Windows named pipes are not implemented yet), and with `--single-process`, the same engine runs on a thread in the UI process.
-- **Not yet**: peer-credential checks (`SO_PEERCRED`), sandboxing the vault (seccomp, Landlock, App Sandbox), disabling core dumps in the vault, and the `netd`/`mediad` splits.
+- **Peer check**: the UI also asks the kernel who connected (`SO_PEERCRED`, where available) and requires the child's pid.
+- **Vault hardening** (`enclave-vault::harden`): core-dump limit 0; on Linux `PR_SET_DUMPABLE 0` (no same-user debugger attach or `/proc/<pid>/mem`) and `no_new_privs`; and, once connected, a **Landlock** filesystem sandbox: read-write only under the profile directory, read-only for the pin file and time-zone data. Best effort on older kernels; `--report` prints what took effect, and a test runs the sandboxed vault against a TCP dev server to prove the profile still works.
+- **Not yet**: seccomp, the macOS App Sandbox and Windows AppContainer, network restriction for the vault (it still talks to the network itself), and the `netd`/`mediad` splits.
 
 ### 1.2 Android
 

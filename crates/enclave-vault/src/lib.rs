@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 pub mod engine;
+pub mod harden;
 
 pub use engine::{Mode, spawn};
 
