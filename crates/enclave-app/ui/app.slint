@@ -337,6 +337,7 @@ export component AppWindow inherits Window {
     in property <image> join-qr;
     in property <string> join-words;
     in property <string> recovery-alert;
+    in property <string> username-problem;
     callback stop-recovery();
     callback meet-scan(string);
     callback search(string);
@@ -543,6 +544,15 @@ export component AppWindow inherits Window {
                             clicked => { root.stop-recovery(); }
                         }
                         QuietButton { text: "It's me"; clicked => { root.approve-recovery(); } }
+                    }
+                }
+                if root.username-problem != "": Notice {
+                    title: "Your username no longer leads to you";
+                    text: "The server's public log now shows " + root.username-problem + " pointing to someone else, or to no one. Your server may have changed it. Tell your contacts to use your code or invite link, and check security codes before sharing anything private.";
+                    kind: 2;
+                    HorizontalLayout {
+                        alignment: start;
+                        QuietButton { text: "Choose a new username"; clicked => { root.open-sheet(Sheet.settings); } }
                     }
                 }
                 if !root.recovery-saved: Notice {

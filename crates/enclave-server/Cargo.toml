@@ -22,6 +22,11 @@ enclave-kt = { path = "../enclave-kt" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 thiserror = "2"
 
+[features]
+# Lets tests play a dishonest operator (rebind a username without checks).
+# Never enabled in builds that ship.
+test-hooks = []
+
 [[bin]]
 name = "enclave-server"
 path = "src/main.rs"

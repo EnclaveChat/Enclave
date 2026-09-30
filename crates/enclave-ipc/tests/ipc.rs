@@ -71,6 +71,7 @@ fn snapshot() -> Snapshot {
         meet_done: String::new(),
         timer: 3600,
         search: vec![Row::default()],
+        username_problem: "@robin@enclave.example".into(),
     }
 }
 

@@ -17,6 +17,9 @@ use enclave_kt::{KtError, KtPolicy, LookupReply, UsernameClaim, verify_lookup};
 use enclave_rpc::api::{self, DirAction, DirKind, Status};
 
 const SETTING: &str = "username";
+const AUDITED: &str = "username-audit";
+/// How often a client checks its own username in the log.
+pub const AUDIT_EVERY_SECS: u64 = 24 * 3600;
 
 /// Split `@name@domain`, `name@domain` or `name`.
 pub(crate) fn parse_address(address: &str) -> (String, Option<String>) {
@@ -103,6 +106,38 @@ impl Client {
         }
         self.set_setting(SETTING, name.as_bytes())?;
         Ok(format!("{name}@{}", info.domain))
+    }
+
+    /// Look ourselves up once a day, the way anyone else would. If the log
+    /// (as its witnesses sign it) binds our name to another account or to
+    /// nothing, or its answer doesn't verify, the operator or someone with
+    /// its keys changed it: raise [`crate::Event::UsernameProblem`].
+    pub(crate) async fn audit_username(&mut self, now: u64) -> Result<Vec<crate::Event>> {
+        let Some(address) = self.username() else {
+            return Ok(Vec::new());
+        };
+        let last = self
+            .setting(AUDITED)?
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or(0);
+        if last + AUDIT_EVERY_SECS > now {
+            return Ok(Vec::new());
+        }
+        let problem = match self.find_username(&address).await {
+            Ok(card) => {
+                card.root != self.account.root_public.0 || card.server != self.profile.server
+            }
+            Err(CoreError::Username(UsernameError::NotFound | UsernameError::Unverified)) => true,
+            // Try again at the next sync.
+            Err(_) => return Ok(Vec::new()),
+        };
+        self.set_setting(AUDITED, &now.to_be_bytes())?;
+        Ok(if problem {
+            vec![crate::Event::UsernameProblem { address }]
+        } else {
+            Vec::new()
+        })
     }
 
     /// Find the contact card behind `@name@domain` (or `name` on the home

@@ -219,6 +219,15 @@ impl Server {
         self.kt = Some(kt);
     }
 
+    /// **Tests only**: bind `name` to `value` in the log without any of the
+    /// checks, as a dishonest operator could. Returns whether it published.
+    #[cfg(feature = "test-hooks")]
+    pub fn kt_force(&mut self, name: &str, value: Vec<u8>, now: u64) -> bool {
+        self.kt
+            .as_ref()
+            .is_some_and(|k| k.publish(name, value, now).is_ok())
+    }
+
     /// What clients pin for this server's log, if usernames are enabled.
     pub fn kt_info(&self) -> Option<KtInfo> {
         self.kt.as_ref().map(|k| k.info().clone())

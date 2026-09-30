@@ -172,7 +172,7 @@ The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons
 
 ### 3.6 Not implemented yet
 
-Gossip comparison between contacts and the split-view alert; client self-audit on launch; the device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+Gossip comparison between contacts and the split-view alert; the device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
 
 ### 3.7 Claims and lookups
 
@@ -190,6 +190,8 @@ signature     = CompositeSign(device_sk, ctx = "enclave/v1/kt/claim",
 The server checks, in order: the PoW (`Pow`); the claim decodes (`Malformed`); the name is valid, already normalized and equal to the key's name, and `time` is within 1 h of the server clock (`Invalid`); the server holds a manifest for the value's root (`NotFound`); a device in that manifest with the claim's device ID verifies the signature (`Invalid`); the name is unowned or owned by the same root (`Denied`) and `time` is later than the owner's last accepted claim (`Invalid`, stops replays). One name per account: if the root owns a different name, that name is republished as the bare root (released, but still reserved for this root). Then the name is published; a confusable skeleton of another root's name is `Denied`.
 
 **Lookup reply** = `u32 len ‖ SignedHead ‖ u32 len ‖ akd LookupProof (akd's protobuf encoding)`, with `SignedHead = head (64) ‖ u32 len ‖ server sig ‖ u8 n ‖ n × (witness (16) ‖ u64(time) ‖ u32 len ‖ sig)`.
+
+**Self-audit** (`Client::audit_username`, run from `sync` once every 24 h): a client that has a username looks itself up exactly as anyone else would. If the verified answer names another account or server, says the name is free, or fails verification, the client raises `Event::UsernameProblem` and the app shows a persistent notice. Network errors retry at the next sync. The operator can't target a lie at one person without the witnesses signing it for everyone, and the owner is one of those everyones.
 
 **Client** (`Client::find_username`): parse `@name@domain` (a bare name means the home server), pick the pinned log by domain (`Unavailable`), normalize (`NotAllowed`), fetch, then `verify_lookup` with the pinned head key, operator, VRF key and witness policy. Any decoding or verification failure is `Unverified`, never "not found", and the UI refuses to add anyone. A bare root is `NotFound`. The card's root must equal the value's root and its server the log's server (`Unverified`). The result is only a contact card: the usual message request and security-code check follow.
 

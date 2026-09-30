@@ -112,6 +112,7 @@ pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
 pub use search::{Hit, Place};
+pub use usernames::AUDIT_EVERY_SECS;
 
 /// Something the UI should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,6 +156,11 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// Our username no longer leads to this account in the server's log.
+    UsernameProblem {
+        /// The address (`name@domain`).
+        address: String,
+    },
     /// Someone changed this account's devices without any of our devices
     /// (for example, restoring it from the recovery words elsewhere). Contacts
     /// accept the change at `until` unless a device stops it.
@@ -891,6 +897,7 @@ impl Client {
         events.append(&mut self.refresh_manifests(now).await?);
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
+        events.append(&mut self.audit_username(now).await?);
         if self.import_pending_history(now).await? > 0 {
             events.push(Event::HistoryImported);
         }

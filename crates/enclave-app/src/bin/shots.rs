@@ -202,6 +202,7 @@ fn fixture() -> Snapshot {
         meet_done: String::new(),
         timer: 0,
         search: Vec::new(),
+        username_problem: String::new(),
     }
 }
 

@@ -747,6 +747,32 @@ async fn usernames_through_key_transparency() {
         Err(CoreError::Username(UsernameError::Taken))
     ));
 
+    // Self-audit: Alice checks her own name once a day. It still leads to
+    // her, so nothing happens; then the operator quietly rebinds it to Bob's
+    // card and her next check says so.
+    net.advance(enclave_core::client::AUDIT_EVERY_SECS + 1);
+    let ev = alice.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .all(|e| !matches!(e, Event::UsernameProblem { .. })),
+        "{ev:?}"
+    );
+    let mut forged = bob.root().to_vec();
+    forged.extend_from_slice(&bob.card().encode());
+    let now = net.now();
+    assert!(
+        net.with_server(&S1, |s| s.kt_force("alice_w", forged, now))
+            .unwrap()
+    );
+    net.advance(enclave_core::client::AUDIT_EVERY_SECS + 1);
+    let ev = alice.sync().await.unwrap();
+    assert!(
+        ev.contains(&Event::UsernameProblem {
+            address: "alice_w@one.test".into()
+        }),
+        "{ev:?}"
+    );
+
     // A client pinning different witnesses refuses the server's answer.
     let mut strict = policy.clone();
     strict.witnesses.witnesses.truncate(2);

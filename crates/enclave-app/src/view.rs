@@ -163,6 +163,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     }
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
+    ui.set_username_problem(s.username_problem.clone().into());
     ui.set_timer(s.timer as i32);
     ui.set_search_results(ModelRc::from(Rc::new(VecModel::from(
         s.search.iter().map(row).collect::<Vec<_>>(),

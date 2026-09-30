@@ -26,5 +26,5 @@ zeroize = "1"
 
 [dev-dependencies]
 enclave-sim = { path = "../enclave-sim" }
-enclave-server = { path = "../enclave-server" }
+enclave-server = { path = "../enclave-server", features = ["test-hooks"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

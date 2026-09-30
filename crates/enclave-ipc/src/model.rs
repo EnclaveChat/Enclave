@@ -156,6 +156,9 @@ pub struct Snapshot {
     /// Search results (conversation rows with a snippet as the preview),
     /// newest first; empty when not searching.
     pub search: Vec<Row>,
+    /// Our username (`@name@domain`) if the server's log no longer leads to
+    /// us, or empty.
+    pub username_problem: String,
 }
 
 /// UI → vault.
@@ -369,6 +372,7 @@ impl Snapshot {
             .str(&self.meet_done)
             .u32(self.timer);
         put_rows(&mut w, &self.search);
+        w.str(&self.username_problem);
         w.0
     }
 
@@ -461,6 +465,7 @@ impl Snapshot {
             meet_done: r.str()?,
             timer: r.u32()?,
             search: get_rows(&mut r)?,
+            username_problem: r.str()?,
         };
         r.end()?;
         Ok(s)

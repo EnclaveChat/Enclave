@@ -123,6 +123,7 @@ struct Engine {
     /// The recovery sheet is open: only then do the words leave the vault.
     reveal_words: bool,
     search: String,
+    username_problem: String,
     meet_code: String,
     meet_words: String,
     meet_name: String,
@@ -338,6 +339,7 @@ pub async fn run(
         busy: false,
         reveal_words: false,
         search: String::new(),
+        username_problem: String::new(),
         meet_code: String::new(),
         meet_words: String::new(),
         meet_name: String::new(),
@@ -539,6 +541,8 @@ impl Engine {
                 if let Some(c) = self.client.as_mut() {
                     match c.claim_username(name.trim()).await {
                         Ok(_) => {
+                            // A new name replaces one that stopped leading to us.
+                            self.username_problem.clear();
                             self.effect(Effect::UsernameClaimed);
                         }
                         Err(err) => self.username_error = username_error(&err),
@@ -907,6 +911,12 @@ impl Engine {
                     if !events.is_empty() {
                         self.status.clear();
                     }
+                    if let Some(Event::UsernameProblem { address }) = events
+                        .iter()
+                        .find(|e| matches!(e, Event::UsernameProblem { .. }))
+                    {
+                        self.username_problem = format!("@{address}");
+                    }
                     if events.contains(&Event::RemovedFromAccount) {
                         self.status = "This device was removed from your account on another device. It can't get new messages.".into();
                     }
@@ -955,6 +965,7 @@ impl Engine {
             status: self.status.clone(),
             add_error: self.add_error.clone(),
             username_error: self.username_error.clone(),
+            username_problem: self.username_problem.clone(),
             usernames: self.kt.is_some(),
             can_join: matches!(self.mode, Mode::Server { .. }),
             join_code: self.join_code.clone(),
