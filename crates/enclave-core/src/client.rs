@@ -95,6 +95,7 @@ impl Contact {
     }
 }
 
+mod backup;
 mod groups;
 mod link;
 mod messages;
@@ -1000,6 +1001,12 @@ impl Client {
         }
 
         let name = sanitize_name(&name);
+        // A known contact talking from a new device (linked or restored): it
+        // may hold spent tokens, so send it fresh ones once it is set up.
+        let grant_tokens = self
+            .contacts
+            .get(&root)
+            .is_some_and(|c| c.state == ContactState::Accepted);
         let (event, contact) = match self.contacts.get(&root).cloned() {
             Some(mut c) => {
                 // A known contact: a new device of theirs, or both sides added
@@ -1012,7 +1019,7 @@ impl Client {
                 if card.is_some() {
                     c.card = card.clone();
                 }
-                add_tokens(&mut c.tokens, tokens);
+                add_tokens(&mut c.tokens, self.my_share(tokens));
                 let ev = if c.state == ContactState::Pending {
                     c.state = ContactState::Accepted;
                     Some(Event::Accepted { root })
@@ -1065,6 +1072,11 @@ impl Client {
         if auto_accept {
             self.accept_with(&root, introduced_by).await?;
             return Ok(None);
+        }
+        if grant_tokens {
+            let tokens = self.issue_tokens(&root, HELLO_TOKENS, now).await?;
+            self.send_content(&root, &Content::Tokens(tokens), now)
+                .await?;
         }
         if !text.is_empty() {
             let m = self.new_message(&root, hello_id, false, &text, 0, now)?;
@@ -1121,7 +1133,7 @@ impl Client {
                 {
                     c.card = Some(card);
                 }
-                add_tokens(&mut c.tokens, tokens);
+                add_tokens(&mut c.tokens, self.my_share(tokens));
                 if c.state == ContactState::Pending {
                     c.state = ContactState::Accepted;
                     events.push(Event::Accepted { root });
@@ -1136,7 +1148,7 @@ impl Client {
                 }
             }
             Content::Tokens(tokens) => {
-                add_tokens(&mut c.tokens, tokens);
+                add_tokens(&mut c.tokens, self.my_share(tokens));
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
             }
             Content::GroupWelcome(welcome) => {
@@ -1155,7 +1167,7 @@ impl Client {
                 id,
                 expires,
             } => {
-                add_tokens(&mut c.tokens, tokens);
+                add_tokens(&mut c.tokens, self.my_share(tokens));
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 rest = Some(Content::Text {
                     tokens: Vec::new(),
@@ -1270,6 +1282,28 @@ impl Client {
                 &mut self.rng,
             )
             .await
+    }
+
+    /// Tokens arriving in the shared account inbox reach every device of
+    /// ours, but each can be spent once: every device keeps a disjoint share,
+    /// chosen from the token itself and our position in the manifest.
+    fn my_share(&self, tokens: Vec<Token>) -> Vec<Token> {
+        let n = self.manifest.devices.len();
+        let Some(i) = self
+            .manifest
+            .devices
+            .iter()
+            .position(|d| d.id == self.device.id)
+        else {
+            return tokens;
+        };
+        if n <= 1 {
+            return tokens;
+        }
+        tokens
+            .into_iter()
+            .filter(|t| usize::from(t[0]) % n == i)
+            .collect()
     }
 
     fn save_contact(&mut self, c: &Contact) -> Result<()> {

@@ -501,3 +501,83 @@ async fn link_a_second_device() {
     let ev = a2.sync().await.unwrap();
     assert!(ev.iter().any(|e| matches!(e, Event::Message { message, .. } if message.outgoing && message.text == "and from the first")));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_backup_on_a_new_device() {
+    let net = network();
+    let (mut a, words) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    b.send_text(&a.root(), "remember this").await.unwrap();
+    a.sync().await.unwrap();
+    a.send_text(&b.root(), "I will").await.unwrap();
+    b.sync().await.unwrap();
+    let archive = a.export_backup().unwrap();
+    let root = a.root();
+    drop(a); // the phone is lost
+
+    // A wrong phrase fails; the right one restores contacts and history.
+    let wrong = RecoverySecretWords::other();
+    assert!(
+        Client::restore(&wrong, &archive, memory(), Arc::new(net.clone()))
+            .await
+            .is_err()
+    );
+    let mut a = Client::restore(&words.join(" "), &archive, memory(), Arc::new(net.clone()))
+        .await
+        .unwrap();
+    assert_eq!(a.root(), root);
+    assert_eq!(
+        a.devices().len(),
+        1,
+        "the lost device is gone from the manifest"
+    );
+    let history: Vec<String> = a
+        .messages(&b.root())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert!(
+        history.contains(&"remember this".to_string()) && history.contains(&"I will".to_string())
+    );
+
+    // Ben's client accepts the new device silently and sends it fresh tokens.
+    let ev = b.sync().await.unwrap();
+    assert!(ev.iter().all(|e| !matches!(e, Event::Request { .. })));
+    a.sync().await.unwrap();
+    for i in 0..20 {
+        a.send_text(&b.root(), &format!("after restore {i}"))
+            .await
+            .unwrap();
+    }
+    let ev = b.sync().await.unwrap();
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, Event::Message { .. }))
+            .count(),
+        20
+    );
+    b.send_text(&a.root(), "welcome back").await.unwrap();
+    let ev = a.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Message { message, .. } if message.text == "welcome back"))
+    );
+}
+
+struct RecoverySecretWords;
+impl RecoverySecretWords {
+    fn other() -> String {
+        let mut rng = enclave_crypto::rng::HedgedRng::new().unwrap();
+        enclave_proto::recovery::RecoverySecret::generate(&mut rng)
+            .unwrap()
+            .to_words()
+            .unwrap()
+            .join(" ")
+    }
+}

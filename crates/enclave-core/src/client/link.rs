@@ -725,7 +725,7 @@ impl Client {
     }
 
     /// A Hello for an existing contact (sent by a newly linked device).
-    async fn hello_for(&mut self, root: &[u8; 64], now: u64) -> Result<Vec<u8>> {
+    pub(crate) async fn hello_for(&mut self, root: &[u8; 64], now: u64) -> Result<Vec<u8>> {
         let tokens = self.issue_tokens(root, super::HELLO_TOKENS, now).await?;
         Ok(Content::Hello {
             server: self.profile.server,

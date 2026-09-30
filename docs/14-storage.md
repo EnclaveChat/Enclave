@@ -150,3 +150,8 @@ Not implemented yet: an archive header (magic, version, sequence number), server
 2. The PIN attempt limit and wipe behavior for the wrapped root secret are not in PLAN.md.
 3. A shred rewrap writes the keyring and the generation in two separate database transactions after creating the new keystore entry, and destroys the old entry last. A crash between the two writes leaves a keyring sealed under generation `g + 1` while the stored generation is still `g`, so the keyring cannot be opened. The two writes should be one transaction.
 4. The reference backup format has no header or version. PLAN's "Enclave Backup v1" needs one before backups leave the device.
+
+
+## Implementation status: backup and restore (M5 follow-up)
+
+`Client::export_backup` (primary only) seals, under `KMAC256(recovery, "", 256, "enclave/v1/backup/key")`, the profile, the shared account keys, contacts, message history (the `m/…` and `mid/…` namespaces) and settings. It never includes sessions, prekeys, the device keys, the shred keyring or group state. `Client::restore(words, archive, …)` re-derives the root from the words, imports the archive, creates a new device, signs and publishes the next manifest listing only that device as primary, publishes its prekeys, and opens fresh sessions with every contact that shared a card. Disappearing messages are not recoverable (their keys were never backed up) and groups are not restored. Token issuers start fresh, and a contact who sees a known account talk from a new device sends it fresh write tokens, so stale tokens in the archive do no harm. Not implemented: the 72 h pending period for root actions without an existing device (RT-22), backups to a server blob, and a restore test in the UI.
