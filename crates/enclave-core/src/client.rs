@@ -106,6 +106,7 @@ mod link;
 mod meet;
 mod messages;
 mod polls;
+mod push;
 mod search;
 mod usernames;
 

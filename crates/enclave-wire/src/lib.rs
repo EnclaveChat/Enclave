@@ -127,6 +127,9 @@ pub enum Op {
     RegisterTokens = 8,
     /// Key-transparency query.
     KeyTransparency = 9,
+    /// Register (or, empty, remove) the sealed push token for the caller's
+    /// inbox (`docs/10-push.md` §2).
+    PushRegister = 10,
 }
 
 impl Op {
@@ -142,6 +145,7 @@ impl Op {
             7 => Op::Directory,
             8 => Op::RegisterTokens,
             9 => Op::KeyTransparency,
+            10 => Op::PushRegister,
             _ => return Err(WireError::Malformed),
         })
     }

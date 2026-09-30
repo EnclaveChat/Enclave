@@ -2208,6 +2208,7 @@ dependencies = [
  "enclave-kt",
  "enclave-net",
  "enclave-proto",
+ "enclave-push-relay",
  "enclave-rpc",
  "enclave-server",
  "enclave-sim",
@@ -2353,6 +2354,16 @@ dependencies = [
  "hex",
  "subtle",
  "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "enclave-push-relay"
+version = "0.1.0"
+dependencies = [
+ "enclave-crypto",
+ "thiserror 2.0.21",
+ "tokio",
  "zeroize",
 ]
 

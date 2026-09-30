@@ -16,6 +16,7 @@ workspace = true
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-wire = { path = "../enclave-wire" }
 enclave-rpc = { path = "../enclave-rpc" }
+enclave-push-relay = { path = "../enclave-push-relay" }
 enclave-proto = { path = "../enclave-proto" }
 enclave-tokens = { path = "../enclave-tokens" }
 enclave-net = { path = "../enclave-net" }

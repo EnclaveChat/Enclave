@@ -8,6 +8,10 @@
 //! `enclave-server [ADDR] [--domain NAME] [--kt-pins FILE]` also runs a
 //! development key-transparency log (in memory, with in-process witnesses) so
 //! usernames work, and writes what clients must pin to `FILE`.
+//!
+//! `--push-relay HOST:PORT` forwards due push wakes (sealed tokens) to a
+//! development push relay over TCP; production servers reach the relay
+//! through Nym.
 
 use enclave_server::{Config, Server};
 use std::sync::Arc;
@@ -82,6 +86,28 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 s.expire(now);
+            }
+        });
+    }
+    if let Some(relay) = flag("--push-relay") {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let due = server.lock().await.due_wakes(now());
+                if due.is_empty() {
+                    continue;
+                }
+                match tokio::net::TcpStream::connect(&relay).await {
+                    Ok(mut s) => {
+                        for sealed in due {
+                            let _ = s.write_all(&(sealed.len() as u32).to_be_bytes()).await;
+                            let _ = s.write_all(&sealed).await;
+                        }
+                    }
+                    Err(e) => eprintln!("push relay unreachable: {e}"),
+                }
             }
         });
     }

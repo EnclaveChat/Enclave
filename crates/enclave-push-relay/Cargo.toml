@@ -1,0 +1,26 @@
+[package]
+name = "enclave-push-relay"
+description = "The Enclave push relay: opens sealed push tokens, shapes wakes into 60-second windows, and forwards them to UnifiedPush (APNs and FCM later)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-push-relay"
+path = "src/bin/enclave-push-relay.rs"
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+thiserror = "2"
+zeroize = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }

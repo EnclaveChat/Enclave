@@ -90,6 +90,15 @@ A user may turn notifications off entirely. The device then registers no push to
 | Push relay | Platform token and wake timing in 60 s windows; nothing about inbox or server |
 | Apple / Google | Wake timing per device; capsule ciphertext (always present) |
 
+## 7. As implemented (`enclave-push-relay`, server push forwarder)
+
+- **Sealed tokens** (`enclave_push_relay::seal_token`): `u32 epoch ‖ X448 ephemeral (56) ‖ ML-KEM-1024 ct (1,568) ‖ Seal(k, "enclave/v1/wire/ad-push-token" ‖ u32 epoch, platform (1) ‖ u16 len ‖ token padded to 256 ‖ wake_class (1))`, where `k = KMAC256(Combine2(dh, ss; "enclave/v1/net/push-transcript" ‖ eph ‖ ct ‖ relay keys ‖ epoch), "", 256, "enclave/v1/net/push-seal")`. Every sealed token is 1,952 B whatever the platform or token length, and every sealing is fresh. Platforms: UnifiedPush (the token is the endpoint URL), APNs, FCM.
+- **Registration**: `Client::register_push(relay key, platform, token)` sends `Op::PushRegister` (10) for the account inbox, authenticated like token registration by the inbox owner credential; an empty payload removes it (`unregister_push`). The server stores the sealed bytes and can't open them.
+- **Server shaping** (`Server::due_wakes`): a write to an inbox with a sealed token schedules one wake per sealed token per window, released in the **next** 60 s window at a random 0–30 s offset (the spec says the current window; the next one decouples the wake's time from the write's, at the cost of at most 90 s). Each wake is handed out once. The dev server binary forwards due wakes to `--push-relay HOST:PORT` over TCP (production: through Nym).
+- **Relay** (`Relay::wake`): opens the token with any key it holds for that epoch, enforces one wake per *platform token* per window (two sealings of one token count as one), keeps no logs, only the counters `forwarded` and `shaped`, and forgets windows older than two. UnifiedPush delivery is a content-free `POST` (`Content-Length: 0`, `TTL: 60`); only `http://` endpoints for now.
+- Tests: `enclave-push-relay` (sealing, re-randomization, fixed size, wrong key, tampering, window shaping, HTTP delivery) and `push_wakes` in `enclave-core` (two messages in a window give one wake, the server never sees the endpoint, unregistering stops wakes).
+- **Not done**: APNs and FCM delivery (need the project's credentials), TLS for UnifiedPush endpoints, notification keys and capsules (§4), the iOS NSE, group-mailbox wakes, the relay's key rotation and signed key list, dummy wakes, and the app and platform glue (UnifiedPush distributor on Android).
+
 ## Open questions
 
 1. PLAN §10 says Play builds fall back to "FCM content-free wakes plus Poisson dummy wakes (about 1/h)" if the foreground-service type is refused. Who generates the dummy wakes is not stated; this spec has the client's own server generate them through the relay so the relay cannot tell dummy from real.

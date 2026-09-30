@@ -1320,3 +1320,55 @@ async fn polls_in_groups() {
     assert_eq!(m.tally_agrees, Some(false), "Mo counted Jo's last vote");
     assert!(jo.vote(&gid, &id, 0).await.is_err(), "closed");
 }
+
+/// Push (10-push.md): a message to Bob's inbox makes his server schedule
+/// one wake per window for his sealed token, released in the next window;
+/// the relay opens it to Bob's UnifiedPush endpoint. The server never sees
+/// the endpoint, and unregistering stops the wakes.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_wakes() {
+    use enclave_push_relay::{Platform, Relay, RelaySecret};
+    let net = network();
+    let (mut alice, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Alice")
+        .await
+        .unwrap();
+    let (mut bob, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Bob")
+        .await
+        .unwrap();
+    connect(&mut alice, &mut bob).await;
+    let mut rng = enclave_crypto::rng::HedgedRng::new().unwrap();
+    let key = RelaySecret::generate(1, &mut rng).unwrap();
+    let public = key.public().clone();
+    let mut relay = Relay::new(vec![key]);
+    let endpoint = b"http://up.example/bob-phone";
+    bob.register_push(&public, Platform::UnifiedPush, endpoint)
+        .await
+        .unwrap();
+    let due = |net: &LocalTransport| {
+        let now = net.now();
+        net.with_server(&S2, |s| s.due_wakes(now)).unwrap()
+    };
+    assert!(due(&net).is_empty());
+
+    alice.send_text(&bob.root(), "one").await.unwrap();
+    alice.send_text(&bob.root(), "two").await.unwrap();
+    assert!(due(&net).is_empty(), "not before the next window");
+    net.advance(enclave_server::PUSH_WINDOW_SECS + enclave_server::PUSH_JITTER_SECS + 1);
+    let wakes = due(&net);
+    assert_eq!(wakes.len(), 1, "one wake for two messages in a window");
+    assert!(
+        !wakes[0].windows(endpoint.len()).any(|w| w == endpoint),
+        "sealed"
+    );
+    let d = relay.wake(&wakes[0], net.now()).unwrap();
+    assert_eq!(
+        (d.platform, d.token.as_slice()),
+        (Platform::UnifiedPush, &endpoint[..])
+    );
+    assert!(due(&net).is_empty(), "sent once");
+
+    bob.unregister_push().await.unwrap();
+    alice.send_text(&bob.root(), "three").await.unwrap();
+    net.advance(3 * enclave_server::PUSH_WINDOW_SECS);
+    assert!(due(&net).is_empty());
+}

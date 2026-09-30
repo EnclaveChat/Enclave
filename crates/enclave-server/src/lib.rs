@@ -33,6 +33,21 @@ use enclave_tokens::{PowProof, token_hash};
 use enclave_wire::{ENVELOPE_LEN, Op, RequestHeader};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+/// Width of a push window.
+pub const PUSH_WINDOW_SECS: u64 = 60;
+/// Latest offset of a wake into its window.
+pub const PUSH_JITTER_SECS: u64 = 30;
+/// Largest sealed push token accepted.
+const MAX_PUSH_TOKEN: usize = 4096;
+
+/// A scheduled wake.
+struct Wake {
+    window: u64,
+    release: u64,
+    sealed: Vec<u8>,
+    sent: bool,
+}
+
 /// Server policy.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -125,6 +140,10 @@ pub struct Server {
     blobs: HashMap<[u8; 32], (Vec<u8>, u64)>,
     uploads: HashMap<(u8, [u8; 32]), Upload>,
     kt: Option<KtService>,
+    /// Sealed push tokens by inbox (`docs/10-push.md`).
+    push: HashMap<[u8; 32], Vec<u8>>,
+    /// Scheduled wakes by sealed-token hash.
+    wakes: HashMap<[u8; 32], Wake>,
     /// A second log shown instead of `kt` (test hook, RT-04).
     #[cfg(feature = "test-hooks")]
     kt_fork: Option<KtService>,
@@ -172,6 +191,8 @@ impl Server {
             blobs: HashMap::new(),
             uploads: HashMap::new(),
             kt: None,
+            push: HashMap::new(),
+            wakes: HashMap::new(),
             #[cfg(feature = "test-hooks")]
             kt_fork: None,
             #[cfg(feature = "test-hooks")]
@@ -345,6 +366,7 @@ impl Server {
                 Err(_) => (Status::Malformed, 0, none, Reply::Empty),
             },
             Op::KeyTransparency => (Status::NotFound, 0, none, Reply::Empty),
+            Op::PushRegister => (self.push_register(h, env), 0, none, Reply::Empty),
         }
     }
 
@@ -402,6 +424,73 @@ impl Server {
         Status::Ok
     }
 
+    /// Set or clear the sealed push token of an inbox (its owner only).
+    /// The server can't open it: only the push relay can.
+    fn push_register(&mut self, h: &RequestHeader, env: &[u8]) -> Status {
+        let Some(ib) = self.inboxes.get(&h.mailbox) else {
+            return Status::NotFound;
+        };
+        if ib.owner != api::credential_hash(&h.token) || ib.group {
+            return Status::Denied;
+        }
+        let Ok(sealed) = api::unframe(env) else {
+            return Status::Malformed;
+        };
+        if sealed.is_empty() {
+            self.push.remove(&h.mailbox);
+        } else if sealed.len() > MAX_PUSH_TOKEN {
+            return Status::Malformed;
+        } else {
+            self.push.insert(h.mailbox, sealed.to_vec());
+        }
+        Status::Ok
+    }
+
+    /// A write reached `mailbox`: schedule its wake, at most one per sealed
+    /// token per window. The wake goes out in the *next* 60 s window at a
+    /// random 0–30 s offset, so its time says little about the write's.
+    fn schedule_wake(&mut self, mailbox: &[u8; 32], now: u64) {
+        let Some(sealed) = self.push.get(mailbox) else {
+            return;
+        };
+        let id = sha3_512(sealed);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&id[..32]);
+        let window = now / PUSH_WINDOW_SECS + 1;
+        if self.wakes.get(&key).is_some_and(|w| w.window >= window) {
+            return;
+        }
+        let jitter = self
+            .rng
+            .array::<1>("server/push-jitter")
+            .map(|b| u64::from(b[0]) % (PUSH_JITTER_SECS + 1))
+            .unwrap_or(0);
+        self.wakes.insert(
+            key,
+            Wake {
+                window,
+                release: window * PUSH_WINDOW_SECS + jitter,
+                sealed: sealed.clone(),
+                sent: false,
+            },
+        );
+    }
+
+    /// Sealed tokens whose wake is due, for the push relay. Each is
+    /// returned once.
+    pub fn due_wakes(&mut self, now: u64) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for w in self.wakes.values_mut() {
+            if !w.sent && w.release <= now {
+                w.sent = true;
+                out.push(w.sealed.clone());
+            }
+        }
+        self.wakes
+            .retain(|_, w| !w.sent || w.window * PUSH_WINDOW_SECS + 2 * PUSH_WINDOW_SECS > now);
+        out
+    }
+
     fn store(&mut self, mailbox: &[u8; 32], env: &[u8], now: u64) -> Status {
         let quota = self.cfg.inbox_quota;
         let Some(ib) = self.inboxes.get_mut(mailbox) else {
@@ -422,6 +511,7 @@ impl Server {
         ib.messages.insert(seq, (env.to_vec(), now));
         self.stats.stored += 1;
         self.stored_lengths.insert(env.len());
+        self.schedule_wake(mailbox, now);
         Status::Ok
     }
 

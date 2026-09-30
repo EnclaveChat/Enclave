@@ -19,6 +19,7 @@ members = [
     "crates/enclave-netd",
     "crates/enclave-media",
     "crates/enclave-mediad",
+    "crates/enclave-push-relay",
     "crates/enclave-design",
     "crates/enclave-app",
     "crates/enclave-calls",
