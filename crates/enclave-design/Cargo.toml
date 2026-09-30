@@ -1,0 +1,17 @@
+[package]
+name = "enclave-design"
+description = "Enclave design tokens: parses design/tokens.toml, checks WCAG contrast, generates Slint globals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+toml = "0.8"
+thiserror = "2"

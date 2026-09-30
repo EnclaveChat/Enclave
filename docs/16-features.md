@@ -1,0 +1,71 @@
+# Feature-Parity Matrix
+
+Status: Draft (M0) · Normative
+
+Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes which features ship in which milestone and the privacy rule each must follow. A feature marked for a milestone is part of that milestone's exit gate (M9: "parity rows up to M9 complete").
+
+## 1. Matrix
+
+| Feature | Milestone | Privacy rule | Spec |
+|---|---|---|---|
+| 1:1 text | M6 | Constant-size units | `05-ratchet.md`, `08-envelope.md` |
+| Formatting: bold, italic, strike, mono, spoiler | M6 | Inside content only | `08-envelope.md` §5.6 |
+| Emoji (Noto Color Emoji), reactions | M6 | Reactions ride in `Piggyback` | `08-envelope.md` §5.6 |
+| Replies, forwarding (labelled "Forwarded"), mentions | M6 / M7 | Message IDs are local-only hashes | `02b-key-schedule.md` §7 |
+| Disappearing messages (timer starts on read, per device) | M6 | Crypto-shred; monotonic timers | `14-storage.md` §3 |
+| View-once | M9 | Shredded after view; screenshots still possible (copy says so) | `14-storage.md` §3 |
+| Images | M6 | Re-encoded, EXIF/GPS stripped, sandboxed decode | `15-client.md` §5 |
+| Voice notes | M6 | Opus, sandboxed decode | `15-client.md` §5 |
+| Video | M9 | AV1 + Opus, own container | `15-client.md` §5 |
+| Files (up to 100 MiB) | M9 | Never previewed; bucketed | `08-envelope.md` §9 |
+| Typing indicators (**off by default**) | M6 | Rides in `Piggyback`; never its own unit | `08-envelope.md` §5.6 |
+| Read receipts (optional, batched) | M6 | Batched in `Piggyback` | `05-ratchet.md` §12 |
+| Encrypted profile (name, photo, about) | M6 | Shared only inside sessions | `05-ratchet.md` §12 |
+| Usernames | M6 | Optional; KT-backed; "public, like an email address" | `12-servers.md` §3.3 |
+| QR codes and invite links | M6 | Secret in fragment; limited use | `03-identity.md` §9 |
+| Note to self | M6 | Uses self-copy path | `06-multidevice.md` §4 |
+| Archive, pin, mute, chat folders | M6 / M9 | Local and synced between own devices | `06-multidevice.md` §5 |
+| Block | M6 | No new tokens for the contact | `09-transport.md` §3.2 |
+| Message requests | M6 | Text only; no auto-download | `09-transport.md` §4 |
+| Spam reports | M9 | Voluntary plaintext | `13-operators.md` §2 |
+| Security codes, change alerts | M5 / M6 | Root-only code | `03-identity.md` §6 |
+| Linked devices | M5 / M6 | Hardened linking | `03-identity.md` §4 |
+| Backups | M5 / M6 | No ratchet state | `14-storage.md` §4 |
+| Groups: admins, announcement-only, invite links, approval | M7 | MAC vectors; approval on by default | `07-groups.md` |
+| 1:1 voice and video calls | M8 | Relay by default; CBR shaping | `11-calls.md` |
+| Group voice and video calls | M8 | SFU forwards SFrame only | `11-calls.md` §8 |
+| Call links, raise hand | M8 | Capability URL | `11-calls.md` §8 |
+| Desktop screen share | M8 | Inside SFrame | `11-calls.md` §8 |
+| Edit (24 h, advisory) | M9 | Recipient may keep the original; UI says "Edited" | — |
+| Delete for everyone (advisory) | M9 | Recipient's client deletes if it cooperates; UI says so | — |
+| Polls | M9 | Tally hash authenticated by creator | `07-groups.md` §7.5 |
+| Pinned messages | M9 | Group state or local | `07-groups.md` §7 |
+| Stickers (encrypted packs) | M9 | Packs are blobs keyed by pack secret | `08-envelope.md` §9 |
+| GIFs (opt-in, via Tor) | M9 | Sender-side fetch through Tor only | `15-client.md` §5 |
+| Contact sharing | M9 | Shares root pin and QR fields | `03-identity.md` §9 |
+| Location (coordinates only) | M9 | No map tiles fetched automatically | — |
+| Search | M9 | Blinded local index | `14-storage.md` §2 |
+| Media gallery | M9 | Local | — |
+| Device transfer | M9 | LAN or bulk blobs; no ratchet state | `03-identity.md` §4.3 |
+| Social recovery | M9 | SLIP-0039 3-of-5, in-person release, 72 h | `03-identity.md` §8.3 |
+| Stories (24 h) | M11 | Same delivery as group messages to a per-user audience | — |
+| Mobile screen share | M11 | Inside SFrame | `11-calls.md` |
+| On-device voice transcription (optional download) | M11 | Local model only; nothing leaves the device | `18-a11y-i18n.md` |
+| Payments | Not planned | — | — |
+| Public group directory | Not planned | — | — |
+
+## 2. Features explicitly excluded
+
+| Feature | Reason |
+|---|---|
+| Phone-number or email discovery | No phone numbers (fixed decision) |
+| Cloud message history on servers | Servers keep ciphertext for at most 30 days |
+| Server-side link previews | Would reveal links to a server |
+| Web client | Fixed decision |
+| Automatic contact import | Would require identifiers |
+| Analytics or telemetry | `19-ops.md` §3 |
+
+## Open questions
+
+1. Stories (M11) need an audience model (all contacts, a list, or a group). The delivery design is not in PLAN.md.
+2. "Edit" and "Delete for everyone" are advisory; the exact UI copy for the advisory nature is to be written with `17-design.md` §7.

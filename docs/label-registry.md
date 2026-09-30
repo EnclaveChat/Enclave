@@ -1,0 +1,325 @@
+# Label Registry
+
+Status: Draft (M0, reconciled with the M1–M5 code) · Normative
+
+Source: PLAN.md §2.1 ("every call has a unique label from `label-registry.md`; CI rejects duplicate labels") and §21 ("label-registry uniqueness"). This file is the single source of truth for every domain-separation string in Enclave. Derivations using these labels are in `02b-key-schedule.md`. Where this file and the code disagree, the code is normative and this file is corrected.
+
+## 1. Rules
+
+1. Every label is ASCII, starts with the prefix `enclave/v1/`, and has the form `enclave/v1/<area>/<name>` with exactly four `/`-separated segments. `<area>` and `<name>` use lowercase letters, digits, and `-`.
+2. Every KMAC256 customization string, every raw hash prefix, and every signature context string in the Rust sources that starts with `enclave/v1/` MUST appear in this registry.
+3. A label is used at one kind of call site (the "Kind" column). Where one label has more than one call site of the same kind, the inputs are made disjoint and the row says how.
+4. Labels are never reused with a different meaning. A draft label that the implementation replaced is kept in §4 with status "Retired" and its replacement; it MUST NOT be reused.
+5. CI (`cargo xtask labels`) extracts every string literal that starts with `enclave/v1/` from the Rust sources under `crates/` and fails if:
+   - a literal is missing from this file (the checker splits this file on backticks, whitespace and `|`, and collects every token that starts with `enclave/v1/`; the bare prefix `enclave/v1/` used by the uniqueness test in `enclave-crypto` is registered by rule 1 above); or
+   - the same label is defined by more than one `const` in code.
+
+   Uniqueness inside each crate is also checked by unit tests (`enclave-crypto` `labels::tests`, `enclave-proto` `labels::tests`, which also checks that the proto labels are disjoint from the crypto labels). Checking that each call site matches the "Kind" column is not automated yet; reviewers check it.
+6. A new label in §2.1 (crypto) requires an RFC; any other new label needs a reviewed PR that updates this file and `02b-key-schedule.md` together.
+
+Kinds:
+
+| Kind | Meaning |
+|---|---|
+| KMAC | Customization string `S` of `KMAC256(K, X, L, S)`. "Output" is `L` in bits. |
+| XOF | Customization string `S` of KMACXOF256 (SP 800-185 `right_encode(0)`). "Output" is whatever the caller reads. |
+| HASH | Raw ASCII prefix inside a SHAKE256 input: `SHAKE256(label ‖ …)`. No length prefix. "Output" is the hash output length in bits. |
+| CTX-C | The `ctx` argument of a composite (Ed448 + ML-DSA-87) signature: it goes into the message representative `M'` (`02-cryptography.md` §7). |
+| CTX-M | The ML-DSA-87 context string (FIPS 204 `ctx`) used inside every composite signature. |
+| CTX-R | The FIPS 205 `ctx` of an SLH-DSA-SHAKE-256s root signature. |
+| AD | Prefix at the start of an EnclaveSeal associated-data string. Used only by reserved rows; implemented seals use the ADs listed in §4. |
+| TR | First element of a transcript. Used only by reserved rows. |
+
+Status values: **Implemented** (used by code today), **Reserved (not yet implemented)** (specified for a later milestone, not in code), **Retired** (a draft label replaced by the implementation; never reuse).
+
+## 2. Implemented labels
+
+Every label in this section appears in the code. "Where" names the crate, file and function.
+
+### 2.1 Crypto (`enclave-crypto`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/seal/nonce` | KMAC | 256 | `seal.rs` `hedged_nonce`, `compact_nonce` | EnclaveSeal nonce `N`. The hedged form absorbs `frame(r) ‖ frame(AD) ‖ SHA3-512(P)`; the compact form absorbs `frame("compact") ‖ frame(nonce_material) ‖ frame(AD)`. The first framed field has length 32 in the hedged form and 7 in the compact form, so the two input sets are disjoint. |
+| `enclave/v1/seal/keys` | KMAC | 1088 (136 B) | `seal.rs` `subkeys` | EnclaveSeal subkeys `k_x ‖ k_a ‖ k_m ‖ n_x ‖ iv_a` (32 + 32 + 32 + 24 + 16) |
+| `enclave/v1/seal/tag` | KMAC | 256 | `seal.rs` `tag` | EnclaveSeal tag `T` |
+| `enclave/v1/kem/extract` | KMAC | 512 | `kem.rs` `combine` (`Suite::ThreeKem`) | EnclaveCombine extract `prk`, 3-KEM suite |
+| `enclave/v1/kem/combine` | KMAC | 512 | `kem.rs` `combine` (`Suite::ThreeKem`) | EnclaveCombine output, 3-KEM suite |
+| `enclave/v1/kem2/extract` | KMAC | 512 | `kem.rs` `combine` (`Suite::TwoKem`) | EnclaveCombine extract `prk`, 2-KEM suite |
+| `enclave/v1/kem2/combine` | KMAC | 512 | `kem.rs` `combine` (`Suite::TwoKem`) | EnclaveCombine output, 2-KEM suite |
+| `enclave/v1/rng/hedge` | XOF | caller's length | `rng.rs` `HedgedRng::fill` | Hedged RNG output |
+| `enclave/v1/root/keygen` | KMAC | 768 | `sig.rs` `RootSigningKey::from_recovery_secret` | SLH-DSA root seeds `SK.seed ‖ SK.prf ‖ PK.seed` from the recovery secret |
+| `enclave/v1/sig/composite` | CTX-M | — (24 B string) | `sig.rs` `CompositeSigningKey::sign`, `CompositePublic::verify`; `tests/differential.rs` | ML-DSA-87 context string inside every composite signature |
+| `enclave/v1/store/record` | KMAC | 256 | `seal.rs` `record_key` (called by `enclave-store` `Store::put`, `open_record`) | Per-record storage key |
+| `enclave/v1/backup/key` | KMAC | 256 | `enclave-store` `backup.rs` `backup_key` | Backup archive key from the recovery secret |
+| `enclave/v1/fp/root` | KMAC | 512 | `hash.rs` `root_fingerprint` | First step of the security-code hash chain: `KMAC256(root_pk, "", 512, label)` |
+
+### 2.2 Protocol (`enclave-proto`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/ctx/manifest` | CTX-R | — | `manifest.rs` `Manifest::sign`, `SignedManifest::verify` | Root signature on the account manifest |
+| `enclave/v1/ctx/signed-prekey` | CTX-C | — | `bundle.rs` `SignedPrekey::verify`, `PrekeyStore::publish` | Signed prekey (X448 + ML-KEM-1024) |
+| `enclave/v1/ctx/opk-batch` | CTX-C | — | `bundle.rs` `OpkBatchHeader::verify`, `PrekeyStore::publish` | One-time-prekey batch header (Merkle root) |
+| `enclave/v1/ctx/last-resort` | CTX-C | — | `bundle.rs` `LastResortPrekey::verify`, `PrekeyStore::publish` | Last-resort ML-KEM-1024 prekey |
+| `enclave/v1/ctx/signed-msg` | CTX-C | — | `labels.rs` only (`CTX_SIGNED_MESSAGE`); no call site yet | On-the-record message signature. Defined, not yet used: On-the-record message signatures are not implemented (`05-ratchet.md` §9). |
+| `enclave/v1/ctx/eqxdh-transcript` | CTX-C | — | `eqxdh.rs` `initiate`, `verify_transcript_sig` | On-the-record initiator transcript signature |
+| `enclave/v1/eqxdh/identity` | KMAC | 256 | `eqxdh.rs` `stage1_key` (through `seal::derive_key`) | Stage-1 key `k_id` that seals the initiator identity |
+| `enclave/v1/ratchet/init-rk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial root key `RK0` from `SK` |
+| `enclave/v1/ratchet/init-hk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial header keys; two calls with inputs `frame("a")` (HKA) and `frame("b")` (NHKB) |
+| `enclave/v1/ratchet/init-pq` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial PQ roots; two calls with inputs `frame("a2b")` and `frame("b2a")` |
+| `enclave/v1/ratchet/rk` | KMAC | 768 | `ratchet.rs` `kdf_rk` | DH root step `RK' ‖ CK ‖ NHK` |
+| `enclave/v1/ratchet/ck` | KMAC | 512 | `ratchet.rs` `kdf_ck` | Chain step `CK' ‖ mk_DR` |
+| `enclave/v1/ratchet/tag` | KMAC | 128 | `ratchet.rs` `lookup_tag` | 16 B lookup tag `KMAC256(HK, u32(n), 128, label)` |
+| `enclave/v1/ratchet/msg` | KMAC | 256 | `ratchet.rs` `Session::seal`, `Session::open` | Message key `mk` from `mk_DR` and the PQ key |
+| `enclave/v1/ratchet/wrap` | KMAC | 256 | `ratchet.rs` `Session::seal`, `Session::open` | Body-key wrap pad `KMAC(mk, frame(body_hash))` |
+| `enclave/v1/ratchet/pq-slot` | KMAC | 256 | `ratchet.rs` `build_pq_slot`, `process_pq_slot` | PQ-slot seal key from `mk_DR` |
+| `enclave/v1/pq/step` | KMAC | 256 | `ratchet.rs` `PqState::step` | PQ root step (ML-KEM, and McEliece when braided) |
+| `enclave/v1/pq/key` | KMAC | 256 | `ratchet.rs` `key_as_sender`, `key_as_receiver` | Per-message PQ key from the two directional PQ roots |
+| `enclave/v1/prekey/merkle` | HASH | 256 | `bundle.rs` `merkle_leaf`, `merkle_node`, `merkle_empty` | One-time-prekey Merkle tree. The label follows a type byte (0 leaf, 1 node, 2 empty leaf), so the three input sets are disjoint. |
+| `enclave/v1/bond/psk` | KMAC | 256 | `eqxdh.rs` `bond_psk` | In-person bond PSK |
+| `enclave/v1/bond/seal-words` | KMAC | 256 (48 bits used) | `eqxdh.rs` `seal_words` | Three Seal words after an in-person scan |
+
+### 2.3 Sealed requests and server API (`enclave-rpc`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/rpc/request` | KMAC | 256 | `lib.rs` `derive` | Request seal key `k_req` |
+| `enclave/v1/rpc/reply` | KMAC | 256 | `lib.rs` `derive` | Reply seal key `k_reply` |
+| `enclave/v1/rpc/read-credential` | KMAC | 256 (first 192 bits used) | `api.rs` `read_credential` | 24 B inbox read credential from the owner secret |
+| `enclave/v1/rpc/credential-hash` | KMAC | 256 | `api.rs` `credential_hash` | Server-stored hash of an owner secret or read credential |
+
+### 2.4 Tokens and proof of work (`enclave-tokens`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/tokens/write` | KMAC | 256 | `lib.rs` `write_token` | Single-use write token `t_i` |
+| `enclave/v1/tokens/hash` | KMAC | 256 | `lib.rs` `token_hash` | Server-stored token hash |
+| `enclave/v1/tokens/pow` | HASH | 32 | `lib.rs` `accepted` | Equi-X effort check: `SHAKE256(label ‖ challenge ‖ solution)`, first 4 B |
+
+### 2.5 Server (`enclave-server`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/dir/manifest` | HASH | 256 | `lib.rs` `manifest_key` | Directory key of a manifest: `SHAKE256(label ‖ root_pk)` |
+
+### 2.6 Key transparency (`enclave-kt`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/kt/akd` | HASH | 256 | `config.rs` `EnclaveKtConfig::hash` | Domain prefix of every akd hash |
+| `enclave/v1/kt/head` | CTX-C | — | `head.rs` `SignedHead::sign`, `verify_server` | Server tree-head signature |
+| `enclave/v1/kt/cosign` | CTX-C | — | `head.rs` `WitnessPolicy::check`; `log.rs` `Witness::cosign` | Witness cosignature |
+| `enclave/v1/kt/gossip` | HASH | 256 | `head.rs` `TreeHead::gossip_digest` | 32 B head digest for gossip |
+
+### 2.7 Local storage (`enclave-store`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/store/master` | KMAC | 256 | `store.rs` `derive_master` | Profile master key |
+| `enclave/v1/store/index` | KMAC | 256 | `store.rs` `Store::create`, `Store::open` | Index (key-blinding) key from the master key |
+| `enclave/v1/store/namespace` | KMAC | 256 (first 64 bits used) | `store.rs` `Store::ns_tag` | 8 B namespace tag at the front of every blinded key |
+| `enclave/v1/store/blind` | KMAC | 256 | `store.rs` `Store::blind` | 32 B blinded record key |
+
+Total: 50 implemented labels.
+
+## 3. Reserved labels (not yet implemented)
+
+These labels belong to features that are specified but not in code. They are reserved; the code MUST use exactly these strings when the feature is built, unless an RFC changes this file first.
+
+### 3.1 Identity, linking, conversations
+
+| Label | Kind | Output | Purpose | Defined in |
+|---|---|---|---|---|
+| `enclave/v1/proto/root-hash` | HASH | 256 | `root_hash` of a root public key | 02b §2.1 |
+| `enclave/v1/proto/migration` | CTX-R | — | `Migration{old, new}` record | 03 §8.2 |
+| `enclave/v1/proto/pending-root` | CTX-R | — | Pending root action with `not_before` | 03 §8.1 |
+| `enclave/v1/proto/moved` | CTX-R | — | `Moved` record for server migration | 12 §4 |
+| `enclave/v1/proto/tombstone` | CTX-R | — | Account-deletion KT tombstone | 03 §8.5 |
+| `enclave/v1/proto/veto` | CTX-C | — | Device approval or veto of a manifest update | 03 §3.3, §8.1 |
+| `enclave/v1/proto/conv-id` | HASH | 256 | 1:1 conversation ID | 02b §7 |
+| `enclave/v1/proto/msg-id` | HASH | 256 (first 128 used) | 1:1 message ID | 02b §7 |
+| `enclave/v1/proto/contact-art` | KMAC | 256 | Seed for key-derived contact art | 02b §4.3 |
+| `enclave/v1/proto/bond-reroot` | KMAC | 256 | Mix a new bond PSK into an existing session | 02b §6 |
+| `enclave/v1/proto/invite-psk` | KMAC | 256 | Normalized one-way invite PSK | 02b §5 |
+| `enclave/v1/proto/invite-cap` | KMAC | 256 | Request-inbox write capability from an invite secret | 02b §2.7 |
+| `enclave/v1/proto/link-psk` | KMAC | 256 | Normalized device-link PSK | 02b §5 |
+| `enclave/v1/proto/link-transcript` | TR | — | Device-link transcript prefix | 02b §11 |
+| `enclave/v1/proto/link-keys` | KMAC | 512 | Link channel keys `k_p2n ‖ k_n2p` | 02b §11 |
+| `enclave/v1/proto/link-phrase` | KMAC | 256 (33 bits used) | Three-word link phrase | 02b §11 |
+| `enclave/v1/proto/link-cap` | KMAC | 256 | Link rendezvous mailbox capability | 02b §11 |
+| `enclave/v1/proto/notify-key` | KMAC | 256 | Daily notification key chain step | 10 §4 |
+
+### 3.2 Groups
+
+| Label | Kind | Output | Purpose | Defined in |
+|---|---|---|---|---|
+| `enclave/v1/proto/grp-chain` | KMAC | 512 | Group sender chain `cs' ‖ gmk` | 07 §2 |
+| `enclave/v1/proto/grp-mac` | KMAC | 128 | MAC-vector entry | 07 §3 |
+| `enclave/v1/proto/grp-admin-mac` | KMAC | 128 | Admin MAC-vector entry on state updates | 07 §7 |
+| `enclave/v1/proto/grp-export` | KMAC | 256 | Pairwise exporter key `K_exp` for rekey | 07 §5 |
+| `enclave/v1/proto/grp-rekey-pad` | KMAC | 512 | Pad that encrypts a rekey entry | 07 §5 |
+| `enclave/v1/proto/grp-rekey-check` | KMAC | 96 | Rekey entry authenticator | 07 §5 |
+| `enclave/v1/proto/grp-bucket` | KMAC | 256 | Epoch bucket key | 07 §5 |
+| `enclave/v1/proto/grp-bucket-index` | KMAC | 256 (16 bits used) | Recipient bucket index | 07 §5 |
+| `enclave/v1/proto/grp-header` | KMAC | 256 | Group routing-header seal key | 07 §4 |
+| `enclave/v1/proto/grp-rekey-outer` | KMAC | 256 | Outer seal key of rekey units | 07 §5 |
+| `enclave/v1/proto/grp-notify` | KMAC | 256 | Daily group notification key | 10 §4 |
+| `enclave/v1/proto/grp-state` | HASH | 256 | Group state hash chain | 07 §7 |
+| `enclave/v1/proto/grp-msg-id` | HASH | 256 (first 64 used) | Group message ID for the causal frontier | 07 §7 |
+| `enclave/v1/proto/grp-signed-msg` | CTX-C | — | On-the-record group message signature | 07 §3 |
+| `enclave/v1/proto/grp-admin-sig` | CTX-C | — | On-the-record admin update signature | 07 §7 |
+| `enclave/v1/proto/grp-invite-cap` | KMAC | 256 | Group invite capability | 07 §9 |
+| `enclave/v1/proto/poll-tally` | CTX-C | — | Poll creator's tally signature (On-the-record groups) | 07 §7 |
+| `enclave/v1/proto/poll-tally-hash` | HASH | 512 | Poll-close tally hash | 07 §7 |
+| `enclave/v1/net/grp-mailbox` | KMAC | 256 | Daily group-mailbox address | 07 §4 |
+| `enclave/v1/net/grp-rekey-mailbox` | KMAC | 256 | Daily per-bucket rekey sub-mailbox address | 07 §5.5 |
+| `enclave/v1/net/grp-write-key` | KMAC | 256 | Group write-token key | 07 §4 |
+| `enclave/v1/net/grp-write-token` | KMAC | 256 | Epoch MAC write token for one address | 07 §4 |
+| `enclave/v1/net/grp-read-key` | KMAC | 256 | Group read-credential key | 07 §4 |
+| `enclave/v1/net/grp-read-cred` | KMAC | 256 | Group read credential for one address | 07 §4 |
+
+### 3.3 Transport, push, servers
+
+| Label | Kind | Output | Purpose | Defined in |
+|---|---|---|---|---|
+| `enclave/v1/net/server-id` | HASH | 256 | Server identifier from its descriptor key | 12 §4 |
+| `enclave/v1/net/server-descriptor` | CTX-C | — | Server descriptor self-signature | 12 §4 |
+| `enclave/v1/net/replay-id` | HASH | 256 | Server replay-cache key for sealed requests | 09 §2 |
+| `enclave/v1/net/inbox-addr` | KMAC | 256 | Weekly account-inbox address | 09 §3 |
+| `enclave/v1/net/inbox-read-key` | KMAC | 256 | Inbox read key from the inbox seed | 09 §3 |
+| `enclave/v1/net/read-cred` | KMAC | 256 | Daily, address-bound read credential | 09 §3 |
+| `enclave/v1/net/token-key` | KMAC | 256 | Per-contact write-token key derived from the inbox seed | 09 §3 |
+| `enclave/v1/net/cap-hash` | KMAC | 256 | Server-stored invite-capability hash | 09 §4 |
+| `enclave/v1/net/loop-probe` | KMAC | 256 | Self-loop probe identifiers | 09 §6.4 |
+| `enclave/v1/net/push-transcript` | TR | — | Push-token sealing transcript prefix | 10 §2 |
+| `enclave/v1/net/push-seal` | KMAC | 256 | Push-token seal key | 10 §2 |
+| `enclave/v1/wire/chunk-key` | KMAC | 256 | Blob chunk seal key | 08 §9 |
+| `enclave/v1/wire/chunk-id` | KMAC | 256 | Blob chunk ID | 08 §9 |
+| `enclave/v1/wire/ad-capsule` | AD | — | Notification capsule AD prefix | 08 §5.4 |
+| `enclave/v1/wire/ad-grp-header` | AD | — | Group routing-header AD prefix | 08 §7 |
+| `enclave/v1/wire/ad-grp-body` | AD | — | Group body AD prefix | 08 §7 |
+| `enclave/v1/wire/ad-rekey` | AD | — | Rekey unit outer AD prefix | 08 §8 |
+| `enclave/v1/wire/ad-rekey-common` | AD | — | Rekey common-blob AD prefix | 08 §8 |
+| `enclave/v1/wire/ad-chunk` | AD | — | Blob chunk AD prefix | 08 §9 |
+| `enclave/v1/wire/ad-link` | AD | — | Device-link channel AD prefix | 03 §4 |
+| `enclave/v1/wire/ad-push-token` | AD | — | Sealed push token AD prefix | 10 §2 |
+
+### 3.4 KT, releases, storage, calls
+
+| Label | Kind | Output | Purpose | Defined in |
+|---|---|---|---|---|
+| `enclave/v1/kt/leaf` | HASH | 512 | KT leaf value commitment | 12 §3 |
+| `enclave/v1/kt/witness-descriptor` | CTX-C | — | Witness descriptor self-signature | 12 §3.2 |
+| `enclave/v1/update/release` | CTX-R | — | Maintainer co-signature on a release | 19 §1 |
+| `enclave/v1/update/server-list` | CTX-R | — | Foundation's signed server, relay and witness list | 12 §4 |
+| `enclave/v1/store/search-key` | KMAC | 256 | Search-token key | 14 §2 |
+| `enclave/v1/store/search-token` | KMAC | 256 (first 128 used) | Blinded full-text search token | 14 §2 |
+| `enclave/v1/store/root-wrap` | KMAC | 256 | Root (recovery-secret) wrap key: hardware + PIN | 14 §1.2 |
+| `enclave/v1/store/backup-blob-id` | KMAC | 256 | Blob secret for server-stored backup archives | 14 §4 |
+| `enclave/v1/store/ad-root` | AD | — | Wrapped recovery secret AD prefix | 14 §1.2 |
+| `enclave/v1/calls/transcript` | TR | — | Per-call transcript prefix | 11 §2 |
+| `enclave/v1/calls/secret` | KMAC | 512 | Call secret | 11 §2 |
+| `enclave/v1/calls/sframe-base` | KMAC | 256 | Per-sender SFrame base key | 11 §5 |
+| `enclave/v1/calls/sframe-ratchet` | KMAC | 256 | 5 s base-key ratchet step | 11 §5 |
+| `enclave/v1/calls/sframe-key` | KMAC | 512 | SFrame key and salt per KID | 11 §5 |
+| `enclave/v1/calls/check-words` | KMAC | 256 (22 bits used) | 2-word call check | 11 §9 |
+| `enclave/v1/calls/direct-psk` | KMAC | 256 | WireGuard PSK in direct mode | 11 §4 |
+| `enclave/v1/calls/ticket-transcript` | TR | — | Relay-ticket transcript prefix | 11 §3 |
+| `enclave/v1/calls/ticket-secret` | KMAC | 256 | Relay-ticket secret | 11 §3 |
+| `enclave/v1/calls/ticket-seal` | KMAC | 256 | Seal key for the relay-ticket request body | 11 §3.3 |
+| `enclave/v1/calls/wg-psk` | KMAC | 256 | WireGuard PSK for one 120 s period | 11 §3 |
+| `enclave/v1/calls/link-cap` | KMAC | 256 | Call-link capability | 11 §8 |
+| `enclave/v1/calls/relay-descriptor` | CTX-C | — | Relay descriptor (declares operator family) | 12 §5 |
+| `enclave/v1/calls/ad-ticket` | AD | — | Relay-ticket seal AD prefix | 11 §3 |
+| `enclave/v1/calls/ad-sframe` | AD | — | Prefix of SFrame AAD | 11 §5 |
+
+## 4. Retired draft labels
+
+The M0 draft named these labels. The implementation replaced them, so they are retired and MUST NOT be reused.
+
+| Retired label | Replaced by |
+|---|---|
+| `enclave/v1/proto/manifest` | `enclave/v1/ctx/manifest` |
+| `enclave/v1/proto/manifest-hash` | Plain SHA3-512 of the signed manifest encoding (no label; `SignedManifest::hash`) |
+| `enclave/v1/proto/spk` | `enclave/v1/ctx/signed-prekey` and `enclave/v1/ctx/last-resort` (separate signatures) |
+| `enclave/v1/proto/opk-root` | `enclave/v1/ctx/opk-batch` |
+| `enclave/v1/proto/opk-leaf` | `enclave/v1/prekey/merkle` (type byte 0 or 2) |
+| `enclave/v1/proto/opk-node` | `enclave/v1/prekey/merkle` (type byte 1) |
+| `enclave/v1/proto/bond` | `enclave/v1/bond/psk` |
+| `enclave/v1/proto/bond-words` | `enclave/v1/bond/seal-words` |
+| `enclave/v1/proto/eqxdh-hint` | None: the implemented initial message has no hint or selector (`04-eqxdh.md`) |
+| `enclave/v1/proto/eqxdh-t1` | Transcript prefix `"EQXDH-v1/stage1"` (first framed public item, not a label) |
+| `enclave/v1/proto/eqxdh-t2` | Transcript prefix `"EQXDH-v1"` (first framed item, not a label) |
+| `enclave/v1/proto/eqxdh-id` | `enclave/v1/eqxdh/identity` |
+| `enclave/v1/proto/eqxdh-sig` | `enclave/v1/ctx/eqxdh-transcript` |
+| `enclave/v1/proto/eqxdh-replay` | Plain SHA3-512 (`InitialMessage::replay_id`) |
+| `enclave/v1/proto/ratchet-init` | `enclave/v1/ratchet/init-rk`, `enclave/v1/ratchet/init-hk`, `enclave/v1/ratchet/init-pq` |
+| `enclave/v1/proto/eqxdh-auth-mix` | None: PQ authentication of the initiator is the responder's first PQ ratchet step to the initiator's auth key (`05-ratchet.md` §7) |
+| `enclave/v1/proto/eqxdh-confirm` | None (no separate key confirmation) |
+| `enclave/v1/proto/braid-mix` | `enclave/v1/pq/step` (the braid is folded into a PQ step) |
+| `enclave/v1/proto/dr-root` | `enclave/v1/ratchet/rk` |
+| `enclave/v1/proto/dr-chain` | `enclave/v1/ratchet/ck` |
+| `enclave/v1/proto/pq-epoch` | `enclave/v1/pq/step` |
+| `enclave/v1/proto/pq-chain-init` | None: there is no PQ symmetric chain; see `enclave/v1/pq/key` |
+| `enclave/v1/proto/pq-chain` | `enclave/v1/pq/key` |
+| `enclave/v1/proto/msg-key` | `enclave/v1/ratchet/msg` |
+| `enclave/v1/proto/lookup-tag` | `enclave/v1/ratchet/tag` |
+| `enclave/v1/proto/slot-wrap` | `enclave/v1/ratchet/wrap` |
+| `enclave/v1/proto/pq-slot-key` | `enclave/v1/ratchet/pq-slot` |
+| `enclave/v1/proto/signed-msg` | `enclave/v1/ctx/signed-msg` |
+| `enclave/v1/net/dir-object` | `enclave/v1/dir/manifest` (manifests); the raw device ID (bundles) |
+| `enclave/v1/net/request-transcript` | None: the request transcript is the framed public items (`09-transport.md` §2) |
+| `enclave/v1/net/request-key` | `enclave/v1/rpc/request` |
+| `enclave/v1/net/reply-key` | `enclave/v1/rpc/reply` |
+| `enclave/v1/net/cred-hash` | `enclave/v1/rpc/credential-hash` |
+| `enclave/v1/net/write-token` | `enclave/v1/tokens/write` |
+| `enclave/v1/net/token-hash` | `enclave/v1/tokens/hash` (not bound to the inbox address) |
+| `enclave/v1/wire/ad-request` | AD = `u32(key_id)` (`09-transport.md` §2) |
+| `enclave/v1/wire/ad-reply` | AD = ASCII `"reply"` |
+| `enclave/v1/wire/ad-poll` | AD = `u32(key_id)` |
+| `enclave/v1/wire/ad-device-slot` | AD = the 16 B envelope header |
+| `enclave/v1/wire/ad-pq-slot` | AD = the 16 B envelope header |
+| `enclave/v1/wire/ad-body` | AD = the 16 B envelope header (request envelopes: header ‖ initial block) |
+| `enclave/v1/wire/ad-init-id` | AD = `u8(suite_id) ‖ u8(mode)` |
+| `enclave/v1/store/blind-key` | `enclave/v1/store/index` |
+| `enclave/v1/store/keyring` | None: the keyring wrap key is a random secret held in the keystore (`14-storage.md` §3) |
+| `enclave/v1/store/ad-record` | AD = the 40 B blinded key plus the segment index and last flag |
+| `enclave/v1/store/ad-keyring` | AD = ASCII `"keyring"` |
+| `enclave/v1/store/ad-backup` | AD = ASCII `"enclave-backup-v1"` |
+
+## 5. Mapping from PLAN.md shorthand
+
+| PLAN.md text | Canonical label |
+|---|---|
+| `"enclave/v1/kem-extract"` (§2.3) | `enclave/v1/kem/extract` (3-KEM), `enclave/v1/kem2/extract` (2-KEM) |
+| `"enclave/v1/kem"` (§2.3) | `enclave/v1/kem/combine`, `enclave/v1/kem2/combine` |
+| `"seal/nonce"`, `"seal/keys"`, `"seal/tag"` (§2.3) | `enclave/v1/seal/nonce`, `enclave/v1/seal/keys`, `enclave/v1/seal/tag` |
+| `label` in the hedged RNG (§2.3) | `enclave/v1/rng/hedge` |
+| `"enclave/v1/root"` (§3.1) | `enclave/v1/root/keygen` |
+| `SHAKE256^5200(root_pk)` (§3.5) | `enclave/v1/fp/root` (first step; then SHA3-512 iterations, `02b-key-schedule.md` §4.1) |
+| `"enclave/v1/bond"` (§3.6) | `enclave/v1/bond/psk` |
+| `KMAC(recovery, "backup")` (§13) | `enclave/v1/backup/key` |
+| `KMAC(master, salt‖record_id)` (§2.3) | `enclave/v1/store/record` |
+| `KMAC(SK', "confirm")` (§4) | None (retired; see §4) |
+| `"enclave/v1/msg"` (§5) | `enclave/v1/ratchet/msg` |
+| `KMAC(hk, "tag"‖N)` (§5) | `enclave/v1/ratchet/tag` |
+| `"enclave/v1/signed-msg"` (§5) | `enclave/v1/ctx/signed-msg` |
+| `KMAC(epoch_secret, "gmbox"‖day)` (§7) | `enclave/v1/net/grp-mailbox` (reserved) |
+| `"grp-export"` (§7) | `enclave/v1/proto/grp-export` (reserved) |
+| `KMAC(inbox_seed, "inbox"‖week)` (§9.3) | `enclave/v1/net/inbox-addr` (reserved) |
+| `KMAC(read_key, day)` (§9.3) | `enclave/v1/net/read-cred` (reserved); the implemented static credential uses `enclave/v1/rpc/read-credential` |
+| `KMAC(k_contact, i)` (§9.3) | `enclave/v1/tokens/write` |
+| `KMAC256(hw_secret‖Argon2id(passphrase)?)` (§13) | `enclave/v1/store/master` |
+
+## 6. Hedged-RNG purposes (not labels)
+
+Purpose strings are framed inputs to `enclave/v1/rng/hedge`, not labels. They are listed so that reviewers can check that no purpose is reused for a different kind of value. Purposes used by the code today:
+
+`seal/key`, `seal/nonce`, `x448/keygen`, `mlkem/keygen`, `mlkem/encaps`, `rand_core` (McEliece key generation and encapsulation through the `rand_core` adapter), `sig/composite/keygen`, `sig/composite/sign`, `sig/root/sign`, `device/id`, `recovery/secret`, `envelope/body-key`, `envelope/padding`, `envelope/dummy-slot`, `envelope/dummy-pq`, `envelope/capsule`, `envelope/shuffle`, `rpc/unit-padding`, `rpc/poll-padding`, `rpc/reply-padding`, `api/padding`, `tokens/contact-key`, `tokens/dummy`, `tokens/shuffle`, `tokens/pow-nonce`, `schedule/delay`, `server/garbage-reply`, `server/claim-id`, `store/device-secret`, `store/salt`, `store/shred-wrap`, `store/shred-key`. The simulator (`enclave-sim`) uses `sim` for test-only values.
+
+## Open questions
+
+1. Whether the Ed448 half of a maintainer release co-signature (`enclave/v1/update/release`) should use the Ed448 context parameter instead of a message prefix.
+2. Whether `cargo xtask labels` should also check the "Kind" column, for example by requiring each `const` to carry a kind attribute.
+3. Several implemented AD strings (`"reply"`, `"keyring"`, `"enclave-backup-v1"`, `"verifier"`) and transcript prefixes (`"EQXDH-v1"`, `"EQXDH-v1/stage1"`, `"ENCLAVE-POW1"`, `"request-inbox"`, `"claim-bundle"`, `"blob-put"`, `"compact"`) are short ASCII strings outside the `enclave/v1/` namespace, so CI does not check them. Each is unique within its call site today. Whether to move them into the registry namespace is open; doing so changes wire and storage formats.

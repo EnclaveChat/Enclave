@@ -1,0 +1,191 @@
+# Enclave design tokens: "Paper & Seal"
+# Status: Draft (M0) · Normative
+# Source of truth for docs/17-design.md. `enclave-design` generates tokens.slint from this file.
+# `cargo xtask tokens-check` verifies the contrast pairs in [contrast] against the WCAG 2.x formula.
+# Units: colors are sRGB hex; sizes are sp (Android), pt (Apple), or logical px (desktop);
+# durations are milliseconds.
+
+[meta]
+name = "Paper & Seal"
+version = 1
+wcag = "2.2 AA"
+
+# ---------------------------------------------------------------------------
+# Color, light mode
+# ---------------------------------------------------------------------------
+[color.light]
+background         = "#F6F3EC"  # Paper
+surface            = "#FFFFFF"
+bubble_in          = "#ECE7DC"
+bubble_out         = "#DCEBE6"
+text               = "#1C1F1D"  # Ink
+text_muted         = "#585E59"  # also input borders
+pine               = "#1D5646"  # dominant: primary buttons, links, focus
+saffron            = "#F2B230"  # accent: "confirmed by you"; fill only in light mode
+danger             = "#A8321E"  # Brick; always with an icon and text
+hairline           = "#CFC8BA"  # decorative only
+# derived
+on_pine            = "#F6F3EC"  # Paper on Pine
+on_saffron         = "#1C1F1D"  # Ink on Saffron
+focus_ring         = "#1D5646"  # Pine
+on_bubble_out      = "#1C1F1D"
+meta_on_bubble_out = "#585E59"
+link_on_bubble_out = "#1D5646"
+seal_stroke        = "#1D5646"
+
+# ---------------------------------------------------------------------------
+# Color, dark mode
+# ---------------------------------------------------------------------------
+[color.dark]
+background         = "#111412"  # Night
+surface            = "#1A1E1B"
+bubble_in          = "#242A26"
+bubble_out         = "#2A6B58"
+text               = "#EEEAE1"  # Chalk
+text_muted         = "#A7ADA6"  # also input borders
+pine               = "#7CC4A8"  # Pine-light
+saffron            = "#F5BE45"
+danger             = "#F08A73"  # Ember; always with an icon and text
+hairline           = "#3A423D"  # decorative only
+# derived
+on_pine            = "#111412"  # Night on Pine-light
+on_saffron         = "#111412"
+focus_ring         = "#F5BE45"  # Saffron in dark mode
+on_bubble_out      = "#EEEAE1"
+meta_on_bubble_out = "#EEEAE1"  # text_muted on bubble_out is only 2.74:1
+link_on_bubble_out = "#EEEAE1"  # pine on bubble_out is only 3.09:1; links are underlined
+seal_stroke        = "#111412"
+
+# ---------------------------------------------------------------------------
+# Contrast requirements checked by `cargo xtask tokens-check`
+# Each entry: [foreground, background, minimum ratio]. Checked in both modes.
+# ---------------------------------------------------------------------------
+[contrast]
+pairs = [
+  ["text",               "background", 4.5],
+  ["text",               "surface",    4.5],
+  ["text",               "bubble_in",  4.5],
+  ["on_bubble_out",      "bubble_out", 4.5],
+  ["meta_on_bubble_out", "bubble_out", 4.5],
+  ["link_on_bubble_out", "bubble_out", 4.5],
+  ["text_muted",         "background", 4.5],
+  ["text_muted",         "surface",    4.5],
+  ["text_muted",         "bubble_in",  4.5],
+  ["on_pine",            "pine",       4.5],
+  ["pine",               "background", 4.5],
+  ["pine",               "surface",    4.5],
+  ["pine",               "bubble_in",  4.5],
+  ["on_saffron",         "saffron",    4.5],
+  ["danger",             "background", 4.5],
+  ["danger",             "surface",    4.5],
+  ["focus_ring",         "background", 3.0],
+  ["focus_ring",         "bubble_in",  3.0],
+  ["focus_ring",         "bubble_out", 3.0],
+  ["seal_stroke",        "saffron",    3.0],
+]
+# Known sub-3:1 pairs that are allowed only under a stated rule:
+#   light saffron on background (1.69) and on surface (1.88): Seal always has seal_stroke.
+#   hairline on background (1.50 light, 1.79 dark): decorative only, never information.
+decorative_only = ["hairline"]
+
+# ---------------------------------------------------------------------------
+# Type
+# ---------------------------------------------------------------------------
+[type]
+family_text        = "Atkinson Hyperlegible Next"
+family_mono        = "Atkinson Hyperlegible Mono"
+weights_text       = [400, 600]
+weight_mono        = 400
+family_emoji       = "Noto Color Emoji"
+family_fallback    = "Noto Sans"
+line_height        = 1.4
+max_text_scale     = 2.0      # OS text scaling honored up to 200%, no truncation of message text
+
+caption            = 13
+secondary          = 15
+body               = 17       # body text and messages
+title              = 20
+screen_title       = 24
+onboarding         = 32       # onboarding only
+mono_code          = 22
+mono_code_tracking_em = 0.04
+
+[type.weight]
+caption            = 400
+secondary          = 400
+body               = 400
+title              = 600
+screen_title       = 600
+onboarding         = 600
+
+# ---------------------------------------------------------------------------
+# Space and layout
+# ---------------------------------------------------------------------------
+[space]
+base               = 4
+steps              = [4, 8, 12, 16, 24, 32, 48, 64]
+xs                 = 4
+s                  = 8
+sm                 = 12
+m                  = 16
+l                  = 24
+xl                 = 32
+xxl                = 48
+xxxl               = 64
+touch_target_min   = 48       # dp, both dimensions
+
+[space.grid.phone]
+columns            = 4
+margin             = 16
+gutter             = 8
+
+[space.grid.tablet]
+columns            = 8
+margin             = 24
+gutter             = 16
+
+[space.grid.desktop]
+conversation_list  = 320
+text_max_width     = 680
+details_pane       = 360
+
+# ---------------------------------------------------------------------------
+# Radii and elevation
+# ---------------------------------------------------------------------------
+[radius]
+control            = 8
+bubble             = 12
+bubble_tail        = 4
+sheet              = 20
+
+[elevation]
+levels             = 2        # "flat" and "raised" only
+flat               = 0
+raised             = 1
+
+# ---------------------------------------------------------------------------
+# Motion and haptics
+# ---------------------------------------------------------------------------
+[motion]
+duration_min       = 150
+duration_max       = 200
+duration_default   = 180
+easing             = "ease-out"
+seal_close         = 240      # two halves meet; instant under reduce-motion
+reduce_motion      = "cross-fade"
+spinner_max_without_text = 2000
+gradients          = false
+
+[motion.haptics]
+send               = "light-tick"
+seal_close         = "seal-pattern"
+
+# ---------------------------------------------------------------------------
+# Icons
+# ---------------------------------------------------------------------------
+[icon]
+size               = 24
+stroke             = 1.75
+source             = "Lucide (ISC), redrawn"
+banned             = ["lock", "padlock", "shield", "keyhole", "vault-door"]
+focus_ring_width   = 2

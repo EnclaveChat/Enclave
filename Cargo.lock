@@ -1445,6 +1445,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-design"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "enclave-kt"
 version = "0.1.0"
 dependencies = [

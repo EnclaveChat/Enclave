@@ -1,0 +1,176 @@
+# Voice and Video Calls
+
+Status: Draft (M0) · Normative
+
+Source: PLAN.md §11 (D8, D9). Crates: `enclave-calls`, `enclave-relay`, `enclave-media`. Derivations: `02b-key-schedule.md` §12.
+
+## 1. Overview
+
+- Signalling travels as ordinary Lockstep messages over the mixnet. Calls take 3 to 10 s to start ringing.
+- Every call does a fresh X448 + ML-KEM-1024 exchange. **Call keys are independent of chat keys.**
+- Media is end-to-end encrypted with **SFrame (RFC 9605)** using a private-use EnclaveSeal suite.
+- Transport is **WireGuard** in both modes. There is no DTLS-SRTP, no SCTP, and no RingRTC (D9).
+- The mode is chosen per call: **Relay** (default, "Private route") or **Direct** (opt-in, shows the IP warning).
+
+## 2. Signalling and call keys
+
+```
+Offer (caller → callee, in a ratchet message):
+    call_id = HedgedRng.fill("call-id", 16)
+    (x_sk, x_pk) = X448.KeyGen(…); (ek, dk) = ML-KEM-1024.KeyGen(…)
+    offer = { call_id, x_pk, ek, media: audio | video tier, mode request, caller relay info (§3.2) }
+
+Answer (callee → caller, in a ratchet message):
+    (y_sk, y_pk) = X448.KeyGen(…); (ct, ss_m) = ML-KEM-1024.Encaps(ek)
+    answer = { call_id, y_pk, ct, callee relay info }
+
+Both:
+    ss_call = Combine2(suite, [X448(…)], [ss_m], none, 0x00,
+                       pks = [x_pk, ek], cts = [y_pk, ct],
+                       transcript = E("enclave/v1/calls/transcript") ‖ call_id ‖ conv_id)
+    call_secret = KMAC256(ss_call, "", 512, "enclave/v1/calls/secret")
+```
+
+- Offers expire after 60 s. A second answer for the same `call_id` is ignored.
+- Other signalling (hang-up, mute state for UI only, tier step-down, rekey) is carried in ratchet messages or, once media flows, in SFrame-protected control frames.
+- On iOS, an incoming offer arrives by PushKit VoIP push and MUST be reported to CallKit (`15b-platform-constraints.md`).
+
+## 3. Relay mode (default)
+
+### 3.1 Topology
+
+```
+caller ──WireGuard (ticket PSK)──▶ relay R1 ══WireGuard + Rosenpass══ relay R2 ◀──WireGuard (ticket PSK)── callee
+```
+
+- No ICE is used, so no host candidates leak. No single relay sees both IP addresses. Each relay sees its own caller's IP, stream timing, and the peer relay's IP.
+- Client↔relay WireGuard runs in userspace via **GotaTun**, so no VPN permission is needed.
+- Relay↔relay links use WireGuard plus **upstream Rosenpass**, running as a server daemon (`12-servers.md` §5). Rosenpass is never used on phones (D8).
+
+### 3.2 Choosing relays
+
+- Each relay descriptor declares an **operator family** (`12-servers.md` §5).
+- The caller picks a relay whose family differs from the caller's home server family and the callee's home server family. The offer carries the caller relay's ID.
+- The callee picks a relay whose family differs from the callee's home server family and the caller relay's family.
+- Choice among eligible relays is uniformly random, weighted by declared capacity.
+
+### 3.3 Relay tickets
+
+```
+TicketRequest (client → relay ticket service, over the mixnet, as an ISSUE-class request):
+    fresh WireGuard X25519 key pair (wg_sk, wg_pk) for this call
+    (eph, ct) = X448 + ML-KEM-1024 encapsulation to the relay's daily ticket key
+    ss_ticket = Combine2(… transcript = E("enclave/v1/calls/ticket-transcript") ‖ relay_id ‖ u32(key_epoch))
+    ticket_secret = KMAC256(ss_ticket, "", 256, "enclave/v1/calls/ticket-secret")
+    k_ticket_seal = KMAC256(ss_ticket, "", 256, "enclave/v1/calls/ticket-seal")
+    body = Seal(k_ticket_seal, E("enclave/v1/calls/ad-ticket") ‖ relay_id ‖ u32(key_epoch),
+                { privacy_pass_token, wg_pk, requested_duration })
+Relay:
+    verifies the Privacy Pass token (single use), installs peer wg_pk with PSK schedule,
+    replies with { relay wg_pk, endpoint, t0, expiry }
+PSK schedule:
+    wg_psk_i = KMAC256(ticket_secret, u32(i), 256, "enclave/v1/calls/wg-psk"),  i = ⌊(t − t0) / 120 s⌋
+```
+
+- WireGuard keys are fresh per call. The PSK changes every 2 minutes; both ends switch at the period boundary and WireGuard's own 120 s rekey picks it up.
+- Tickets are obtained **anonymously** over the mixnet and paid with Privacy Pass, so the relay cannot link a ticket to an account. Clients MAY pre-fetch one ticket per relay family to cut setup time.
+
+## 4. Direct mode (opt-in per call)
+
+- The pre-call sheet offers "Direct (clearer, but Sam can see your internet address)". Checked contacts get one confirmation; unchecked contacts get a second, stronger warning: "You haven't checked Sam's security code. Direct calls show your internet address to whoever is on the other end."
+- ICE comes from the webrtc-rs sans-IO `rtc` crates (str0m is evaluated in M8). STUN goes only through Enclave relays. Host candidates use mDNS names.
+- The tunnel is WireGuard with `direct_psk = KMAC256(call_secret, "", 256, "enclave/v1/calls/direct-psk")`. There is no DTLS-SRTP.
+
+## 5. Media end-to-end encryption: SFrame with EnclaveSeal
+
+### 5.1 Suite
+
+| Property | Value |
+|---|---|
+| SFrame cipher suite ID | 0xF0E1 (private use range of RFC 9605) |
+| Name | `ENCLAVE_SEAL_V1_KMAC256` |
+| `Nk` (key) | 32 |
+| `Nn` (nonce) | 32 |
+| `Nt` (tag) | 32 |
+| AEAD | EnclaveSeal-v1 detached-nonce form (`02-cryptography.md` §4.5) |
+
+Overhead: a 256-bit tag per frame. On 20 ms Opus that is 32 B × 50 frames/s × 8 = 12.8 kbps, which is accepted.
+
+### 5.2 Key schedule
+
+```
+base_{p,0}   = KMAC256(call_secret, T(participant_id, u32(join_gen)), 256, "enclave/v1/calls/sframe-base")
+base_{p,i+1} = KMAC256(base_{p,i}, u32(i + 1), 256, "enclave/v1/calls/sframe-ratchet")      # every 5 s
+KID          = u64( participant_index << 32 | i )
+(sframe_key, sframe_salt) = split32( KMAC256(base_{p,i}, u64(KID), 512, "enclave/v1/calls/sframe-key") )
+nonce(CTR)   = sframe_salt ⊕ (0^24 ‖ u64(CTR))
+ct ‖ tag     = SealDN(sframe_key, nonce(CTR), E("enclave/v1/calls/ad-sframe") ‖ sframe_header ‖ metadata, frame)
+```
+
+- Per-sender base keys ratchet every 5 s; the previous base key is deleted after a 1 s grace.
+- In group calls, a sender's `base_{p,0}` is a fresh random value (not derived from `call_secret`) sent to each participant over pairwise ratchet messages.
+- **A participant leaving** triggers a rekey: every remaining sender generates a fresh random base key, increments `join_gen`, and distributes it pairwise to the remaining participants.
+- **Joiners** receive each sender's current `base_{p,i}` (ratcheted forward), so they cannot decrypt earlier frames.
+
+### 5.3 Nonce uniqueness
+
+`CTR` starts at 0 for each KID and increments per frame. Call state is never persisted, so a rollback of stored state cannot repeat `(sframe_key, nonce)`. If the call process restarts, the participant rejoins with a new `join_gen`. This is the second permitted SealDN call site.
+
+## 6. Traffic shaping (RT-19)
+
+| Stream | Rule |
+|---|---|
+| Audio | Opus CBR 32 kbps, 20 ms frames, DTX off, in-band FEC on. Every packet is padded to a fixed 160 B before WireGuard, at exactly 50 packets/s. |
+| Video | Tiers 300, 800, 1,500 kbps, chosen at call start. Fixed 1,200 B packets at a fixed rate: 31.25, 83.33, or 156.25 packets/s. |
+| Step-down | Quality can only step down, at most once per 30 s. It never steps up during a call. |
+| Mute / camera off | Padding frames keep exactly the same size and rate. |
+| Header extensions | Allowlist only. The RFC 6464 audio-level extension MUST NOT be sent and MUST be stripped if received. |
+
+The observable residual is the tier (audio-only vs. each video tier).
+
+## 7. Maximum privacy calls
+
+In Maximum privacy mode, while the app is in the foreground, the client keeps a constant 32 kbps audio-shaped WireGuard tunnel (160 B × 50 packets/s) open to its chosen relay, using a ticket as in §3.3. Calls ride inside it, which hides call start and stop from a global observer. On iOS, calls ring only while the app is open.
+
+## 8. Group calls
+
+- An SFU in the host's relay forwards only SFrame frames and simulcast layers, in fixed-rate slots. It never holds media keys.
+- Audio is forwarded to all participants at CBR. There is no dominant-speaker detection.
+- Each receiver has a fixed 2.5 Mbps downlink budget; the SFU fills unused budget with padding.
+- **Limits:** 32 video tiles or 64 audio participants.
+- **Call links:** `https://<invite-host>/call#<payload>` with a capability `call_link_cap = KMAC256(call_link_secret, "", 256, "enclave/v1/calls/link-cap")` and an optional lobby.
+- Raise hand, reactions, picture-in-picture. Screen share on desktop in M8, on mobile after 1.0.
+
+## 9. Call check
+
+An optional 2-word code, as in ZRTP: the first two 11-bit groups of `KMAC256(call_secret, "", 256, "enclave/v1/calls/check-words")`, shown as BIP-39 words in the user's language. Both people read them aloud.
+
+## 10. Media engine
+
+| Function | Implementation | Isolation |
+|---|---|---|
+| Opus decode | Pure-Rust `opus-decoder` once it passes RFC 8251 vectors and fuzzing | mediad sandbox |
+| Opus encode | libopus (C), only on the user's own microphone, until `opus-rs` matches its quality | mediad sandbox (PLAN §22 exception) |
+| Opus via Symphonia | Never (Symphonia cannot decode Opus) | — |
+| Echo cancellation, mobile | OS voice processing (VoiceProcessingIO; Android `VOICE_COMMUNICATION` with its AEC) | OS |
+| Echo cancellation, desktop | Pure-Rust `sonora` if it passes quality tests, otherwise `webrtc-audio-processing` | mediad sandbox |
+| Video encode | AV1 via rav1e at speed 10, or an OS hardware AV1 encoder | mediad sandbox / OS |
+| Video decode | rav1d, in software, in the sandbox. Incoming video never touches hardware decoders. | mediad sandbox |
+| M8 gate | 360p at 30 fps on the reference low-end phone; if it fails, OS hardware H.264 encode as a declared exception | — |
+| Capture | `cpal` for audio; CameraX via `jni`, AVFoundation via `objc2`, `nokhwa` on desktop | platform shims |
+
+## 11. Errors
+
+| Condition | Behavior | User-facing |
+|---|---|---|
+| No eligible relay family | Retry with relaxed capacity weighting; never relax family distinctness | "Couldn't find a private route right now. Try again, or use Direct." |
+| Ticket payment fails | Acquire a new Privacy Pass token and retry once | same |
+| Offer expired | Show missed call | "Missed call" |
+| RFC 6464 extension received | Strip and log | none |
+| Decrypt failure bursts | Request rekey via signalling | "Reconnecting…" |
+
+## Open questions
+
+1. The SFrame suite ID 0xF0E1 is a private-use value chosen here; RFC 9605 private-use allocation rules should be confirmed.
+2. Audio packets are padded to 160 B (§6); PLAN fixes the rate and CBR but not the exact size. 160 B fits a 20 ms, 32 kbps Opus frame (80 B), the SFrame header, the 32 B tag, and RTP headers.
+3. Whether the Maximum-mode tunnel (§7) should run on Android in the background, where the always-on profile already runs. PLAN says "while the app is in the foreground"; this spec follows PLAN.

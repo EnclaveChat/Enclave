@@ -1,0 +1,199 @@
+# Groups (up to 100 members)
+
+Status: Draft (M0) · Normative
+
+Source: PLAN.md §7 (D6). Crate: `enclave-proto` (MAC vectors, exporter rekey, frontier). Derivations: `02b-key-schedule.md` §8. Layouts: `08-envelope.md` §7 (message unit) and §8 (rekey unit). There is no MLS.
+
+## 1. Model
+
+- A group has a random 32 B `group_id`, a **state** (§7), an **epoch** (a `u32` that increments on every membership or device-list change), and an `epoch_secret` known to current members.
+- Every member device `s` has a **sender chain** per **generation** `g` (`u8`, increments on each rotation, wraps with the epoch). Messages from `s` are encrypted with keys from its chain.
+- Every member device `s` also has, per generation, one **MAC key per other member account** `j`, `mac_key[s→j]`, delivered only to account `j`'s devices.
+- Delivery is one unit per message to the group mailbox on the host server (normally the creator's home server). Pairwise Lockstep sessions between member devices carry all key material.
+- Maximum 100 member accounts. Each account may have up to 5 devices, so up to 500 devices.
+
+## 2. Sender chains
+
+```
+cs_0 = HedgedRng.fill("grp-chain-seed", 32)                  # per (sender device, generation)
+(cs_{n+1}, gmk_n) = split32( KMAC256(cs_n, "", 512, "enclave/v1/proto/grp-chain") )
+```
+
+Message `n` of generation `g` from device `s` is sealed under `gmk_n`. Receivers keep skipped `gmk` values under the same limits as 1:1 (1,000 per sender device, 7 days). `cs_n` and used `gmk_n` are deleted as the chain advances.
+
+## 3. Message authentication (MAC vectors)
+
+Every group message carries a MAC vector of **99 entries × 16 B = 1,584 B**, always full.
+
+- Entry position: members are ordered by the member index in the group state (0 to 99). The vector has one entry for every member index except the sender's own account; position `p` holds the tag for the member with index `p` if `p` is less than the sender's index, otherwise index `p + 1`. Positions with no member hold random bytes.
+- Tag computation:
+
+  ```
+  covered = unit[0..88] ‖ unit[2696..14336]                   # routing header and sealed body (08-envelope.md §7)
+  tag_j   = KMAC256(mac_key[s→j], H512(covered), 128, "enclave/v1/proto/grp-mac")
+  ```
+
+- A receiving device of account `j` verifies its entry in constant time **before** opening the body. A failed MAC drops the unit.
+- Insiders cannot forge each other's messages (they lack `mac_key[s→j]` for other `j`), and there is no signature that proves authorship to outsiders. This makes group messages deniable and post-quantum.
+- **Own devices.** The vector has no entry for the sender's own account. A device does not accept, from the mailbox alone, a message that claims to come from another device of its own account. It shows it after own-device sync (`06-multidevice.md` §5) confirms the message's `grp_msg_id`; sync of sent group-message IDs is batched and sent within 60 s in the Foreground profile.
+- **On-the-record groups** additionally carry a composite device signature in the content:
+
+  ```
+  sig = CompositeSign(device_sk, "enclave/v1/proto/grp-signed-msg",
+                      group_id ‖ u32(epoch) ‖ sender_device_id ‖ u8(generation) ‖ u32(counter)
+                      ‖ state_hash ‖ H512(plaintext_content))
+  ```
+
+## 4. Delivery
+
+- **Mailbox address:** `gmbox(d) = KMAC256(epoch_secret, u32(d), 256, "enclave/v1/net/grp-mailbox")` for day `d` (PLAN: `KMAC(epoch_secret, "gmbox"‖day)`). A sender writes to the address for the current trusted day. Readers poll today's and yesterday's address.
+- **Write authorization (epoch MAC tokens):** `grp_write_tok(a) = KMAC256(k_gw, a, 256, "enclave/v1/net/grp-write-token")`. The first write to an address that does not exist yet carries the `CREATE` flag; the server stores `KMAC256(a, token, 256, "enclave/v1/net/token-hash")` and accepts later writes that present the same token. Group write tokens are multi-use for one address; the server can already link writes to one mailbox.
+- **Read authorization:** `grp_read_cred(a) = KMAC256(k_gr, a, 256, "enclave/v1/net/grp-read-cred")`, registered the same way with `cred-hash`.
+- **Routing header:** the 88 B header is sealed under `HKg = KMAC256(epoch_secret, "", 256, "enclave/v1/proto/grp-header")` and carries epoch, sender member index, sender device index, generation, flags, and counter (`08-envelope.md` §7.1).
+- **Cost:** 1 unit per group message. No self-copy (own devices read the mailbox).
+- **Hosting move:** admins may move the mailbox host to another server by an admin vote (a state update naming the new host, applied by a majority of admins). The new host takes effect from the next day's address.
+
+## 5. Rekey (DCGKA-style exporter broadcast)
+
+### 5.1 When
+
+- **Membership or device-list change:** the member who performs the change (the remover, or the admin who adds) creates a new epoch and rotates immediately. Every other member rotates before its next send in the new epoch.
+- **Otherwise (lazy):** a sender device rotates on its first send after 24 h or after 200 messages in its current generation.
+- **"Secure my account"** rotates the user's sender chains in every group.
+
+### 5.2 Pre-rekey PQ step
+
+Before a rekey, the rotating device `s` checks each pairwise session with a recipient device. If the pair's most recent PQ epoch in either direction was established before the group's last epoch change, `s` sends a `ForcePQStep` control message and waits for a completed PQ exchange (up to 10 minutes in the Foreground profile, up to 1 hour otherwise). Pairs that do not complete in time are still included, and the rotation is marked "pre-step incomplete" locally so the next rotation retries them. This makes the rekey post-compromise secure against a compromise that ended before the rekey.
+
+### 5.3 Exporter key
+
+For each recipient device `r`, `s` uses its pairwise session with `r`:
+
+```
+k  = chain_index of the most recent chain in (s, r) created by r        # r certainly has its RK snapshot
+e  = epoch of the most recent PQ epoch in r's send direction as seen by s   # r has this P as its pq_s snapshot
+K_exp = KMAC256(P_e ‖ RK_k, T(group_id, u32(epoch), u8(generation)), 256, "enclave/v1/proto/grp-export")
+```
+
+This is PLAN's `K_exp = KMAC(PQ_epoch_secret‖DR_root, "grp-export"‖group_id‖epoch)`. Both `RK_k` and `P_e` come from the snapshots kept by `05-ratchet.md` §2 (at most 4 each, 7-day expiry). The entry carries `k mod 2^16` and `e mod 2^16` so that `r` can find them.
+
+### 5.4 Broadcast contents
+
+```
+kb     = HedgedRng.fill("grp-rekey-kb", 32)
+common = Seal(kb, E("enclave/v1/wire/ad-rekey-common") ‖ group_id ‖ u32(epoch) ‖ sender_device_id ‖ u8(generation),
+              new_cs_0 (32) ‖ u8(generation) ‖ u8(flags) ‖ new_epoch_secret or random (32)
+              ‖ u32(new_epoch) ‖ state_hash (32) ‖ 0^26)                           # 128 B plaintext, 200 B sealed
+for each recipient device r (every device of every other member, and this account's other devices):
+    j   = account of r
+    pad = KMAC256(K_exp_r, "", 512, "enclave/v1/proto/grp-rekey-pad")
+    ct  = (kb ‖ mac_key[s→j]) ⊕ pad                             # own-account devices get 32 zero bytes as MAC key
+    chk = KMAC256(K_exp_r, ct, 96, "enclave/v1/proto/grp-rekey-check")
+    entry_r = u16(k) ‖ u16(e) ‖ chk (12) ‖ ct (64)              # 80 B
+```
+
+Each entry is about 72 B of key material plus 8 B of indexing (PLAN: "about 72 B per device").
+
+### 5.5 Buckets
+
+- `bucket(r) = u16(KMAC256(k_bucket, device_id_r, 256, "enclave/v1/proto/grp-bucket-index")[0..2]) mod 3`, where `k_bucket = KMAC256(epoch_secret, "", 256, "enclave/v1/proto/grp-bucket")`. Only members can compute it.
+- A rekey is always **exactly 3 rekey units**, one per bucket, each holding up to 174 entries (`08-envelope.md` §8). Unused entry positions are random.
+- If a bucket has more than 174 entries, the excess goes to the next bucket (`b + 1 mod 3`). Capacity is 522 ≥ 500.
+- Unit `b` is written to the bucket sub-mailbox `gbkt(d, b) = KMAC256(k_bucket, u32(d) ‖ u8(b), 256, "enclave/v1/net/grp-rekey-mailbox")` for the current day `d`. A device fetches only its own bucket's sub-mailbox (and the next one only if its entry is not found).
+- A device learns that it needs a rekey when it sees a message header from `s` with a generation it does not have. It then fetches its bucket.
+
+Cost: 3 units per rotation for 100 members × 5 devices, versus about 500 units for pairwise delivery.
+
+### 5.6 Processing a rekey entry
+
+```
+for each entry in the fetched bucket unit (and the next bucket if needed):
+    look up snapshots RK_k, P_e by (k, e); if missing, continue
+    K_exp = …; chk' = KMAC256(K_exp, entry.ct, 96, …)
+    if ct_eq(chk', entry.chk):
+        (kb, mac_key) = entry.ct ⊕ KMAC256(K_exp, "", 512, …)
+        common = Open(kb, AD, common)                       else drop rekey
+        install sender chain (s, generation) and mac_key; if new epoch: install epoch secret
+        return
+report "missing rekey from s" locally; ask s with a pairwise control message after 60 s
+```
+
+## 6. Cadence summary
+
+| Event | Who rotates | When |
+|---|---|---|
+| Member removed | The remover | Immediately (new epoch) |
+| Member or device added | The adding admin | Immediately (new epoch) |
+| Device list of a member changes | That member | Immediately (new epoch); others before next send |
+| Other members after an epoch change | Each member device | Before its next send |
+| Lazy | Each sender device | First send after 24 h or 200 messages |
+| "Secure my account" | That account's devices | Immediately |
+
+**Group post-compromise security is one epoch** (or one generation for a single sender's chain), documented in the help.
+
+## 7. Group state
+
+### 7.1 Contents
+
+The state is a canonical Protobuf message (`08-envelope.md` §5.6 limits) with: `group_id`, `epoch`, name, avatar (blob pointer), disappearing timer, join policy (invite links on/off, admin approval on/off), "only admins can send", member list (per member: `root_hash`, member index, role admin or member, joined time, group-scoped request capability, current manifest hash), and host server.
+
+### 7.2 Hash chain
+
+```
+state_hash_0 = ID256("enclave/v1/proto/grp-state", 0^32 ‖ H512(creation_update))
+state_hash_n = ID256("enclave/v1/proto/grp-state", state_hash_{n-1} ‖ H512(update_n))
+```
+
+### 7.3 Updates
+
+- A state update is a group message with flag `STATE_UPDATE`. Its MAC vector uses the **admin MAC** label: `KMAC256(mac_key[s→j], H512(covered), 128, "enclave/v1/proto/grp-admin-mac")`. Receivers accept it only if the sender is an admin in the parent state (or the update is a member leaving, which any member may post about themselves).
+- On-the-record groups additionally require a composite signature with use label `enclave/v1/proto/grp-admin-sig` over `group_id ‖ state_hash_{n-1} ‖ H512(update_n)`.
+- **Every membership change is shown in the chat** as an inline event ("Alex added Priya.") with no option to hide it.
+- If the last admin leaves, the longest-standing member (earliest `joined`, ties broken by lowest `root_hash`) is promoted automatically by every client.
+
+### 7.4 State hash and causal frontier on every message
+
+- Every group message carries, inside its body seal, the sender's current `state_hash` (32 B) and a **causal frontier**: for each member index 0 to 99, the 8 B `grp_msg_id` of the last message the sender has seen from that member (zero if none). 100 × 8 = 800 B.
+
+  ```
+  grp_msg_id = ID256("enclave/v1/proto/grp-msg-id", group_id ‖ u32(epoch) ‖ u8(member) ‖ u8(device) ‖ u8(gen) ‖ u32(counter))[0..8]
+  ```
+
+- A receiver compares the message's `state_hash` with its own and checks that every frontier entry names a message it has seen (or one it is missing, which triggers a fetch). If a mismatch persists for more than 10 minutes, the chat shows: "Some people in this group may be seeing different messages." (RT-11)
+- **Forks:** two valid updates with the same parent resolve by lowest resulting `state_hash`. The losing update's author re-applies its change on top of the winner if it is still valid, and the UI shows the result.
+
+### 7.5 Polls
+
+A poll close carries `tally_hash = H512(E("enclave/v1/proto/poll-tally-hash") ‖ poll_id ‖ canonical_tally)`, authenticated by the poll creator. In On-the-record groups the creator signs it with use label `enclave/v1/proto/poll-tally`. In Off-the-record groups the close message's MAC vector authenticates it (deniable).
+
+## 8. Post-compromise security
+
+- A device compromise that ends is healed for that device's outgoing messages when it next rotates (new `cs_0` and MAC keys, distributed under fresh `K_exp` after the pre-rekey PQ step).
+- It is healed for incoming messages when every other sender rotates, which the next epoch change forces.
+- Removed members lose access at the new epoch: they receive no rekey entry, and the mailbox address changes.
+
+## 9. Joining
+
+- **Invite links** carry a capability in the URL fragment: `https://<invite-host>/g#<payload>`, where the payload holds `group_id`, an admin's contact fields (as `03-identity.md` §9.2), and `grp_invite_secret`. `grp_invite_cap = KMAC256(grp_invite_secret, "", 256, "enclave/v1/proto/grp-invite-cap")`.
+- Links are limited-use (default 1 use for links sent to contacts), expire (default 7 days), and can be revoked by any admin. **Admin approval is on by default.**
+- Flow: the joiner sends a `JoinRequest{grp_invite_cap}` to the admin as a first-contact message (`04-eqxdh.md`). The admin (after approval, if required) posts a state update adding the joiner, starts a new epoch, and sends the joiner the state and epoch secret over their pairwise session.
+- The joiner then establishes pairwise sessions with every member device, starting with `kem_count = 2` (group-only peers, `04-eqxdh.md` §8), using each member's group-scoped request capability so these first contacts are not shown as message requests. Joining costs about 99 × 60 KB ≈ 6 MB of manifests and bundles in bulk mode, with a progress bar.
+- **New members cannot read history from before they joined.** They receive no chain seeds from earlier epochs.
+
+## 10. Errors
+
+| Condition | Action |
+|---|---|
+| MAC entry fails | Drop |
+| Unknown generation | Fetch bucket; hold the message up to 7 days |
+| State update from a non-admin | Drop; show nothing |
+| State hash mismatch > 10 min | Inline warning (§7.4) |
+| Rekey entry not found in bucket or next | Ask the sender after 60 s |
+| Group exceeds 100 members | Refuse the add with "Groups can have up to 100 people." |
+
+## Open questions
+
+1. Own-device messages are not covered by the MAC vector (§3). The fix chosen here (confirm through own-device sync) delays display of one's own messages sent from another device by up to 60 s. An alternative is to reserve one MAC-vector entry for the sender's own account, which requires 100 entries (1,600 B) and changes the group envelope budget.
+2. In Off-the-record groups PLAN §7 says poll closes are "signed by the poll's creator". A signature would make the creator's poll results non-deniable, so this spec uses the MAC vector there and a signature only in On-the-record groups.
+3. The exporter key uses retained root-key snapshots (§5.3). A dedicated exporter chain per pair would avoid retaining superseded root keys; to be decided with the M7 formal model.
+4. Group-scoped request capabilities (§9) are a new object not named in PLAN; they let a joiner reach members without PoW. Their abuse limits (per group, per day) need to be set.
