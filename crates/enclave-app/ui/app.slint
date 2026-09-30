@@ -23,6 +23,22 @@ export struct ContactRow {
     unread: int,
     state: int,
     verified: bool,
+    // 0 person, 1 group
+    kind: int,
+    members: int,
+}
+
+export struct PickRow {
+    id: string,
+    name: string,
+    initials: string,
+    tint: color,
+    selected: bool,
+}
+
+export struct DeviceRow {
+    label: string,
+    detail: string,
 }
 
 // status: 0 sending privately, 1 on its way, 2 delivered.
@@ -31,10 +47,11 @@ export struct MessageRow {
     outgoing: bool,
     time: string,
     status: int,
+    sender: string,
 }
 
 export enum Screen { welcome, name, setting-up, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -74,6 +91,12 @@ component Bubble inherits HorizontalLayout {
             padding-top: Tokens.space-s;
             padding-bottom: Tokens.space-s;
             spacing: Tokens.space-xs;
+            if !root.msg.outgoing && root.msg.sender != "": Text {
+                text: root.msg.sender;
+                font-size: Tokens.type-caption;
+                font-weight: 600;
+                color: Tokens.pine;
+            }
             Text {
                 text: root.msg.text;
                 font-size: Tokens.type-body;
@@ -261,6 +284,13 @@ export component AppWindow inherits Window {
     in property <bool> show-delivery-hint: true;
     in-out property <int> privacy: 0;
     in property <[string]> recovery-words;
+    in property <[PickRow]> pick;
+    in property <[DeviceRow]> devices;
+    in property <[string]> link-choices;
+    in property <string> link-status;
+    in property <bool> can-link;
+    in-out property <string> group-name;
+    in-out property <string> link-code;
     in property <bool> recovery-saved;
     in-out property <string> draft;
     in-out property <string> add-link;
@@ -279,6 +309,10 @@ export component AppWindow inherits Window {
     callback set-privacy(int);
     callback open-sheet(Sheet);
     callback words-saved();
+    callback toggle-pick(string);
+    callback create-group(string);
+    callback link-scan(string);
+    callback link-pick(int);
 
     property <bool> wide: root.width >= 760px;
     property <bool> has-current: root.current-id != "";
@@ -374,7 +408,7 @@ export component AppWindow inherits Window {
                     spacing: Tokens.space-s;
                     ActionTile { text: "My code"; icon: Icons.qr; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.my-code); } }
                     ActionTile { text: "Add"; icon: Icons.link; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.add); } }
-                    ActionTile { text: "Invite"; icon: Icons.share; horizontal-stretch: 1; clicked => { root.copy-text(root.my-link); } }
+                    ActionTile { text: "Group"; icon: Icons.group; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.new-group); } }
                 }
                 if !root.recovery-saved: Notice {
                     title: "Save your recovery words";
@@ -465,14 +499,16 @@ export component AppWindow inherits Window {
                             Title { text: root.current.name; overflow: elide; wrap: no-wrap; }
                             HorizontalLayout {
                                 spacing: Tokens.space-xs;
-                                Seal { state: root.current.verified ? SealState.checked : SealState.unchecked; size: 16px; }
+                                if root.current.kind == 0: Seal { state: root.current.verified ? SealState.checked : SealState.unchecked; size: 16px; }
                                 Caption {
-                                    text: (root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
+                                    text: root.current.kind == 1
+                                        ? root.current.members + " people · Off the record"
+                                        : (root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
                                     vertical-alignment: center;
                                 }
                             }
                         }
-                        if root.current.state == 2: VerticalLayout {
+                        if root.current.state == 2 && root.current.kind == 0: VerticalLayout {
                             alignment: center;
                             QuietButton {
                                 text: !root.wide ? "Code" : root.current.verified ? "Security code" : "Check code";
@@ -696,11 +732,110 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        QuietButton {
-            text: "Recovery words";
-            outlined: true;
-            clicked => { root.open-sheet(Sheet.recovery); }
+        HorizontalLayout {
+            spacing: Tokens.space-s;
+            QuietButton {
+                text: "Recovery words";
+                outlined: true;
+                horizontal-stretch: 1;
+                clicked => { root.open-sheet(Sheet.recovery); }
+            }
+            QuietButton {
+                text: "Your devices";
+                outlined: true;
+                horizontal-stretch: 1;
+                clicked => { root.open-sheet(Sheet.devices); }
+            }
         }
+    }
+
+    if root.sheet == Sheet.new-group: SheetFrame {
+        title: "New group";
+        close => { root.sheet = Sheet.none; }
+        Field { placeholder: "Group name"; text <=> root.group-name; }
+        Secondary { text: root.pick.length == 0 ? "Add people as contacts first. Groups are made from people who have accepted you." : "Choose who to add. Everyone in the group can see who else is in it."; }
+        for p in root.pick: Rectangle {
+            height: 56px;
+            border-radius: Tokens.radius-control;
+            background: p.selected ? Tokens.bubble-in : transparent;
+            accessible-role: checkbox;
+            accessible-checked: p.selected;
+            accessible-label: p.name;
+            accessible-action-default => { root.toggle-pick(p.id); }
+            TouchArea { clicked => { root.toggle-pick(p.id); } }
+            HorizontalLayout {
+                padding-left: Tokens.space-s;
+                padding-right: Tokens.space-s;
+                spacing: Tokens.space-sm;
+                VerticalLayout { alignment: center; Avatar { initials: p.initials; tint: p.tint; size: 36px; } }
+                Body { text: p.name; vertical-alignment: center; horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 4px;
+                        border-width: 2px;
+                        border-color: p.selected ? Tokens.pine : Tokens.text-muted;
+                        background: p.selected ? Tokens.pine : transparent;
+                        if p.selected: Path {
+                            width: 16px;
+                            height: 16px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: "M 5 12 L 10 17 L 19 7";
+                            stroke: Tokens.on-pine;
+                            stroke-width: 2.5px;
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Creating…" : "Create group";
+                enabled: root.group-name != "" && !root.busy;
+                clicked => { root.create-group(root.group-name); }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.devices: SheetFrame {
+        title: "Your devices";
+        close => { root.sheet = Sheet.none; }
+        for d in root.devices: HorizontalLayout {
+            spacing: Tokens.space-sm;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                Body { text: d.label; font-weight: 600; }
+                Secondary { text: d.detail; }
+            }
+        }
+        if root.can-link && root.link-choices.length == 0: VerticalLayout {
+            spacing: Tokens.space-s;
+            Secondary { text: "To link a new device, open Enclave on it, choose \"I already have Enclave\", and paste its link code here. Only do this with your own device."; }
+            Field { placeholder: "enclave:link#…"; mono: true; text <=> root.link-code; }
+            HorizontalLayout {
+                alignment: start;
+                PrimaryButton {
+                    text: root.busy ? "Checking…" : "Continue";
+                    enabled: root.link-code != "" && !root.busy;
+                    clicked => { root.link-scan(root.link-code); }
+                }
+            }
+        }
+        if root.link-choices.length > 0: VerticalLayout {
+            spacing: Tokens.space-s;
+            Body { text: "Which words does your new device show?"; font-weight: 600; }
+            for c[i] in root.link-choices: QuietButton {
+                text: c;
+                outlined: true;
+                clicked => { root.link-pick(i); }
+            }
+        }
+        if root.link-status != "": Secondary { text: root.link-status; }
+        if !root.can-link: Secondary { text: "Only your first device can link new ones."; }
     }
 
     if root.sheet == Sheet.recovery: SheetFrame {

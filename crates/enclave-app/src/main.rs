@@ -97,6 +97,22 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_words_saved(move || {
         let _ = t.send(Cmd::WordsSaved);
     });
+    let t = tx.clone();
+    ui.on_toggle_pick(move |id| {
+        let _ = t.send(Cmd::TogglePick(id.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_create_group(move |name| {
+        let _ = t.send(Cmd::CreateGroup(name.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_link_scan(move |code| {
+        let _ = t.send(Cmd::LinkScan(code.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_link_pick(move |i| {
+        let _ = t.send(Cmd::LinkPick(i));
+    });
     let w = ui.as_weak();
     ui.on_open_sheet(move |s| {
         if let Some(ui) = w.upgrade() {

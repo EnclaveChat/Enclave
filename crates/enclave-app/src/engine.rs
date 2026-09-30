@@ -8,7 +8,7 @@ use enclave_crypto::pwhash::PwParams;
 use enclave_net::transport::{ServerId, TcpTransport, Transport};
 use enclave_sim::LocalTransport;
 use enclave_store::{FileKeystore, MemoryKeystore};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +39,14 @@ pub enum Cmd {
     Privacy(i32),
     /// Recovery words written down.
     WordsSaved,
+    /// Toggle a contact in the new-group picker.
+    TogglePick(String),
+    /// Create a group from the picked contacts.
+    CreateGroup(String),
+    /// A link code was pasted on the devices screen.
+    LinkScan(String),
+    /// The person picked link words (index).
+    LinkPick(i32),
 }
 
 /// Where the account lives.
@@ -76,6 +84,10 @@ struct Engine {
     client: Option<Client>,
     demo: Option<Demo>,
     selected: Option<[u8; 64]>,
+    selected_group: Option<[u8; 32]>,
+    picked: BTreeSet<[u8; 64]>,
+    link_offer: Option<enclave_core::LinkOffer>,
+    link_status: String,
     status: String,
     add_error: String,
     busy: bool,
@@ -102,6 +114,11 @@ pub fn spawn(ui: slint::Weak<AppWindow>, mode: Mode) -> mpsc::UnboundedSender<Cm
 
 fn hex_id(root: &[u8; 64]) -> String {
     root[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn group_id_str(gid: &[u8; 32]) -> String {
+    let h: String = gid[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("g{h}")
 }
 
 fn clock(at: u64) -> String {
@@ -154,6 +171,7 @@ fn display(m: &enclave_core::Message) -> Msg {
         outgoing: m.outgoing,
         time,
         status,
+        sender: String::new(),
     }
 }
 
@@ -196,6 +214,10 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
         client: None,
         demo: None,
         selected: None,
+        selected_group: None,
+        picked: BTreeSet::new(),
+        link_offer: None,
+        link_status: String::new(),
         status: String::new(),
         add_error: String::new(),
         busy: false,
@@ -254,6 +276,15 @@ impl Engine {
         }
     }
 
+    fn group_of(&self, id: &str) -> Option<[u8; 32]> {
+        self.client
+            .as_ref()?
+            .groups()
+            .into_iter()
+            .map(|g| g.id)
+            .find(|g| group_id_str(g) == id)
+    }
+
     fn root_of(&self, id: &str) -> Option<[u8; 64]> {
         self.client
             .as_ref()?
@@ -286,8 +317,23 @@ impl Engine {
             }
             Cmd::Select(id) => {
                 self.selected = self.root_of(&id);
+                self.selected_group = self.group_of(&id);
                 if let (Some(c), Some(r)) = (self.client.as_mut(), self.selected) {
                     let _ = c.mark_read(&r).await;
+                }
+                if let (Some(c), Some(g)) = (self.client.as_mut(), self.selected_group) {
+                    let _ = c.mark_group_read(&g);
+                }
+            }
+            Cmd::Send(id, text) if id.starts_with('g') => {
+                let Some(gid) = self.group_of(&id) else {
+                    return;
+                };
+                self.push(ui);
+                if let Some(c) = self.client.as_mut()
+                    && c.send_group_text(&gid, &text).await.is_err()
+                {
+                    self.status = "Couldn't send to the group yet. We'll keep trying.".into();
                 }
             }
             Cmd::Send(id, text) => {
@@ -362,6 +408,67 @@ impl Engine {
                     let _ = c.set_setting("recovery-saved", &[1]);
                 }
             }
+            Cmd::TogglePick(id) => {
+                if let Some(r) = self.root_of(&id)
+                    && !self.picked.remove(&r)
+                {
+                    self.picked.insert(r);
+                }
+            }
+            Cmd::CreateGroup(name) => {
+                let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();
+                self.busy = true;
+                self.push(ui);
+                if let Some(c) = self.client.as_mut() {
+                    match c.create_group(name.trim(), &members).await {
+                        Ok(gid) => {
+                            self.picked.clear();
+                            self.selected = None;
+                            self.selected_group = Some(gid);
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_sheet(crate::Sheet::None);
+                                ui.set_group_name("".into());
+                            })
+                            .ok();
+                        }
+                        Err(_) => {
+                            self.status = "Couldn't create the group. Check your connection.".into()
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::LinkScan(code) => {
+                self.link_status.clear();
+                self.busy = true;
+                self.push(ui);
+                if let Some(c) = self.client.as_mut() {
+                    match c.link_prepare(code.trim()).await {
+                        Ok(offer) => self.link_offer = Some(offer),
+                        Err(CoreError::TooLong) => {
+                            self.link_status =
+                                "You can link up to 4 devices. Remove one first.".into()
+                        }
+                        Err(_) => self.link_status =
+                            "That code didn't work. Check that the new device is still showing it."
+                                .into(),
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::LinkPick(i) => {
+                if let (Some(offer), Some(c)) = (self.link_offer.take(), self.client.as_mut()) {
+                    self.busy = true;
+                    self.link_status = match c.link_confirm(offer, i.max(0) as usize).await {
+                        Ok(()) => "Linked. Your new device will finish setting up in a moment.".into(),
+                        Err(CoreError::Crypto) => {
+                            "Those words don't match, so nothing was linked. If you didn't start this, someone may be trying to get into your account.".into()
+                        }
+                        Err(_) => "Linking didn't finish. Try again from the new device.".into(),
+                    };
+                    self.busy = false;
+                }
+            }
         }
     }
 
@@ -397,6 +504,13 @@ impl Engine {
                             .any(|e| matches!(e, Event::Message { root, .. } if *root == sel))
                     {
                         let _ = c.mark_read(&sel).await;
+                    }
+                    if let Some(g) = self.selected_group
+                        && events.iter().any(
+                            |e| matches!(e, Event::GroupMessage { group_id, .. } if *group_id == g),
+                        )
+                    {
+                        let _ = c.mark_group_read(&g);
                     }
                 }
                 Err(_) => self.status = "Offline. Messages will send when you're back.".into(),
@@ -458,6 +572,8 @@ impl Engine {
                 },
                 verified: ct.verified,
                 tint: crate::view::tint_for(&ct.root),
+                kind: 0,
+                members: 0,
             };
             if self.selected == Some(ct.root) {
                 s.current = Some(row.clone());
@@ -475,6 +591,44 @@ impl Engine {
             }
             rows.push((last.map(|m| m.at).unwrap_or(ct.added_at), row));
         }
+        for g in c.groups().into_iter().filter(|g| !g.left) {
+            let msgs = c.group_messages(&g.id).unwrap_or_default();
+            let last = msgs.last();
+            let row = Row {
+                id: group_id_str(&g.id),
+                name: g.name.clone(),
+                preview: last
+                    .map(|m| {
+                        if m.from.is_none() {
+                            format!("You: {}", m.text)
+                        } else {
+                            format!("{}: {}", m.from_name, m.text)
+                        }
+                    })
+                    .unwrap_or_else(|| "New group".into()),
+                time: last.map(|m| clock(m.at)).unwrap_or_default(),
+                unread: g.unread as i32,
+                state: 2,
+                verified: false,
+                tint: crate::view::tint_for(&g.id),
+                kind: 1,
+                members: g.members.len() as i32 + 1,
+            };
+            if self.selected_group == Some(g.id) {
+                s.current = Some(row.clone());
+                s.messages = msgs
+                    .iter()
+                    .map(|m| Msg {
+                        text: m.text.clone(),
+                        outgoing: m.from.is_none(),
+                        time: clock(m.at),
+                        status: if m.delivered { 1 } else { 0 },
+                        sender: m.from_name.clone(),
+                    })
+                    .collect();
+            }
+            rows.push((last.map(|m| m.at).unwrap_or(0), row));
+        }
         rows.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, r) in rows {
             if r.state == 1 {
@@ -483,6 +637,41 @@ impl Engine {
                 s.contacts.push(r)
             }
         }
+        s.pick = c
+            .contacts()
+            .into_iter()
+            .filter(|ct| ct.state == ContactState::Accepted)
+            .map(|ct| crate::view::Pick {
+                id: hex_id(&ct.root),
+                name: ct.name.clone(),
+                tint: crate::view::tint_for(&ct.root),
+                selected: self.picked.contains(&ct.root),
+            })
+            .collect();
+        s.devices = c
+            .devices()
+            .into_iter()
+            .map(|d| {
+                let label = if d.this_device {
+                    "This device"
+                } else if d.primary {
+                    "First device"
+                } else {
+                    "Linked device"
+                };
+                let day = chrono::DateTime::from_timestamp(d.added_at as i64, 0)
+                    .map(|t| t.format("%-d %b %Y").to_string())
+                    .unwrap_or_default();
+                (label.to_string(), format!("Added {day}"))
+            })
+            .collect();
+        s.link_choices = self
+            .link_offer
+            .as_ref()
+            .map(|o| o.choices.iter().map(|c| c.join(" ")).collect())
+            .unwrap_or_default();
+        s.link_status = self.link_status.clone();
+        s.can_link = c.can_link();
         s
     }
 }

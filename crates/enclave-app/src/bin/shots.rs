@@ -38,12 +38,15 @@ fn fixture() -> Snapshot {
         state,
         verified,
         tint,
+        kind: 0,
+        members: 0,
     };
     let msg = |text: &str, outgoing: bool, time: &str, status: i32| Msg {
         text: text.into(),
         outgoing,
         time: time.into(),
         status,
+        sender: String::new(),
     };
     let words = "absurd amount arctic brisk canyon cedar civil cluster dove eager ember fabric glide harbor ivory jungle kettle lunar meadow noble orbit pepper quartz ridge";
     Snapshot {
@@ -138,7 +141,71 @@ fn fixture() -> Snapshot {
         recovery_saved: false,
         add_error: String::new(),
         busy: false,
+        pick: vec![
+            enclave_app::view::Pick {
+                id: "a1".into(),
+                name: "Sam Okafor".into(),
+                tint: 0,
+                selected: true,
+            },
+            enclave_app::view::Pick {
+                id: "b2".into(),
+                name: "Priya Raman".into(),
+                tint: 1,
+                selected: true,
+            },
+            enclave_app::view::Pick {
+                id: "d4".into(),
+                name: "Tomasz".into(),
+                tint: 4,
+                selected: false,
+            },
+        ],
+        devices: vec![
+            ("This device".into(), "Added 2 Sep 2026".into()),
+            ("Linked device".into(), "Added 28 Sep 2026".into()),
+        ],
+        link_choices: Vec::new(),
+        link_status: String::new(),
+        can_link: true,
     }
+}
+
+fn group_fixture(base: &Snapshot) -> Snapshot {
+    let mut g = base.clone();
+    let row = Row {
+        id: "g1".into(),
+        name: "Book club".into(),
+        preview: "Priya: Chapter 4 by Friday?".into(),
+        time: "15:10".into(),
+        unread: 0,
+        state: 2,
+        verified: false,
+        tint: 5,
+        kind: 1,
+        members: 4,
+    };
+    g.contacts.insert(0, row.clone());
+    g.current = Some(row);
+    let m = |text: &str, sender: &str, outgoing: bool, time: &str| Msg {
+        text: text.into(),
+        outgoing,
+        time: time.into(),
+        status: 1,
+        sender: sender.into(),
+    };
+    g.messages = vec![
+        m(
+            "Welcome, everyone. First book is on the shelf by the door.",
+            "Sam Okafor",
+            false,
+            "14:40",
+        ),
+        m("Chapter 4 by Friday?", "Priya Raman", false, "15:02"),
+        m("Friday works for me.", "", true, "15:08"),
+        m("Same here. I'll bring tea.", "Tomasz", false, "15:10"),
+    ];
+    g
 }
 
 fn render(window: &MinimalSoftwareWindow, ui: &AppWindow, size: (u32, u32), out: &Path) {
@@ -217,6 +284,7 @@ fn main() -> Result<(), slint::PlatformError> {
             outgoing: false,
             time: "13:20".into(),
             status: 2,
+            sender: String::new(),
         }];
         view::apply(&ui, &request);
         shot("06-request", desktop);
@@ -228,6 +296,7 @@ fn main() -> Result<(), slint::PlatformError> {
             outgoing: true,
             time: "09:12".into(),
             status: 2,
+            sender: String::new(),
         }];
         view::apply(&ui, &pending);
         shot("07-pending", phone);
@@ -248,6 +317,25 @@ fn main() -> Result<(), slint::PlatformError> {
         err.add_error = "This code links a device to your account. Only scan it from Settings → Your devices, on your own new device. No one from Enclave will ever ask you to scan one.".into();
         view::apply(&ui, &err);
         shot("10-add-error", desktop);
+        let group = group_fixture(&data);
+        view::apply(&ui, &group);
+        ui.set_sheet(Sheet::None);
+        shot("14-group", desktop);
+        shot("14-group-phone", phone);
+        view::apply(&ui, &data);
+        ui.set_group_name("Book club".into());
+        ui.set_sheet(Sheet::NewGroup);
+        shot("15-new-group", desktop);
+        let mut linking = data.clone();
+        linking.link_choices = vec![
+            "harbor ivory kettle".into(),
+            "glide ember noble".into(),
+            "cedar orbit brisk".into(),
+            "quartz amount lunar".into(),
+        ];
+        view::apply(&ui, &linking);
+        ui.set_sheet(Sheet::Devices);
+        shot("16-devices-link", desktop);
         view::apply(&ui, &data);
         ui.set_sheet(Sheet::Settings);
         shot("11-privacy", desktop);

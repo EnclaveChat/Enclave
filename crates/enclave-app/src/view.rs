@@ -1,7 +1,7 @@
 //! Display data: plain `Send` structs built by the engine and turned into
 //! Slint models on the UI thread.
 
-use crate::{AppWindow, ContactRow, MessageRow, Screen};
+use crate::{AppWindow, ContactRow, DeviceRow, MessageRow, PickRow, Screen};
 use slint::{Color, Image, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::rc::Rc;
 
@@ -34,6 +34,23 @@ pub struct Row {
     pub verified: bool,
     /// Tint index from the key.
     pub tint: usize,
+    /// 0 person, 1 group.
+    pub kind: i32,
+    /// Members (groups).
+    pub members: i32,
+}
+
+/// A contact that can be picked for a new group.
+#[derive(Clone, Debug, Default)]
+pub struct Pick {
+    /// Id.
+    pub id: String,
+    /// Name.
+    pub name: String,
+    /// Tint.
+    pub tint: usize,
+    /// Picked.
+    pub selected: bool,
 }
 
 /// A message for display.
@@ -47,6 +64,8 @@ pub struct Msg {
     pub time: String,
     /// 0 sending, 1 on its way, 2 delivered.
     pub status: i32,
+    /// Sender name (incoming group messages).
+    pub sender: String,
 }
 
 /// Everything the window shows.
@@ -76,6 +95,16 @@ pub struct Snapshot {
     pub add_error: String,
     /// A request is in flight.
     pub busy: bool,
+    /// Contacts to pick for a new group.
+    pub pick: Vec<Pick>,
+    /// Devices: (label, detail).
+    pub devices: Vec<(String, String)>,
+    /// Link word choices (when a link code was scanned).
+    pub link_choices: Vec<String>,
+    /// Link status line.
+    pub link_status: String,
+    /// This device can link others.
+    pub can_link: bool,
 }
 
 /// Initials for contact art: first letters of up to two words.
@@ -113,6 +142,8 @@ fn row(r: &Row) -> ContactRow {
         unread: r.unread,
         state: r.state,
         verified: r.verified,
+        kind: r.kind,
+        members: r.members,
     }
 }
 
@@ -174,6 +205,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             outgoing: m.outgoing,
             time: m.time.clone().into(),
             status: m.status,
+            sender: m.sender.clone().into(),
         })
         .collect();
     ui.set_messages(ModelRc::from(Rc::new(VecModel::from(msgs))));
@@ -183,6 +215,30 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_recovery_saved(s.recovery_saved);
     ui.set_add_error(s.add_error.clone().into());
     ui.set_busy(s.busy);
+    let pick: Vec<PickRow> = s
+        .pick
+        .iter()
+        .map(|p| PickRow {
+            id: p.id.clone().into(),
+            name: p.name.clone().into(),
+            initials: initials(&p.name).into(),
+            tint: tint(p.tint),
+            selected: p.selected,
+        })
+        .collect();
+    ui.set_pick(ModelRc::from(Rc::new(VecModel::from(pick))));
+    let devices: Vec<DeviceRow> = s
+        .devices
+        .iter()
+        .map(|(l, d)| DeviceRow {
+            label: l.clone().into(),
+            detail: d.clone().into(),
+        })
+        .collect();
+    ui.set_devices(ModelRc::from(Rc::new(VecModel::from(devices))));
+    ui.set_link_choices(strings(&s.link_choices));
+    ui.set_link_status(s.link_status.clone().into());
+    ui.set_can_link(s.can_link);
     if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
     }
