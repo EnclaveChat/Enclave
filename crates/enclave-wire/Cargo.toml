@@ -1,0 +1,16 @@
+[package]
+name = "enclave-wire"
+description = "Enclave fixed-layout wire units, stored envelopes, poll objects and size buckets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2"
