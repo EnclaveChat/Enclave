@@ -97,6 +97,8 @@ Two independent rebuilders produce identical hashes; `cargo vet` covers 100% of 
 
 ## 2. Formal-methods plan
 
+**Implemented so far** (`formal/`, see `formal/README.md` for each model's boundary): ProVerif models of EQXDH (secrecy both ways, injective mutual authentication, forward secrecy), the "all KEMs broken" lemma (secret with an in-person PSK, attack found without one), Lockstep post-compromise healing through the ML-KEM step (and an attack against an X448-only step), and group MAC-vector insider unforgeability. `cargo xtask proverif` checks each query against the result written before it, including sanity queries that must find an attack; CI runs it. Tamarin, deniability, the braid, linking, the 72-hour guard, the wrap table, tokens and the computational proofs are still open. Boundaries live in `formal/README.md` rather than one `BOUNDARY.md` per model.
+
 | Model | Tool | Scope | Properties | Milestone |
 |---|---|---|---|---|
 | EQXDH | Tamarin and ProVerif | Two-stage handshake with vault KEM, auth eks, braid, PSK | Secrecy of `SK`; mutual authentication (classical + PSK immediately; PQ after the AUTH mix); initiator identity hidden from the responder's server; forward secrecy; deniability (Off the record); downgrade resistance (`kem_count`, `psk_flag`, mode, suite); **"all KEMs broken, optical exchange not recorded" lemma** | M2 |

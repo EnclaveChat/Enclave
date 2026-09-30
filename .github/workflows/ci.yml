@@ -57,3 +57,16 @@ jobs:
         run: |
           cargo xtask repro enclave-relay
           cargo xtask repro enclave-server
+
+  proverif:
+    name: formal models (ProVerif)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+      - name: Install ProVerif
+        run: sudo apt-get update && sudo apt-get install -y proverif
+      - name: Every query gives its expected result
+        run: cargo xtask proverif

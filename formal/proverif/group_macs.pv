@@ -1,0 +1,50 @@
+(* Group message authentication by MAC vector (docs/07-groups.md §3),
+   symbolic model.
+
+   Every group message carries one tag per other member, each under a key
+   the sender shares with that member only. Members A, B and C; C is
+   compromised (the attacker holds every key C has, including the group
+   epoch keys all members share). The attacker must still not make B
+   accept a message as coming from A that A never sent: B checks the tag
+   under the key only A and B hold. Agreement here is non-injective:
+   replay protection comes from the sender chains' counters, not from the
+   MAC vector.
+
+   Each query carries its expected result: `cargo xtask proverif` checks
+   them in order. *)
+
+set attacker = active.
+
+free c: channel.
+
+type key.
+fun mac(key, bitstring): bitstring.
+
+event ASends(bitstring).
+event BAcceptsFromA(bitstring).
+event BAcceptsFromC(bitstring).
+
+(* A compromised member cannot pass a message off as another's. *)
+(* expect: true *)
+query m: bitstring; event(BAcceptsFromA(m)) ==> event(ASends(m)).
+(* ... but can send as themselves, of course (sanity check). *)
+(* expect: false *)
+query m: bitstring; event(BAcceptsFromC(m)) ==> event(ASends(m)).
+
+process
+  new kab: key; new kac: key; new kbc: key;
+  (* The group epoch key: every member holds it. *)
+  new epoch: key;
+  (* C is compromised. *)
+  out(c, (kac, kbc, epoch));
+  (
+    (* A sends messages with tags for B and C. *)
+    ! ( new m: bitstring; event ASends(m);
+        out(c, (m, mac(kab, m), mac(kac, m))) )
+  | (* B accepts a message "from A" if A's tag for B checks. *)
+    ! ( in(c, (m: bitstring, tb: bitstring, tc: bitstring));
+        if tb = mac(kab, m) then event BAcceptsFromA(m) )
+  | (* B accepts a message "from C" if C's tag for B checks. *)
+    ! ( in(c, (m: bitstring, tb: bitstring));
+        if tb = mac(kbc, m) then event BAcceptsFromC(m) )
+  )

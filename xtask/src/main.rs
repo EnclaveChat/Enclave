@@ -6,6 +6,9 @@
 //!   two target directories, and check the two are byte-identical
 //!   (`docs/19-ops.md`, reproducible builds). Default: `enclave-relay`.
 //! * `dudect`: run the constant-time timing tests (slow; not in `cargo test`).
+//! * `proverif`: run every model in `formal/proverif/` and check each
+//!   query's result against the `(* expect: true|false *)` note before it.
+//!   The binary is `$PROVERIF`, or `proverif` on the path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -23,8 +26,9 @@ fn main() -> ExitCode {
             repro(pkg, bin)
         }
         "dudect" => dudect(),
+        "proverif" => proverif(),
         _ => {
-            eprintln!("usage: cargo xtask labels | repro [package] [bin] | dudect");
+            eprintln!("usage: cargo xtask labels | repro [package] [bin] | dudect | proverif");
             ExitCode::FAILURE
         }
     }
@@ -87,6 +91,95 @@ fn repro(pkg: &str, bin: &str) -> ExitCode {
 
 /// The timing tests live in `enclave-crypto/tests/dudect.rs` (ignored by
 /// default: they take minutes and need a quiet machine).
+/// Expected results, in order, from `(* expect: true *)` notes.
+fn expectations(model: &str) -> Vec<bool> {
+    model
+        .match_indices("(* expect: ")
+        .filter_map(|(i, _)| {
+            let rest = &model[i + "(* expect: ".len()..];
+            if rest.starts_with("true") {
+                Some(true)
+            } else if rest.starts_with("false") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Results, in order, from ProVerif's `RESULT … is true.` lines. A query
+/// ProVerif can't decide counts as neither.
+fn results(output: &str) -> Vec<Option<bool>> {
+    output
+        .lines()
+        .filter(|l| l.starts_with("RESULT "))
+        .map(|l| {
+            if l.ends_with(" is true.") {
+                Some(true)
+            } else if l.ends_with(" is false.") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn proverif() -> ExitCode {
+    let bin = std::env::var("PROVERIF").unwrap_or_else(|_| "proverif".into());
+    let dir = root().join("formal/proverif");
+    let mut models: Vec<PathBuf> = fs::read_dir(&dir)
+        .map(|d| {
+            d.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "pv"))
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    if models.is_empty() {
+        eprintln!("no models in {}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    let mut ok = true;
+    for m in &models {
+        let name = m
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        let want = expectations(&fs::read_to_string(m).unwrap_or_default());
+        let out = match std::process::Command::new(&bin).arg(m).output() {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Err(e) => {
+                eprintln!("can't run {bin}: {e} (set PROVERIF to its path)");
+                return ExitCode::FAILURE;
+            }
+        };
+        let got = results(&out);
+        if want.is_empty() || got.len() != want.len() {
+            eprintln!("{name}: {} expectations, {} results", want.len(), got.len());
+            ok = false;
+            continue;
+        }
+        let mut all = true;
+        for (i, (w, g)) in want.iter().zip(&got).enumerate() {
+            if Some(*w) != *g {
+                eprintln!("{name}: query {} expected {w}, got {g:?}", i + 1);
+                all = false;
+            }
+        }
+        if all {
+            println!("{name}: {} queries as expected", got.len());
+        }
+        ok &= all;
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn dudect() -> ExitCode {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = std::process::Command::new(cargo)

@@ -1,0 +1,81 @@
+(* Lockstep ratchet post-compromise security (docs/05-ratchet.md),
+   symbolic model.
+
+   The attacker learns the whole root key, and can take discrete logs
+   (a quantum attacker). Afterwards one round trip happens that the
+   attacker sees but does not alter (post-compromise security needs one
+   such exchange; an active attacker holding the root key can impersonate
+   either side, which no ratchet prevents).
+
+   - The ML-KEM step: Alice makes a fresh decapsulation key, Bob
+     encapsulates to it, and the root becomes mix(root, shared secret).
+     What is sealed under the new root is secret again.
+   - An X448-only step (the classical half alone) does not heal against
+     this attacker.
+
+   Each query carries its expected result: `cargo xtask proverif` checks
+   them in order. *)
+
+set attacker = active.
+
+free c: channel.
+(* Delivery the attacker reads (everything is also sent on c) but cannot
+   change. *)
+free a2b: channel [private].
+free b2a: channel [private].
+free a2b_dh: channel [private].
+free b2a_dh: channel [private].
+
+type key.
+type ksk.
+type nonce.
+type exponent.
+type G.
+const g: G [data].
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+reduc forall x: exponent; dlog(exp(g, x)) = x.
+
+fun mlpk(ksk): bitstring.
+fun mlct(bitstring, nonce): bitstring.
+fun mlss(bitstring, nonce): key.
+reduc forall sk: ksk, r: nonce; mldec(sk, mlct(mlpk(sk), r)) = mlss(mlpk(sk), r).
+
+fun mix(key, key): key.
+fun mixg(key, G): key.
+fun seal(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; open(k, seal(k, m)) = m.
+
+free healed: bitstring [private].
+free classical: bitstring [private].
+
+(* After the ML-KEM step: secret again. *)
+(* expect: true *)
+query attacker(healed).
+(* After an X448-only step against a quantum attacker: not. *)
+(* expect: false *)
+query attacker(classical).
+
+process
+  new rk: key;
+  (* The compromise: the root key leaks. *)
+  out(c, rk);
+  (
+    (* Alice: a fresh ML-KEM key after the compromise. *)
+    ( new dk: ksk; out(c, mlpk(dk)); out(a2b, mlpk(dk));
+      in(b2a, ct: bitstring);
+      let rk2 = mix(rk, mldec(dk, ct)) in
+      out(c, seal(rk2, healed)) )
+  | (* Bob: encapsulates to what Alice sent. *)
+    ( in(a2b, ek: bitstring); new r: nonce;
+      out(c, mlct(ek, r)); out(b2a, mlct(ek, r));
+      let rk2 = mix(rk, mlss(ek, r)) in
+      out(c, seal(rk2, healed)) )
+  | (* The same with only a Diffie-Hellman step. *)
+    ( new x: exponent; out(c, exp(g, x)); out(a2b_dh, exp(g, x));
+      in(b2a_dh, gy: G);
+      out(c, seal(mixg(rk, exp(gy, x)), classical)) )
+  | ( in(a2b_dh, gx: G); new y: exponent;
+      out(c, exp(g, y)); out(b2a_dh, exp(g, y));
+      out(c, seal(mixg(rk, exp(gx, y)), classical)) )
+  )

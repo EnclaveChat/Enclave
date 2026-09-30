@@ -1,0 +1,117 @@
+(* EQXDH v1 (docs/04-eqxdh.md), symbolic model.
+
+   Alice initiates to Bob. The session key combines four X448 values
+   (DH1..DH4), ML-KEM to Bob's one-time PQ prekey, McEliece to Bob's
+   account vault key and ML-KEM to Bob's device auth key, bound to every
+   public key and ciphertext (EnclaveCombine). Bob's reply encapsulates to
+   Alice's device auth key and mixes that secret in, which authenticates
+   Alice post-quantum; Alice accepts only after key confirmation.
+
+   Abstractions: KEMs are ideal (only the secret key opens a ciphertext);
+   signatures on prekeys are replaced by prekeys delivered on an
+   authenticated public channel; identity sealing (stage 1) is omitted
+   because it only hides who initiates, which ProVerif's secrecy queries
+   don't express.
+
+   Each query carries its expected result: `cargo xtask proverif` checks
+   them in order. *)
+
+set attacker = active.
+
+free c: channel.
+free pub: channel.  (* where Bob's prekeys and Alice's keys are published *)
+
+type exponent.
+type G.
+const g: G [data].
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+type nonce.
+type ksk.
+type key.
+
+(* ML-KEM-1024 and Classic McEliece, each an ideal KEM. *)
+fun mlpk(ksk): bitstring.
+fun mlct(bitstring, nonce): bitstring.
+fun mlss(bitstring, nonce): key.
+reduc forall sk: ksk, r: nonce; mldec(sk, mlct(mlpk(sk), r)) = mlss(mlpk(sk), r).
+
+fun mcpk(ksk): bitstring.
+fun mcct(bitstring, nonce): bitstring.
+fun mcss(bitstring, nonce): key.
+reduc forall sk: ksk, r: nonce; mcdec(sk, mcct(mcpk(sk), r)) = mcss(mcpk(sk), r).
+
+(* EnclaveCombine and the reply's root mix (KMAC256). *)
+fun combine(G, G, G, G, key, key, key, bitstring): key.
+fun mix(key, key): key.
+fun confirm(key): bitstring.
+
+(* EnclaveSeal as authenticated encryption. *)
+fun seal(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; open(k, seal(k, m)) = m.
+
+free secretA: bitstring [private].
+free secretB: bitstring [private].
+
+event AliceSends(G, G, key).
+event BobAccepts(G, G, key).
+event BobReplies(G, G, key).
+event AliceAccepts(G, G, key).
+
+(* Secrecy of what each side sends under the session. *)
+(* expect: true *)
+query attacker(secretA).
+(* expect: true *)
+query attacker(secretB).
+(* Bob only accepts a key Alice derived for him, once. *)
+(* expect: true *)
+query a: G, b: G, k: key; inj-event(BobAccepts(a, b, k)) ==> inj-event(AliceSends(a, b, k)).
+(* Alice only accepts a reply key Bob derived for her. *)
+(* expect: true *)
+query a: G, b: G, k: key; inj-event(AliceAccepts(a, b, k)) ==> inj-event(BobReplies(a, b, k)).
+
+let alice(ika: exponent, auth_a: ksk, ikb: G, spk: G, opk: G, pqopk: bitstring, vault: bitstring, auth_b: bitstring) =
+  new ek: exponent;
+  new r1: nonce; new r2: nonce; new r3: nonce;
+  let ika_pub = exp(g, ika) in
+  let ekp = exp(g, ek) in
+  let ct1 = mlct(pqopk, r1) in
+  let ct2 = mcct(vault, r2) in
+  let ct3 = mlct(auth_b, r3) in
+  let transcript = (ika_pub, ikb, spk, opk, pqopk, vault, auth_b, mlpk(auth_a), ekp, ct1, ct2, ct3) in
+  let sk = combine(exp(spk, ika), exp(ikb, ek), exp(spk, ek), exp(opk, ek),
+                   mlss(pqopk, r1), mcss(vault, r2), mlss(auth_b, r3), transcript) in
+  event AliceSends(ika_pub, ikb, sk);
+  out(c, (ika_pub, ekp, ct1, ct2, ct3, seal(sk, secretA)));
+  in(c, (ct4: bitstring, conf: bitstring, body: bitstring));
+  let sk2 = mix(sk, mldec(auth_a, ct4)) in
+  if conf = confirm(sk2) then
+  event AliceAccepts(ika_pub, ikb, sk2);
+  let m = open(sk2, body) in 0.
+
+let bob(ikb: exponent, spk: exponent, opk: exponent, pqopk: ksk, vault: ksk, auth_b: ksk, ika_pub: G, auth_a: bitstring) =
+  in(c, (=ika_pub, ekp: G, ct1: bitstring, ct2: bitstring, ct3: bitstring, body: bitstring));
+  let ikb_pub = exp(g, ikb) in
+  let transcript = (ika_pub, ikb_pub, exp(g, spk), exp(g, opk), mlpk(pqopk), mcpk(vault), mlpk(auth_b), auth_a, ekp, ct1, ct2, ct3) in
+  let sk = combine(exp(ika_pub, spk), exp(ekp, ikb), exp(ekp, spk), exp(ekp, opk),
+                   mldec(pqopk, ct1), mcdec(vault, ct2), mldec(auth_b, ct3), transcript) in
+  let m = open(sk, body) in
+  event BobAccepts(ika_pub, ikb_pub, sk);
+  new r4: nonce;
+  let sk2 = mix(sk, mlss(auth_a, r4)) in
+  event BobReplies(ika_pub, ikb_pub, sk2);
+  out(c, (mlct(auth_a, r4), confirm(sk2), seal(sk2, secretB))).
+
+process
+  new ika: exponent; new auth_a: ksk;
+  new ikb: exponent; new spk: exponent; new vault: ksk; new auth_b: ksk;
+  (* Long-term and medium-term public keys are public. *)
+  out(pub, (exp(g, ika), mlpk(auth_a), exp(g, ikb), exp(g, spk), mcpk(vault), mlpk(auth_b)));
+  (
+    (* Each session uses a fresh one-time prekey pair (X448 and ML-KEM). *)
+    ! (new opk: exponent; new pqopk: ksk;
+       out(pub, (exp(g, opk), mlpk(pqopk)));
+       ( alice(ika, auth_a, exp(g, ikb), exp(g, spk), exp(g, opk), mlpk(pqopk), mcpk(vault), mlpk(auth_b))
+       | bob(ikb, spk, opk, pqopk, vault, auth_b, exp(g, ika), mlpk(auth_a)) ))
+  )
