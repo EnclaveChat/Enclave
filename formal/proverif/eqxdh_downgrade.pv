@@ -1,0 +1,66 @@
+(* EQXDH downgrade resistance (docs/04-eqxdh.md; RT-07), symbolic model.
+
+   The initial message says which suite it uses (three KEMs, or two while
+   the McEliece key hasn't arrived) and whether a PSK is mixed in. That
+   byte travels in the clear, so an attacker can rewrite it. EnclaveCombine
+   binds the suite label and the PSK flag into the key, so a rewritten
+   mode gives Bob a different key and he rejects the message: he never
+   accepts a session in a mode Alice didn't choose.
+
+   A second, deliberately weakened instance leaves the mode out of the
+   combiner; the sanity query finds the downgrade there, which shows the
+   first result is not vacuous.
+
+   Each query carries its expected result: `cargo xtask proverif` checks
+   them in order. *)
+
+set attacker = active.
+
+free c: channel.
+
+type key.
+type mode.
+const three_kem: mode [data].
+const two_kem: mode [data].
+const hello: bitstring.
+
+(* The KEM and DH secrets, abstracted to one shared secret per session
+   that only Alice and Bob hold. *)
+fun bound(key, mode): key.
+fun unbound(key): key.
+fun seal(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; open(k, seal(k, m)) = m.
+
+event AliceSends(mode, key).
+event BobAccepts(mode, key).
+event AliceSendsWeak(mode, key).
+event BobAcceptsWeak(mode, key).
+
+(* Bob accepts only the mode Alice chose. *)
+(* expect: true *)
+query m: mode, s: key; event(BobAccepts(m, s)) ==> event(AliceSends(m, s)).
+(* Without the mode in the combiner, the attacker can downgrade. *)
+(* expect: false *)
+query m: mode, s: key; event(BobAcceptsWeak(m, s)) ==> event(AliceSendsWeak(m, s)).
+
+let alice(s: key, m: mode) =
+  event AliceSends(m, s);
+  out(c, (m, seal(bound(s, m), hello))).
+
+let bob(s: key) =
+  in(c, (m: mode, body: bitstring));
+  let m2 = open(bound(s, m), body) in
+  event BobAccepts(m, s).
+
+let alice_weak(s: key, m: mode) =
+  event AliceSendsWeak(m, s);
+  out(c, (m, seal(unbound(s), hello))).
+
+let bob_weak(s: key) =
+  in(c, (m: mode, body: bitstring));
+  let m2 = open(unbound(s), body) in
+  event BobAcceptsWeak(m, s).
+
+process
+  ! ( new s: key; ( alice(s, three_kem) | bob(s) ) )
+  | ! ( new s: key; ( alice_weak(s, three_kem) | bob_weak(s) ) )
