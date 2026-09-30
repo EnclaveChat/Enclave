@@ -1,0 +1,19 @@
+[package]
+name = "enclave-store"
+description = "Enclave encrypted local storage: sealed redb records, crypto-shredding keyring, keystore adapters and backups."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+redb = "4.3.0"
+zeroize = "1.9.0"
+thiserror = "2"

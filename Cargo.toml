@@ -9,6 +9,8 @@ members = [
     "crates/enclave-kt",
     "crates/enclave-server",
     "crates/enclave-sim",
+    "crates/enclave-net",
+    "crates/enclave-store",
     "xtask",
 ]
 
