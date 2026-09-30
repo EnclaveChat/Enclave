@@ -70,6 +70,7 @@ fn snapshot() -> Snapshot {
         meet_error: String::new(),
         meet_done: String::new(),
         timer: 3600,
+        search: vec![Row::default()],
     }
 }
 
@@ -105,6 +106,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::Timer("ab".into(), 86_400),
         Cmd::SendFile("ab".into(), "a.txt".into(), vec![7; 1000], "look".into()),
         Cmd::SaveFile("ab".into(), 6),
+        Cmd::Search("café".into()),
     ]
 }
 

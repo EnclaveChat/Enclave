@@ -153,6 +153,9 @@ pub struct Snapshot {
     pub meet_done: String,
     /// Disappearing timer of the open conversation, seconds (0 off).
     pub timer: u32,
+    /// Search results (conversation rows with a snippet as the preview),
+    /// newest first; empty when not searching.
+    pub search: Vec<Row>,
 }
 
 /// UI → vault.
@@ -219,6 +222,8 @@ pub enum Cmd {
     SendFile(String, String, Vec<u8>, String),
     /// Download an attachment to hand to the UI: conversation, seq.
     SaveFile(String, u64),
+    /// Search messages (empty stops searching).
+    Search(String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -363,6 +368,7 @@ impl Snapshot {
             .str(&self.meet_error)
             .str(&self.meet_done)
             .u32(self.timer);
+        put_rows(&mut w, &self.search);
         w.0
     }
 
@@ -454,6 +460,7 @@ impl Snapshot {
             meet_error: r.str()?,
             meet_done: r.str()?,
             timer: r.u32()?,
+            search: get_rows(&mut r)?,
         };
         r.end()?;
         Ok(s)
@@ -495,6 +502,7 @@ impl Cmd {
             Cmd::Timer(c, t) => w.u8(28).str(c).u32(*t),
             Cmd::SendFile(c, n, b, cap) => w.u8(29).str(c).str(n).bytes(b).str(cap),
             Cmd::SaveFile(c, s) => w.u8(30).str(c).u64(*s),
+            Cmd::Search(q) => w.u8(31).str(q),
         };
         w.0
     }
@@ -533,6 +541,7 @@ impl Cmd {
             28 => Cmd::Timer(r.str()?, r.u32()?),
             29 => Cmd::SendFile(r.str()?, r.str()?, r.bytes()?, r.str()?),
             30 => Cmd::SaveFile(r.str()?, r.u64()?),
+            31 => Cmd::Search(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

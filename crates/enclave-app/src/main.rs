@@ -179,6 +179,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let t = tx.clone();
+    ui.on_search(move |q| {
+        let _ = t.send(Cmd::Search(q.to_string()));
+    });
+    let t = tx.clone();
     ui.on_react(move |id, seq, emoji| {
         if let Ok(seq) = seq.parse() {
             let _ = t.send(Cmd::React(id.to_string(), seq, emoji.to_string()));

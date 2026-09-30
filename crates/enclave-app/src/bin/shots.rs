@@ -201,6 +201,7 @@ fn fixture() -> Snapshot {
         meet_error: String::new(),
         meet_done: String::new(),
         timer: 0,
+        search: Vec::new(),
     }
 }
 
@@ -440,6 +441,23 @@ fn main() -> Result<(), slint::PlatformError> {
         view::apply(&ui, &timed);
         ui.set_sheet(Sheet::Timer);
         shot("22-timer-phone", phone);
+        let mut found = data.clone();
+        found.current = None;
+        found.search = vec![Row {
+            id: "s1".into(),
+            name: "Sam Okafor".into(),
+            preview: "…Tomorrow works. Same café?".into(),
+            time: "14:02".into(),
+            state: 2,
+            tint: 0,
+            ..Default::default()
+        }];
+        view::apply(&ui, &found);
+        ui.set_sheet(Sheet::None);
+        ui.set_current_id("".into());
+        ui.set_search_query("café".into());
+        shot("23-search-phone", phone);
+        ui.set_search_query("".into());
         view::apply(&ui, &data);
         view::apply(&ui, &data);
         ui.set_sheet(Sheet::Settings);

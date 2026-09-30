@@ -164,6 +164,9 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
     ui.set_timer(s.timer as i32);
+    ui.set_search_results(ModelRc::from(Rc::new(VecModel::from(
+        s.search.iter().map(row).collect::<Vec<_>>(),
+    ))));
     if ui.get_meet_code().as_str() != s.meet_code {
         ui.set_meet_code(s.meet_code.clone().into());
         if !s.meet_code.is_empty() {

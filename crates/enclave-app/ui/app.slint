@@ -339,6 +339,9 @@ export component AppWindow inherits Window {
     in property <string> recovery-alert;
     callback stop-recovery();
     callback meet-scan(string);
+    callback search(string);
+    in property <[ContactRow]> search-results;
+    in-out property <string> search-query;
     callback react(string, string, string);
     callback edit-message(string, string, string);
     callback delete-message(string, string);
@@ -521,6 +524,7 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     spacing: Tokens.space-s;
+                    vertical-stretch: 0;
                     ActionTile { text: "My code"; icon: Icons.qr; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.my-code); } }
                     ActionTile { text: "Add"; icon: Icons.link; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.add); } }
                     ActionTile { text: "Group"; icon: Icons.group; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.new-group); } }
@@ -550,33 +554,57 @@ export component AppWindow inherits Window {
                         QuietButton { text: "Show words"; clicked => { root.open-sheet(Sheet.recovery); } }
                     }
                 }
+                Field {
+                    placeholder: "Search messages";
+                    text <=> root.search-query;
+                    edited => { root.search(root.search-query); }
+                }
                 Flickable {
                     vertical-stretch: 1;
                     content-height: list.preferred-height;
                     list := VerticalLayout {
                         alignment: start;
                         spacing: 2px;
-                        if root.requests.length > 0: Caption {
+                        if root.search-query != "": Caption {
+                            text: root.search-results.length == 0
+                                ? (root.search-query.character-count < 2 ? "Keep typing…" : "No messages found. Search only looks on this device.")
+                                : "Messages";
+                            font-weight: 600;
+                            height: 28px;
+                            vertical-alignment: center;
+                        }
+                        if root.search-query != "": VerticalLayout {
+                            spacing: 2px;
+                            for h in root.search-results: ContactItem {
+                                item: h;
+                                selected: false;
+                                clicked => { root.select(h.id); }
+                            }
+                        }
+                        if root.search-query == "" && root.requests.length > 0: Caption {
                             text: "Message requests";
                             font-weight: 600;
                             height: 28px;
                             vertical-alignment: center;
                         }
-                        for r in root.requests: ContactItem {
-                            item: r;
-                            selected: r.id == root.current-id;
-                            clicked => { root.select(r.id); }
-                        }
-                        if root.requests.length > 0 && root.contacts.length > 0: Caption {
-                            text: "Conversations";
-                            font-weight: 600;
-                            height: 28px;
-                            vertical-alignment: center;
-                        }
-                        for c in root.contacts: ContactItem {
-                            item: c;
-                            selected: c.id == root.current-id;
-                            clicked => { root.select(c.id); }
+                        if root.search-query == "": VerticalLayout {
+                            spacing: 2px;
+                            for r in root.requests: ContactItem {
+                                item: r;
+                                selected: r.id == root.current-id;
+                                clicked => { root.select(r.id); }
+                            }
+                            if root.requests.length > 0 && root.contacts.length > 0: Caption {
+                                text: "Conversations";
+                                font-weight: 600;
+                                height: 28px;
+                                vertical-alignment: center;
+                            }
+                            for c in root.contacts: ContactItem {
+                                item: c;
+                                selected: c.id == root.current-id;
+                                clicked => { root.select(c.id); }
+                            }
                         }
                     }
                 }

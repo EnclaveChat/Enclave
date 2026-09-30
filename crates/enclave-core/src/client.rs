@@ -103,6 +103,7 @@ mod history;
 mod link;
 mod meet;
 mod messages;
+mod search;
 mod usernames;
 
 pub use groups::{GroupInfo, GroupMessage};
@@ -110,6 +111,7 @@ pub use guard::RecoveryAlert;
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
+pub use search::{Hit, Place};
 
 /// Something the UI should show.
 #[derive(Clone, Debug, PartialEq, Eq)]

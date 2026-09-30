@@ -122,6 +122,7 @@ struct Engine {
     busy: bool,
     /// The recovery sheet is open: only then do the words leave the vault.
     reveal_words: bool,
+    search: String,
     meet_code: String,
     meet_words: String,
     meet_name: String,
@@ -336,6 +337,7 @@ pub async fn run(
         join_words: String::new(),
         busy: false,
         reveal_words: false,
+        search: String::new(),
         meet_code: String::new(),
         meet_words: String::new(),
         meet_name: String::new(),
@@ -699,6 +701,7 @@ impl Engine {
                 }
             }
             Cmd::RevealWords(on) => self.reveal_words = on,
+            Cmd::Search(q) => self.search = q,
             Cmd::Meet(open) => {
                 self.meet_words.clear();
                 self.meet_name.clear();
@@ -969,6 +972,33 @@ impl Engine {
         };
         let now = c.now();
         s.my_name = c.name().to_string();
+        if !self.search.trim().is_empty() {
+            s.search = c
+                .search(&self.search, 50)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| {
+                    let (id, kind, tint) = match h.place {
+                        enclave_core::Place::Contact(r) => (hex_id(&r), 0, tint_for(&r)),
+                        enclave_core::Place::Group(g) => (group_id_str(&g), 1, tint_for(&g)),
+                    };
+                    Row {
+                        id,
+                        name: h.name,
+                        preview: if h.outgoing {
+                            format!("You: {}", h.snippet)
+                        } else {
+                            h.snippet
+                        },
+                        time: clock(h.at),
+                        state: 2,
+                        tint,
+                        kind,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+        }
         s.my_link = c.card().to_link();
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.recovery_alert = c

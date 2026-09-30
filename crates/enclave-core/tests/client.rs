@@ -351,6 +351,15 @@ async fn attachments_reactions_edits_deletes_receipts_and_timers() {
         .into_iter()
         .find(|x| x.text == "See you at 10")
         .unwrap();
+    // Local search finds it (case-insensitive, all words) and the photo by
+    // its file name.
+    let hits = b.search("see 10", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].place, enclave_core::Place::Contact(ra));
+    assert_eq!(hits[0].seq, theirs.seq);
+    assert_eq!(b.search("BEACH", 10).unwrap().len(), 1);
+    assert!(b.search("see nothing", 10).unwrap().is_empty());
+    assert!(b.search("s", 10).unwrap().is_empty());
     b.react(&ra, theirs.seq, "👍").await.unwrap();
     b.mark_read(&ra).await.unwrap();
     let ev = a.sync().await.unwrap();
