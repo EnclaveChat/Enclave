@@ -23,6 +23,8 @@ pub const LABEL_NS: &str = "enclave/v1/store/namespace";
 
 /// Keystore name of the profile's device secret.
 pub const DEVICE_SECRET: &str = "enclave-profile-secret";
+/// Associated data for the wrapped master key.
+const WRAP_AD: &[u8] = b"wrapped-master";
 
 /// An open, unlocked store.
 pub struct Store {
@@ -92,7 +94,7 @@ impl Store {
         passphrase: Option<&[u8]>,
     ) -> Result<Self> {
         let db = Database::open(path)?;
-        let (salt, verifier, params) = {
+        let (salt, verifier, params, wrapped, pwsalt) = {
             let r = db.begin_read()?;
             let t = r.open_table(META)?;
             let salt: [u8; 32] = t
@@ -110,15 +112,37 @@ impl Store {
                 .get("pwparams")?
                 .map(|v| v.value().to_vec())
                 .unwrap_or_default();
-            (salt, verifier, params)
+            let wrapped = t.get("wrapped")?.map(|v| v.value().to_vec());
+            let pwsalt: Option<[u8; 32]> = t.get("pwsalt")?.and_then(|v| v.value().try_into().ok());
+            (salt, verifier, params, wrapped, pwsalt)
         };
         let device_secret = keystore.load(DEVICE_SECRET)?;
+        // After a passphrase change the master key is wrapped under a key
+        // from the device secret and the new passphrase (with its own salt);
+        // before one, it is derived from them directly.
+        let pw_salt = match (&wrapped, pwsalt) {
+            (Some(_), Some(s)) => s,
+            (Some(_), None) => return Err(StoreError::Malformed),
+            (None, _) => salt,
+        };
         let pw = match (passphrase, decode_params(&params)) {
-            (Some(p), Some(params)) => Some(pwhash::derive(p, &salt, params)?),
+            (Some(p), Some(params)) => Some(pwhash::derive(p, &pw_salt, params)?),
             (None, None) => None,
             _ => return Err(StoreError::Crypto),
         };
-        let master = derive_master(&device_secret, pw.as_deref());
+        let kek = derive_master(&device_secret, pw.as_deref());
+        let master = match wrapped {
+            Some(w) => {
+                let raw =
+                    Zeroizing::new(seal::open(&kek, WRAP_AD, &w).map_err(|_| StoreError::Crypto)?);
+                let key: [u8; 32] = raw
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StoreError::Malformed)?;
+                SealKey::from_bytes(key)
+            }
+            None => kek,
+        };
         seal::open(&master, b"verifier", &verifier).map_err(|_| StoreError::Crypto)?;
         let index = Zeroizing::new(kmac256(master.as_bytes(), b"", LABEL_INDEX));
         Ok(Self {
@@ -227,6 +251,34 @@ impl Store {
             out.push(self.open_record(k.value(), v.value())?);
         }
         Ok(out)
+    }
+
+    /// Set, change or remove the passphrase. The master key (and so every
+    /// record) stays the same: it is wrapped under a key from the device
+    /// secret and the new passphrase, with a fresh salt, in one transaction.
+    pub fn change_passphrase(
+        &mut self,
+        new: Option<(&[u8], PwParams)>,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        let device_secret = self.keystore.load(DEVICE_SECRET)?;
+        let pw_salt: [u8; 32] = rng.array("store/pw-salt")?;
+        let pw = match new {
+            Some((p, params)) => Some(pwhash::derive(p, &pw_salt, params)?),
+            None => None,
+        };
+        let kek = derive_master(&device_secret, pw.as_deref());
+        let wrapped = seal::seal(&kek, WRAP_AD, self.master.as_bytes(), rng)?;
+        let params = new.map(|(_, p)| encode_params(p)).unwrap_or_default();
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(META)?;
+            t.insert("wrapped", wrapped.as_slice())?;
+            t.insert("pwsalt", pw_salt.as_slice())?;
+            t.insert("pwparams", params.as_slice())?;
+        }
+        w.commit()?;
+        Ok(())
     }
 
     /// Crypto-erase this profile: destroy the device secret. The database file

@@ -131,6 +131,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::Lock);
     });
     let t = tx.clone();
+    ui.on_set_passphrase(move |p| {
+        let _ = t.send(Cmd::SetPassphrase(p.to_string()));
+    });
+    let t = tx.clone();
     ui.on_select(move |id| {
         let _ = t.send(Cmd::Select(id.to_string()));
     });

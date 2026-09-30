@@ -754,6 +754,27 @@ impl Engine {
                 self.search.clear();
             }
             Cmd::Lock => {}
+            Cmd::SetPassphrase(p) if matches!(self.mode, Mode::Server { .. }) => {
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    let new = (!p.is_empty()).then_some(p.as_bytes());
+                    match c.change_passphrase(new, PwParams::DESKTOP_DEFAULT) {
+                        Ok(()) => {
+                            self.passphrase_set = new.is_some();
+                            self.status = if new.is_some() {
+                                "Passphrase set. You'll type it each time Enclave starts.".into()
+                            } else {
+                                "Passphrase removed. Anyone using this computer account can open Enclave.".into()
+                            };
+                            self.effect(Effect::PassphraseChanged);
+                        }
+                        Err(err) => self.status = format!("Couldn't change the passphrase: {err}"),
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::SetPassphrase(_) => {}
             Cmd::Search(q) => self.search = q,
             Cmd::AddMembers(id) => {
                 let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();

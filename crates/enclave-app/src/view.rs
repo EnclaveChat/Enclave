@@ -210,6 +210,7 @@ pub fn apply_effect(ui: &AppWindow, e: Effect) {
         }
         Effect::UsernameClaimed => ui.set_username_input("".into()),
         Effect::RemovalDone => ui.set_confirm_remove("".into()),
+        Effect::PassphraseChanged => ui.set_new_passphrase("".into()),
         Effect::LeftGroup => {
             ui.set_sheet(Sheet::None);
             ui.set_current_id("".into());

@@ -306,6 +306,23 @@ async fn sandboxed_vault_keeps_its_profile() {
         .await
         .unwrap();
     next_snapshot(&mut rd, |s| !s.locked && s.my_name == "Robin").await;
+    // Change it: the old one stops working after a restart, the new one opens.
+    frame::write_frame(&mut wr, &send(Cmd::SetPassphrase("battery staple".into())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| s.status.starts_with("Passphrase set")).await;
+    drop(rd);
+    drop(wr);
+    let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;
+    let (child, mut rd, mut wr) = start_vault(&dir, addr, &profile, "v3.sock").await;
+    frame::write_frame(&mut wr, &send(Cmd::Unlock("correct horse".into())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| s.locked && !s.unlock_error.is_empty()).await;
+    frame::write_frame(&mut wr, &send(Cmd::Unlock("battery staple".into())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| !s.locked && s.my_name == "Robin").await;
     drop(rd);
     drop(wr);
     let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;

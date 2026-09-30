@@ -146,3 +146,37 @@ fn backups_exclude_sessions_and_need_the_recovery_secret() {
     // Truncated archive is rejected.
     assert!(backup::import(&b, &archive[..archive.len() - 1], &recovery, &mut rng).is_err());
 }
+
+#[test]
+fn passphrase_can_be_set_changed_and_removed() {
+    let dir = tmpdir("change-passphrase");
+    let path = dir.join("p.redb");
+    let ks: Arc<dyn Keystore> = Arc::new(FileKeystore::new(dir.join("keys")).unwrap());
+    let mut rng = HedgedRng::new().unwrap();
+    {
+        // Created without one, then given one.
+        let mut s = Store::create(Some(&path), Arc::clone(&ks), None, &mut rng).unwrap();
+        s.put("n", b"k", b"kept across changes", &mut rng).unwrap();
+        s.change_passphrase(Some((b"first", PwParams::FLOOR)), &mut rng)
+            .unwrap();
+    }
+    assert!(Store::open(&path, Arc::clone(&ks), None).is_err());
+    assert!(Store::open(&path, Arc::clone(&ks), Some(b"wrong")).is_err());
+    {
+        let mut s = Store::open(&path, Arc::clone(&ks), Some(b"first")).unwrap();
+        assert_eq!(s.get("n", b"k").unwrap().unwrap(), b"kept across changes");
+        s.change_passphrase(Some((b"second", PwParams::FLOOR)), &mut rng)
+            .unwrap();
+    }
+    assert!(Store::open(&path, Arc::clone(&ks), Some(b"first")).is_err());
+    {
+        let mut s = Store::open(&path, Arc::clone(&ks), Some(b"second")).unwrap();
+        assert_eq!(s.get("n", b"k").unwrap().unwrap(), b"kept across changes");
+        s.put("n", b"k2", b"written after", &mut rng).unwrap();
+        s.change_passphrase(None, &mut rng).unwrap();
+    }
+    assert!(Store::open(&path, Arc::clone(&ks), Some(b"second")).is_err());
+    let s = Store::open(&path, Arc::clone(&ks), None).unwrap();
+    assert_eq!(s.get("n", b"k2").unwrap().unwrap(), b"written after");
+    let _ = std::fs::remove_dir_all(&dir);
+}

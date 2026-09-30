@@ -86,6 +86,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::Create("Robin".into(), "correct horse".into()),
         Cmd::Unlock("correct horse".into()),
         Cmd::Lock,
+        Cmd::SetPassphrase(String::new()),
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),
@@ -141,6 +142,7 @@ fn round_trips() {
         Out::Effect(Effect::RemovalDone),
         Out::Effect(Effect::FileSent),
         Out::Effect(Effect::LeftGroup),
+        Out::Effect(Effect::PassphraseChanged),
         Out::File("a.txt".into(), vec![1, 2, 3]),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);

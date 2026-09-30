@@ -344,6 +344,7 @@ export component AppWindow inherits Window {
     callback add-members(string);
     callback unlock(string);
     callback lock-now();
+    callback set-passphrase(string);
     in property <string> unlock-error;
     in property <bool> can-lock;
     in-out property <string> passphrase-input;
@@ -1285,9 +1286,27 @@ export component AppWindow inherits Window {
                 clicked => { root.open-sheet(Sheet.devices); }
             }
         }
+        if root.can-join: Rectangle { height: 1px; background: Tokens.hairline; }
+        if root.can-join: Body { text: "Passphrase"; font-weight: 600; }
+        if root.can-join: Secondary {
+            text: root.can-lock
+                ? "Enclave asks for it each time it starts on this computer."
+                : "Optional. Enclave would ask for it each time it starts on this computer.";
+        }
+        if root.can-join: HorizontalLayout {
+            spacing: Tokens.space-s;
+            Field { placeholder: root.can-lock ? "New passphrase" : "Passphrase"; secret: true; text <=> root.new-passphrase; horizontal-stretch: 1; }
+            PrimaryButton {
+                text: root.busy ? "Saving…" : (root.can-lock ? "Change" : "Set");
+                enabled: root.new-passphrase != "" && !root.busy;
+                clicked => { root.set-passphrase(root.new-passphrase); }
+            }
+        }
         if root.can-lock: HorizontalLayout {
             alignment: start;
+            spacing: Tokens.space-s;
             QuietButton { text: "Lock now"; outlined: true; clicked => { root.sheet = Sheet.none; root.lock-now(); } }
+            QuietButton { text: "Remove passphrase"; danger: true; clicked => { root.set-passphrase(""); } }
         }
     }
 

@@ -31,6 +31,8 @@ This is PLAN §13's `KMAC256(hw_secret‖Argon2id(passphrase)?)` with the device
 
 The `meta` table holds `salt`, the Argon2id parameters (`u32(memory_kib) ‖ u32(iterations) ‖ u32(parallelism)`, or empty without a passphrase), and a **verifier** `seal(master, "verifier", "enclave")`. `Store::open` recomputes the master key and opens the verifier; a wrong passphrase, a missing passphrase where one is set (or the reverse), or a wrong device secret fails with `StoreError::Crypto`.
 
+**Changing the passphrase** (`Store::change_passphrase`) keeps the master key and so every record, blinded index and verifier: it derives `kek = KMAC256(device_secret, LABEL_MASTER, framed(Argon2id(new, pwsalt)))` (or with nothing framed to remove the passphrase) from a fresh 32 B `pwsalt`, and stores `wrapped = seal(kek, "wrapped-master", master)`, `pwsalt` and the new parameters in `meta` in one transaction. `Store::open` then derives `kek` the same way (with `pwsalt`) and unwraps; stores never changed keep deriving the master key directly. The record salt `salt` never changes.
+
 ### 1.3 Root wrap (not yet implemented)
 
 On the primary device the recovery secret is to be wrapped under `KMAC256(hw_root_secret, Argon2id(PIN), 256, "enclave/v1/store/root-wrap")`, where `hw_root_secret` is a separate hardware-wrapped secret that requires device unlock and that biometrics cannot unlock. The label is reserved.

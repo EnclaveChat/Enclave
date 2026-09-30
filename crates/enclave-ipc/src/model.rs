@@ -249,6 +249,8 @@ pub enum Cmd {
     Unlock(String),
     /// Lock now: drop the open profile from memory.
     Lock,
+    /// Set or change the passphrase (empty removes it).
+    SetPassphrase(String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -264,6 +266,8 @@ pub enum Effect {
     FileSent,
     /// Close the members sheet and the conversation.
     LeftGroup,
+    /// Clear the passphrase fields.
+    PassphraseChanged,
     /// Close the device-removal confirmation.
     RemovalDone,
 }
@@ -567,6 +571,7 @@ impl Cmd {
             Cmd::LeaveGroup(g) => w.u8(34).str(g),
             Cmd::Unlock(p) => w.u8(35).str(p),
             Cmd::Lock => w.u8(36),
+            Cmd::SetPassphrase(p) => w.u8(37).str(p),
         };
         w.0
     }
@@ -611,6 +616,7 @@ impl Cmd {
             34 => Cmd::LeaveGroup(r.str()?),
             35 => Cmd::Unlock(r.str()?),
             36 => Cmd::Lock,
+            37 => Cmd::SetPassphrase(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -637,6 +643,7 @@ impl Out {
                     Effect::RemovalDone => 4,
                     Effect::FileSent => 5,
                     Effect::LeftGroup => 6,
+                    Effect::PassphraseChanged => 7,
                 },
             ],
         }
@@ -653,6 +660,7 @@ impl Out {
                 4 => Effect::RemovalDone,
                 5 => Effect::FileSent,
                 6 => Effect::LeftGroup,
+                7 => Effect::PassphraseChanged,
                 _ => return Err(IpcError::Malformed),
             })),
             [3, ..] => {

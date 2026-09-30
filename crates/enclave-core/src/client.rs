@@ -267,6 +267,19 @@ impl ManifestResolver for Resolver<'_> {
 }
 
 impl Client {
+    /// Set, change or remove the passphrase that protects this profile on
+    /// this device. Records are not re-encrypted: the store's master key is
+    /// rewrapped.
+    pub fn change_passphrase(
+        &mut self,
+        new: Option<&[u8]>,
+        params: enclave_crypto::pwhash::PwParams,
+    ) -> Result<()> {
+        Ok(self
+            .store
+            .change_passphrase(new.map(|p| (p, params)), &mut self.rng)?)
+    }
+
     /// Current time, Unix seconds (from the transport, so simulations can
     /// move it).
     pub fn now(&self) -> u64 {
