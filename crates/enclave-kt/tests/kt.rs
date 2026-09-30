@@ -184,3 +184,81 @@ async fn confusable_names_are_refused() {
         KtError::Username
     );
 }
+
+/// The service: publish, cosign, a lookup reply that survives encoding, the
+/// heartbeat for a stale head, and wire round trips.
+#[test]
+fn service_round_trip_from_sync_code() {
+    use enclave_kt::{KtInfo, KtService, LookupReply, SignedHead, UsernameClaim};
+    let mut rng = HedgedRng::new().unwrap();
+    let witnesses: Vec<Witness> = (0..3u8)
+        .map(|i| {
+            Witness::new(
+                [20 + i; 16],
+                &format!("witness-op-{i}"),
+                CompositeSigningKey::generate(&mut rng).unwrap(),
+            )
+        })
+        .collect();
+    let policy = WitnessPolicy {
+        witnesses: witnesses
+            .iter()
+            .map(|w| (w.id, w.public_key().clone(), w.operator.clone()))
+            .collect(),
+        threshold: 3,
+    };
+    let svc = KtService::start(
+        [3; 16],
+        "enclave.test",
+        "server-op",
+        CompositeSigningKey::generate(&mut rng).unwrap(),
+        [4; 32],
+        witnesses,
+    )
+    .unwrap();
+    let info = KtInfo::decode(&svc.info().encode()).unwrap();
+    assert_eq!(&info, svc.info());
+
+    assert_eq!(svc.publish("sam", vec![1; 80], NOW).unwrap(), 1);
+    assert_eq!(svc.publish("alex", vec![2; 80], NOW).unwrap(), 2);
+    assert_eq!(svc.publish("sam", vec![3; 80], NOW).unwrap(), 3);
+    assert_eq!(svc.publish("5am", vec![9; 80], NOW), Err(KtError::Username));
+
+    let check = |bytes: Vec<u8>, name: &str, now: u64| {
+        let r = LookupReply::decode(&bytes).unwrap();
+        let sh = SignedHead::decode(&r.head.encode()).unwrap();
+        assert_eq!(sh, r.head);
+        verify_lookup(
+            &policy,
+            &info.head_key,
+            &info.operator,
+            &info.vrf_public,
+            &r.head,
+            name,
+            r.proof,
+            now,
+        )
+    };
+    let (value, version, _) = check(svc.lookup("sam", NOW + 10).unwrap(), "sam", NOW + 10).unwrap();
+    assert_eq!((value, version), (vec![3; 80], 2));
+    // A proof for one name does not verify for another.
+    assert_eq!(
+        check(svc.lookup("sam", NOW + 10).unwrap(), "alex", NOW + 10).unwrap_err(),
+        KtError::Lookup
+    );
+    assert!(svc.lookup("nobody", NOW + 10).is_err());
+    // Two days later the service starts a heartbeat epoch, cosigned afresh.
+    let later = NOW + 2 * 86_400;
+    let (value, _, trusted) = check(svc.lookup("alex", later).unwrap(), "alex", later).unwrap();
+    assert_eq!((value, trusted), (vec![2; 80], later));
+
+    let claim = UsernameClaim {
+        name: "sam".into(),
+        value: vec![7; 100],
+        device: [8; 16],
+        time: NOW,
+        signature: vec![9; 50],
+    };
+    assert_eq!(UsernameClaim::decode(&claim.encode()).unwrap(), claim);
+    assert_eq!(claim.root(), Some([7; 64]));
+}

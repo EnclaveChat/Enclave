@@ -30,6 +30,7 @@ pub use client::{
     Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
     LinkProgress, LinkingDevice, Message, Options, Reaction,
 };
+pub use enclave_kt::KtPolicy;
 
 use enclave_rpc::api::Status;
 
@@ -66,6 +67,30 @@ pub enum CoreError {
     /// A link or QR code could not be used.
     #[error("link: {0}")]
     Link(#[from] LinkError),
+    /// A username could not be claimed or found.
+    #[error("username: {0}")]
+    Username(#[from] UsernameError),
+}
+
+/// Why a username operation failed, in terms the UI can explain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum UsernameError {
+    /// Usernames aren't set up for this server (no pinned log).
+    #[error("usernames aren't available on this server")]
+    Unavailable,
+    /// The name breaks the rules (length, characters, reserved words).
+    #[error("that name isn't allowed")]
+    NotAllowed,
+    /// Someone else has the name, or one that looks like it.
+    #[error("that name is taken")]
+    Taken,
+    /// Nobody has that name.
+    #[error("nobody has that name")]
+    NotFound,
+    /// The server's answer didn't check out against the pinned log and
+    /// witnesses. Never shown as "not found": it may be an attack.
+    #[error("the server's answer could not be checked")]
+    Unverified,
 }
 
 impl From<enclave_crypto::Error> for CoreError {

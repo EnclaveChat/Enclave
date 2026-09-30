@@ -47,6 +47,10 @@ pub enum Cmd {
     LinkScan(String),
     /// The person picked link words (index).
     LinkPick(i32),
+    /// Claim a username.
+    ClaimUsername(String),
+    /// Remove a linked device (hex id).
+    RemoveDevice(String),
 }
 
 /// Where the account lives.
@@ -59,18 +63,23 @@ pub enum Mode {
         profile: PathBuf,
         /// Server address.
         addr: SocketAddr,
+        /// Key-transparency pins for usernames (written by the dev server).
+        kt_pins: Option<PathBuf>,
     },
 }
 
 const DEMO_SERVER: ServerId = [0x5e; 16];
 
 const SAM_HELLO: &str = "Hi, I'm Sam. I'm a demo contact running on this computer, so you can try Enclave before inviting anyone. Accept to start talking.";
-const SAM_REPLIES: [&str; 4] = [
+const SAM_REPLIES: [&str; 5] = [
     "Every message travels as a sealed unit of exactly the same size, so a server can't tell a short hello from a long letter.",
     "Try the \"Check code\" button above. With a real person you'd compare those numbers face to face or on a call.",
     "In demo mode nothing you type leaves this computer.",
     "When you're ready, share your invite link with someone you trust.",
+    "People can also find you by username, if you choose one in Settings. Mine is @sam@demo.enclave.",
 ];
+
+const DEMO_DOMAIN: &str = "demo.enclave";
 
 struct Demo {
     sam: Client,
@@ -90,6 +99,8 @@ struct Engine {
     link_status: String,
     status: String,
     add_error: String,
+    username_error: String,
+    kt: Option<enclave_core::KtPolicy>,
     busy: bool,
 }
 
@@ -176,7 +187,12 @@ fn display(m: &enclave_core::Message) -> Msg {
 }
 
 fn link_error(e: &CoreError) -> String {
+    use enclave_core::UsernameError as U;
     match e {
+        CoreError::Username(U::Unavailable) => "Usernames aren't available on that server. Ask them for their invite link instead.".into(),
+        CoreError::Username(U::NotAllowed) => "That isn't a valid username. Usernames are 3 to 32 letters, numbers or _, and start with a letter.".into(),
+        CoreError::Username(U::NotFound | U::Taken) => "Nobody has that username. Check the spelling, or ask them for their invite link.".into(),
+        CoreError::Username(U::Unverified) => "Enclave couldn't confirm that this username is genuine, so it didn't add anyone. Ask them for their invite link instead.".into(),
         CoreError::Link(LinkError::DeviceLinkCode) => "This code links a device to your account. Only scan it from Settings → Your devices, on your own new device. No one from Enclave will ever ask you to scan one.".into(),
         CoreError::Link(LinkError::NotEnclave) => "That isn't an Enclave invite link.".into(),
         CoreError::Link(LinkError::Malformed) => "This link is damaged. Ask them to send it again.".into(),
@@ -186,8 +202,27 @@ fn link_error(e: &CoreError) -> String {
     }
 }
 
+fn username_error(e: &CoreError) -> String {
+    use enclave_core::UsernameError as U;
+    match e {
+        CoreError::Username(U::Unavailable) => {
+            "Usernames aren't available on your server yet.".into()
+        }
+        CoreError::Username(U::NotAllowed) => {
+            "Use 3 to 32 letters, numbers or _, starting with a letter.".into()
+        }
+        CoreError::Username(U::Taken) => {
+            "That name is taken, or looks too much like one that is. Try another.".into()
+        }
+        CoreError::Net(_) => {
+            "Couldn't reach your server. Check your connection and try again.".into()
+        }
+        _ => "Couldn't claim that name. Try again in a moment.".into(),
+    }
+}
+
 async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedReceiver<Cmd>) {
-    let (transport, server): (Arc<dyn Transport>, ServerId) = match &mode {
+    let (transport, server, kt): (Arc<dyn Transport>, ServerId, _) = match &mode {
         Mode::Demo => {
             let t = LocalTransport::new();
             let _ = t.add_server(enclave_server::Config {
@@ -195,15 +230,22 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
                 effort_request: 4,
                 effort_claim: 1,
                 effort_blob: 1,
+                effort_username: 4,
                 ..Default::default()
             });
-            (Arc::new(t), DEMO_SERVER)
+            let kt = t.enable_usernames(&DEMO_SERVER, DEMO_DOMAIN);
+            (Arc::new(t), DEMO_SERVER, kt)
         }
-        Mode::Server { addr, .. } => {
+        Mode::Server { addr, kt_pins, .. } => {
             let id = enclave_server::Config::default().id;
+            let kt = kt_pins
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| enclave_core::KtPolicy::decode(&b).ok());
             (
                 Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
                 id,
+                kt,
             )
         }
     };
@@ -220,6 +262,8 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
         link_status: String::new(),
         status: String::new(),
         add_error: String::new(),
+        username_error: String::new(),
+        kt,
         busy: false,
     };
     // Reopen an existing profile.
@@ -227,7 +271,12 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
         && profile.join("profile.redb").exists()
     {
         match Client::open(e.options(), Arc::clone(&e.transport)) {
-            Ok(c) => e.client = Some(c),
+            Ok(mut c) => {
+                if let Some(p) = e.kt.clone() {
+                    c.set_kt_policy(p);
+                }
+                e.client = Some(c);
+            }
             Err(err) => e.status = format!("Couldn't open your profile: {err}"),
         }
         e.push(&ui);
@@ -306,7 +355,10 @@ impl Engine {
                 )
                 .await
                 {
-                    Ok((c, _words)) => {
+                    Ok((mut c, _words)) => {
+                        if let Some(p) = self.kt.clone() {
+                            c.set_kt_policy(p);
+                        }
                         self.client = Some(c);
                         if matches!(self.mode, Mode::Demo) {
                             self.start_demo().await;
@@ -368,15 +420,25 @@ impl Engine {
             }
             Cmd::Add(link, text) => {
                 self.add_error.clear();
-                let card = match ContactCard::from_link(&link) {
+                let link = link.trim();
+                self.busy = true;
+                self.push(ui);
+                // An invite link, or a username to look up.
+                let card = if link.starts_with("enclave:") || link.contains('#') {
+                    ContactCard::from_link(link).map_err(CoreError::Link)
+                } else if let Some(c) = self.client.as_mut() {
+                    c.find_username(link).await
+                } else {
+                    Err(CoreError::NotFound)
+                };
+                let card = match card {
                     Ok(card) => card,
                     Err(err) => {
-                        self.add_error = link_error(&CoreError::Link(err));
+                        self.add_error = link_error(&err);
+                        self.busy = false;
                         return;
                     }
                 };
-                self.busy = true;
-                self.push(ui);
                 if let Some(c) = self.client.as_mut() {
                     match c.add_contact(&card, text.trim()).await {
                         Ok(()) => {
@@ -391,6 +453,44 @@ impl Engine {
                         Err(err) => self.add_error = link_error(&err),
                     }
                 }
+                self.busy = false;
+            }
+            Cmd::ClaimUsername(name) => {
+                self.username_error.clear();
+                self.busy = true;
+                self.push(ui);
+                if let Some(c) = self.client.as_mut() {
+                    match c.claim_username(name.trim()).await {
+                        Ok(_) => {
+                            ui.upgrade_in_event_loop(|ui| ui.set_username_input("".into()))
+                                .ok();
+                        }
+                        Err(err) => self.username_error = username_error(&err),
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::RemoveDevice(hex) => {
+                self.busy = true;
+                self.push(ui);
+                if let Some(c) = self.client.as_mut() {
+                    let id =
+                        c.devices().into_iter().map(|d| d.id).find(|d| {
+                            d.iter().map(|b| format!("{b:02x}")).collect::<String>() == hex
+                        });
+                    self.link_status = match id {
+                        Some(id) => match c.remove_device(&id).await {
+                            Ok(()) => "Removed. Your contacts will stop sending to it.".into(),
+                            Err(CoreError::Net(_)) => {
+                                "Couldn't reach your server. Try again in a moment.".into()
+                            }
+                            Err(_) => "Couldn't remove that device.".into(),
+                        },
+                        None => String::new(),
+                    };
+                }
+                ui.upgrade_in_event_loop(|ui| ui.set_confirm_remove("".into()))
+                    .ok();
                 self.busy = false;
             }
             Cmd::Check(id) => {
@@ -487,6 +587,10 @@ impl Engine {
             Client::create(opts, Arc::clone(&self.transport), self.server, "Sam (demo)").await
             && sam.add_contact(&card, SAM_HELLO).await.is_ok()
         {
+            if let Some(p) = self.kt.clone() {
+                sam.set_kt_policy(p);
+                let _ = sam.claim_username("sam").await;
+            }
             self.demo = Some(Demo { sam, replies: 0 });
         }
     }
@@ -497,6 +601,9 @@ impl Engine {
                 Ok(events) => {
                     if !events.is_empty() {
                         self.status.clear();
+                    }
+                    if events.contains(&Event::RemovedFromAccount) {
+                        self.status = "This device was removed from your account on another device. It can't get new messages.".into();
                     }
                     if let Some(sel) = self.selected
                         && events
@@ -540,6 +647,8 @@ impl Engine {
         let mut s = Snapshot {
             status: self.status.clone(),
             add_error: self.add_error.clone(),
+            username_error: self.username_error.clone(),
+            usernames: self.kt.is_some(),
             busy: self.busy,
             ..Default::default()
         };
@@ -548,6 +657,7 @@ impl Engine {
         };
         s.my_name = c.name().to_string();
         s.my_link = c.card().to_link();
+        s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.recovery_words = c.recovery_words().unwrap_or_default();
         s.recovery_saved = matches!(c.setting("recovery-saved"), Ok(Some(v)) if v == [1]);
         let mut rows: Vec<(u64, Row)> = Vec::new();
@@ -648,6 +758,7 @@ impl Engine {
                 selected: self.picked.contains(&ct.root),
             })
             .collect();
+        let can_link = c.can_link();
         s.devices = c
             .devices()
             .into_iter()
@@ -662,7 +773,12 @@ impl Engine {
                 let day = chrono::DateTime::from_timestamp(d.added_at as i64, 0)
                     .map(|t| t.format("%-d %b %Y").to_string())
                     .unwrap_or_default();
-                (label.to_string(), format!("Added {day}"))
+                crate::view::Device {
+                    id: d.id.iter().map(|b| format!("{b:02x}")).collect(),
+                    label: label.to_string(),
+                    detail: format!("Added {day}"),
+                    removable: can_link && !d.this_device,
+                }
             })
             .collect();
         s.link_choices = self

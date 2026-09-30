@@ -17,6 +17,7 @@ enclave-crypto = { path = "../enclave-crypto" }
 enclave-wire = { path = "../enclave-wire" }
 enclave-proto = { path = "../enclave-proto" }
 enclave-rpc = { path = "../enclave-rpc" }
+enclave-kt = { path = "../enclave-kt" }
 enclave-server = { path = "../enclave-server" }
 enclave-core = { path = "../enclave-core" }
 enclave-calls = { path = "../enclave-calls" }

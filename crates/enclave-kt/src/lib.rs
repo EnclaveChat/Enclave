@@ -23,11 +23,15 @@
 pub mod config;
 pub mod head;
 pub mod log;
+pub mod service;
 pub mod username;
+pub mod wire;
 
 pub use config::EnclaveKtConfig;
 pub use head::{Cosignature, SignedHead, TreeHead, WitnessPolicy};
 pub use log::{KtLog, Witness, verify_lookup};
+pub use service::KtService;
+pub use wire::{KtInfo, KtPolicy, LookupReply, UsernameClaim};
 
 /// Errors from key transparency.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
@@ -50,6 +54,12 @@ pub enum KtError {
     /// The username is not allowed.
     #[error("username not allowed")]
     Username,
+    /// An encoding could not be parsed.
+    #[error("malformed")]
+    Malformed,
+    /// The key-transparency service has stopped.
+    #[error("service stopped")]
+    Stopped,
     /// Internal akd error.
     #[error("directory error: {0}")]
     Directory(String),

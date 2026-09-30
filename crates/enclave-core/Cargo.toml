@@ -20,6 +20,7 @@ enclave-proto = { path = "../enclave-proto" }
 enclave-tokens = { path = "../enclave-tokens" }
 enclave-net = { path = "../enclave-net" }
 enclave-store = { path = "../enclave-store" }
+enclave-kt = { path = "../enclave-kt" }
 thiserror = "2"
 zeroize = "1"
 

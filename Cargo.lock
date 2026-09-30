@@ -2210,6 +2210,7 @@ name = "enclave-core"
 version = "0.1.0"
 dependencies = [
  "enclave-crypto",
+ "enclave-kt",
  "enclave-net",
  "enclave-proto",
  "enclave-rpc",
@@ -2269,6 +2270,7 @@ dependencies = [
  "enclave-calls",
  "enclave-core",
  "enclave-crypto",
+ "enclave-kt",
  "enclave-proto",
  "enclave-relay",
  "enclave-rpc",
@@ -2283,6 +2285,7 @@ dependencies = [
  "akd",
  "async-trait",
  "enclave-crypto",
+ "protobuf",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -2339,6 +2342,7 @@ name = "enclave-server"
 version = "0.1.0"
 dependencies = [
  "enclave-crypto",
+ "enclave-kt",
  "enclave-proto",
  "enclave-rpc",
  "enclave-tokens",
@@ -2353,6 +2357,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "enclave-crypto",
+ "enclave-kt",
  "enclave-net",
  "enclave-proto",
  "enclave-rpc",

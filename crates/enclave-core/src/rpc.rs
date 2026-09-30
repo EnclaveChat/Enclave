@@ -18,7 +18,7 @@ pub(crate) struct Reply {
 }
 
 /// Proof-of-work efforts tried in order when a server asks for more.
-const EFFORT_LADDER: [u32; 7] = [8, 16, 64, 256, 1024, 4096, 16_384];
+pub(crate) const EFFORT_LADDER: [u32; 7] = [8, 16, 64, 256, 1024, 4096, 16_384];
 
 pub(crate) struct Rpc {
     transport: Arc<dyn Transport>,
@@ -169,6 +169,9 @@ impl Rpc {
         let mut out = r.data;
         let (key, action) = if action == DirAction::Claim {
             (r.claim, DirAction::Get)
+        } else if kind == DirKind::Username {
+            // Later chunks of a lookup are fetched by the reply id.
+            (r.claim, action)
         } else {
             (key, action)
         };

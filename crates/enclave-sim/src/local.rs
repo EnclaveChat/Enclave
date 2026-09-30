@@ -34,6 +34,14 @@ impl LocalTransport {
         Ok(())
     }
 
+    /// Turn on usernames for server `id` under `domain`, with a development
+    /// key-transparency log and in-process witnesses. Returns what clients pin.
+    pub fn enable_usernames(&self, id: &ServerId, domain: &str) -> Option<enclave_kt::KtPolicy> {
+        let (svc, policy) = enclave_kt::KtService::start_dev(*id, domain).ok()?;
+        self.with_server(id, |s| s.enable_kt(svc))?;
+        Some(policy)
+    }
+
     /// Current simulated time.
     pub fn now(&self) -> u64 {
         let sys = std::time::SystemTime::now()

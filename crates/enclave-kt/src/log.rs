@@ -101,12 +101,38 @@ impl KtLog {
         {
             return Err(KtError::Username);
         }
+        let sh = self
+            .publish_raw(AkdLabel::from(n.as_str()), value, now, rng)
+            .await?;
+        self.skeletons.insert(sk, n);
+        Ok(sh)
+    }
+
+    /// Start a new epoch with no username changes, so heads stay fresh for
+    /// clients (they refuse heads older than a day). The label is not a valid
+    /// username, so no lookup can reach it.
+    pub async fn heartbeat(&mut self, now: u64, rng: &mut HedgedRng) -> Result<SignedHead> {
+        self.publish_raw(
+            AkdLabel(b"\0heartbeat".to_vec()),
+            now.to_be_bytes().to_vec(),
+            now,
+            rng,
+        )
+        .await
+    }
+
+    async fn publish_raw(
+        &mut self,
+        label: AkdLabel,
+        value: Vec<u8>,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<SignedHead> {
         let eh = self
             .dir
-            .publish(vec![(AkdLabel::from(n.as_str()), AkdValue(value))])
+            .publish(vec![(label, AkdValue(value))])
             .await
             .map_err(akd_err)?;
-        self.skeletons.insert(sk, n);
         let head = TreeHead {
             server: self.server,
             epoch: eh.epoch(),

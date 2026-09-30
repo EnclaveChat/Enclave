@@ -162,12 +162,25 @@ fn fixture() -> Snapshot {
             },
         ],
         devices: vec![
-            ("This device".into(), "Added 2 Sep 2026".into()),
-            ("Linked device".into(), "Added 28 Sep 2026".into()),
+            view::Device {
+                id: "a1".into(),
+                label: "This device".into(),
+                detail: "Added 2 Sep 2026".into(),
+                removable: false,
+            },
+            view::Device {
+                id: "b2".into(),
+                label: "Linked device".into(),
+                detail: "Added 28 Sep 2026".into(),
+                removable: true,
+            },
         ],
         link_choices: Vec::new(),
         link_status: String::new(),
         can_link: true,
+        my_username: "@robin@enclave.example".into(),
+        usernames: true,
+        username_error: String::new(),
     }
 }
 
@@ -317,6 +330,14 @@ fn main() -> Result<(), slint::PlatformError> {
         err.add_error = "This code links a device to your account. Only scan it from Settings → Your devices, on your own new device. No one from Enclave will ever ask you to scan one.".into();
         view::apply(&ui, &err);
         shot("10-add-error", desktop);
+        let mut unverified_name = data.clone();
+        unverified_name.add_error = "Enclave couldn't confirm that this username is genuine, so it didn't add anyone. Ask them for their invite link instead.".into();
+        view::apply(&ui, &unverified_name);
+        ui.set_add_link("@sam@enclave.example".into());
+        ui.set_add_text("Hi Sam, it's Robin".into());
+        shot("10-add-username-phone", phone);
+        ui.set_add_link("".into());
+        ui.set_add_text("".into());
         let group = group_fixture(&data);
         view::apply(&ui, &group);
         ui.set_sheet(Sheet::None);
@@ -337,8 +358,14 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Devices);
         shot("16-devices-link", desktop);
         view::apply(&ui, &data);
+        shot("16-devices-phone", phone);
+        ui.set_confirm_remove("b2".into());
+        shot("17-devices-remove-phone", phone);
+        ui.set_confirm_remove("".into());
+        view::apply(&ui, &data);
         ui.set_sheet(Sheet::Settings);
         shot("11-privacy", desktop);
+        shot("11-privacy-phone", phone);
         ui.set_sheet(Sheet::Recovery);
         shot("12-recovery", desktop);
         shot("12-recovery-phone", phone);

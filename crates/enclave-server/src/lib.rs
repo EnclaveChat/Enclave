@@ -21,6 +21,7 @@
 
 use enclave_crypto::hash::sha3_512;
 use enclave_crypto::rng::HedgedRng;
+use enclave_kt::{KtInfo, KtService, UsernameClaim};
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{
@@ -43,6 +44,8 @@ pub struct Config {
     pub effort_claim: u32,
     /// Proof-of-work effort for blob uploads.
     pub effort_blob: u32,
+    /// Proof-of-work effort for claiming a username.
+    pub effort_username: u32,
     /// Maximum stored envelopes per inbox.
     pub inbox_quota: usize,
     /// Maximum pending requests per request inbox.
@@ -60,6 +63,7 @@ impl Default for Config {
             effort_request: 64,
             effort_claim: 8,
             effort_blob: 1,
+            effort_username: 64,
             inbox_quota: 5_000,
             request_quota: 100,
             token_quota: 4_096,
@@ -115,6 +119,13 @@ pub struct Server {
     vaults: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
     blobs: HashMap<[u8; 32], (Vec<u8>, u64)>,
     uploads: HashMap<(u8, [u8; 32]), Upload>,
+    kt: Option<KtService>,
+    /// name → (owning root, time of the last accepted claim)
+    usernames: HashMap<String, ([u8; 64], u64)>,
+    /// root → its current name
+    names_by_root: HashMap<[u8; 64], String>,
+    /// Chunked lookup replies by reply id.
+    kt_replies: HashMap<[u8; 32], (Vec<u8>, u64)>,
     stats: Stats,
     /// Every object ever stored, by length, for invariant checks in tests.
     stored_lengths: HashSet<usize>,
@@ -141,6 +152,10 @@ impl Server {
             vaults: HashMap::new(),
             blobs: HashMap::new(),
             uploads: HashMap::new(),
+            kt: None,
+            usernames: HashMap::new(),
+            names_by_root: HashMap::new(),
+            kt_replies: HashMap::new(),
             stats: Stats::default(),
             stored_lengths: HashSet::new(),
             rng,
@@ -182,6 +197,17 @@ impl Server {
         }
         self.blobs.retain(|_, (_, t)| now <= *t + ttl);
         self.claims.retain(|_, (_, t)| now <= *t + 600);
+        self.kt_replies.retain(|_, (_, t)| now <= *t + 600);
+    }
+
+    /// Attach a key-transparency log, enabling usernames.
+    pub fn enable_kt(&mut self, kt: KtService) {
+        self.kt = Some(kt);
+    }
+
+    /// What clients pin for this server's log, if usernames are enabled.
+    pub fn kt_info(&self) -> Option<KtInfo> {
+        self.kt.as_ref().map(|k| k.info().clone())
     }
 
     /// Handle one sealed request (unit or poll) and return the sealed reply.
@@ -461,6 +487,13 @@ impl Server {
                 Some((bytes, _)) => Self::chunk_reply(bytes, req.index, req.key),
                 None => (Status::NotFound, Reply::Empty),
             },
+            (DirKind::Username, DirAction::Get) if req.index == 0 => {
+                self.lookup_username(&req, now)
+            }
+            (DirKind::Username, DirAction::Get) => match self.kt_replies.get(&req.key) {
+                Some((bytes, _)) => Self::chunk_reply(bytes, req.index, req.key),
+                None => (Status::NotFound, Reply::Empty),
+            },
             _ => (Status::Malformed, Reply::Empty),
         }
     }
@@ -539,8 +572,102 @@ impl Server {
             DirKind::Manifest => self.accept_manifest(&req.key, object, now),
             DirKind::Bundle => self.accept_publication(&req.key, object, now),
             DirKind::Vault => self.accept_vault(&req.key, &req.proof, object),
+            DirKind::Username => self.accept_username(&req.key, &req.proof, &object, now),
         };
         (status, Reply::Empty)
+    }
+
+    fn lookup_username(&mut self, req: &DirRequest, now: u64) -> (Status, Reply) {
+        let Some(kt) = &self.kt else {
+            return (Status::NotFound, Reply::Empty);
+        };
+        let Some(name) = api::key_name(&req.key) else {
+            return (Status::Malformed, Reply::Empty);
+        };
+        let Ok(bytes) = kt.lookup(&name, now) else {
+            return (Status::NotFound, Reply::Empty);
+        };
+        let Ok(id) = self.rng.array::<32>("server/kt-reply-id") else {
+            return (Status::Malformed, Reply::Empty);
+        };
+        let r = Self::chunk_reply(&bytes, 0, id);
+        self.kt_replies.insert(id, (bytes, now));
+        r
+    }
+
+    /// Bind a username to an account. The claim must carry proof of work, be
+    /// signed by a device in the account's root-signed manifest held here, be
+    /// fresh, and not take a name another account holds. One name per
+    /// account: claiming a new one publishes a tombstone (the bare root) for
+    /// the old, which stays reserved for the same account.
+    fn accept_username(
+        &mut self,
+        key: &[u8; 32],
+        proof: &[u8; 32],
+        object: &[u8],
+        now: u64,
+    ) -> Status {
+        let Some(kt) = &self.kt else {
+            return Status::NotFound;
+        };
+        let ctx = api::pow_context_username(key, now / 86_400);
+        if !enclave_tokens::verify(&ctx, self.cfg.effort_username, &PowProof(*proof)) {
+            return Status::Pow;
+        }
+        let Ok(claim) = UsernameClaim::decode(object) else {
+            return Status::Malformed;
+        };
+        let (Some(keyed), Ok(name)) = (
+            api::key_name(key),
+            enclave_kt::username::normalize(&claim.name),
+        ) else {
+            return Status::Invalid;
+        };
+        if keyed != claim.name || claim.name != name || claim.time.abs_diff(now) > 3600 {
+            return Status::Invalid;
+        }
+        let Some(root) = claim.root() else {
+            return Status::Malformed;
+        };
+        let Some((_, mbytes)) = self.manifests.get(&manifest_key(&root)) else {
+            return Status::NotFound;
+        };
+        let Some(m) = SignedManifest::from_bytes(mbytes)
+            .ok()
+            .and_then(|sm| Manifest::decode(&sm.body).ok())
+        else {
+            return Status::Invalid;
+        };
+        let msg = UsernameClaim::message(&self.cfg.id, &claim.name, &claim.value, claim.time);
+        let signed = m.devices.iter().any(|d| {
+            d.id == claim.device
+                && d.signing
+                    .verify(enclave_kt::wire::CTX_CLAIM, &msg, &claim.signature)
+                    .is_ok()
+        });
+        if !signed {
+            return Status::Invalid;
+        }
+        if let Some((owner, last)) = self.usernames.get(&name) {
+            if *owner != root {
+                return Status::Denied;
+            }
+            if *last >= claim.time {
+                return Status::Invalid;
+            }
+        }
+        if let Some(old) = self.names_by_root.get(&root)
+            && *old != name
+            && kt.publish(old, root.to_vec(), now).is_err()
+        {
+            return Status::Invalid;
+        }
+        if kt.publish(&name, claim.value.clone(), now).is_err() {
+            return Status::Denied;
+        }
+        self.usernames.insert(name.clone(), (root, claim.time));
+        self.names_by_root.insert(root, name);
+        Status::Ok
     }
 
     fn accept_manifest(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {

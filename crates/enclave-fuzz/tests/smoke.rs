@@ -68,6 +68,24 @@ fn samples() -> Vec<Vec<u8>> {
     };
     out.push(req.encode());
     out.push(enclave_rpc::api::frame(&req.encode(), &mut rng).unwrap());
+    // Key transparency: a real signed head, claim and pin file.
+    {
+        let (svc, policy) = enclave_kt::KtService::start_dev([5; 16], "fuzz.test").unwrap();
+        svc.publish("sam", vec![1; 80], 1_790_000_000).unwrap();
+        out.push(svc.lookup("sam", 1_790_000_000).unwrap());
+        out.push(policy.encode());
+        out.push(svc.info().encode());
+        out.push(
+            enclave_kt::UsernameClaim {
+                name: "sam".into(),
+                value: vec![2; 100],
+                device: [3; 16],
+                time: 1,
+                signature: vec![4; 60],
+            }
+            .encode(),
+        );
+    }
     // Calls.
     let p = enclave_calls::signal::offer(
         enclave_calls::signal::Media::Audio,

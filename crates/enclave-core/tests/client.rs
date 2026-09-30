@@ -18,6 +18,7 @@ fn network() -> LocalTransport {
             effort_request: 4,
             effort_claim: 1,
             effort_blob: 1,
+            effort_username: 1,
             ..Default::default()
         })
         .unwrap();
@@ -500,6 +501,35 @@ async fn link_a_second_device() {
     a.send_text(&b.root(), "and from the first").await.unwrap();
     let ev = a2.sync().await.unwrap();
     assert!(ev.iter().any(|e| matches!(e, Event::Message { message, .. } if message.outgoing && message.text == "and from the first")));
+
+    // Ada removes the new device. Only the primary can; Ben and the removed
+    // device find out, and nothing new reaches it.
+    let a2_id = a.devices().iter().find(|d| !d.this_device).unwrap().id;
+    let a1_id = a.devices().iter().find(|d| d.this_device).unwrap().id;
+    assert!(a2.remove_device(&a1_id).await.is_err());
+    assert!(a.remove_device(&a1_id).await.is_err(), "not this device");
+    a.remove_device(&a2_id).await.unwrap();
+    assert_eq!(a.devices().len(), 1);
+    b.sync().await.unwrap();
+    let ev = a2.sync().await.unwrap();
+    assert!(ev.contains(&Event::RemovedFromAccount), "{ev:?}");
+    b.send_text(&a.root(), "after the removal").await.unwrap();
+    let ev = a.sync().await.unwrap();
+    assert!(ev.iter().any(
+        |e| matches!(e, Event::Message { message, .. } if message.text == "after the removal")
+    ));
+    let ev = a2.sync().await.unwrap();
+    assert!(
+        ev.iter().all(|e| !matches!(e, Event::Message { .. })),
+        "{ev:?}"
+    );
+    // Messages the removed device sends are no longer accepted.
+    let _ = a2.send_text(&b.root(), "still here?").await;
+    let ev = b.sync().await.unwrap();
+    assert!(
+        ev.iter().all(|e| !matches!(e, Event::Message { .. })),
+        "{ev:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -580,4 +610,104 @@ impl RecoverySecretWords {
             .unwrap()
             .join(" ")
     }
+}
+
+/// Usernames across two servers: claim, find, add, message; taken and
+/// confusable names; renaming releases the old name but keeps it reserved;
+/// a lookup that fails verification is never reported as "not found".
+#[tokio::test(flavor = "multi_thread")]
+async fn usernames_through_key_transparency() {
+    use enclave_core::UsernameError;
+    let net = network();
+    let mut policy = net.enable_usernames(&S1, "one.test").unwrap();
+    policy.merge(net.enable_usernames(&S2, "two.test").unwrap());
+
+    let (mut alice, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Alice")
+        .await
+        .unwrap();
+    let (mut bob, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Bob")
+        .await
+        .unwrap();
+    let (mut carol, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Carol")
+        .await
+        .unwrap();
+    assert!(matches!(
+        alice.claim_username("alice").await,
+        Err(CoreError::Username(UsernameError::Unavailable))
+    ));
+    for c in [&mut alice, &mut bob, &mut carol] {
+        c.set_kt_policy(policy.clone());
+    }
+
+    assert_eq!(
+        alice.claim_username("Alice").await.unwrap(),
+        "alice@one.test"
+    );
+    assert_eq!(alice.username().as_deref(), Some("alice@one.test"));
+    assert_eq!(bob.claim_username("bob").await.unwrap(), "bob@two.test");
+    for (name, err) in [
+        ("alice", UsernameError::Taken),
+        ("a1ice", UsernameError::Taken),
+        ("admin", UsernameError::NotAllowed),
+        ("x", UsernameError::NotAllowed),
+    ] {
+        match carol.claim_username(name).await {
+            Err(CoreError::Username(e)) => assert_eq!(e, err, "{name}"),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    // Bob finds Alice on the other server and messages her.
+    let card = bob.find_username("@alice@one.test").await.unwrap();
+    assert_eq!(card.root, alice.root());
+    assert_eq!(card.name, "Alice");
+    bob.add_contact(&card, "Hi Alice, found you by name")
+        .await
+        .unwrap();
+    let ev = alice.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { root, .. } if *root == bob.root())),
+        "{ev:?}"
+    );
+    // Home-server lookups need no domain.
+    assert_eq!(
+        carol.find_username("alice").await.unwrap().root,
+        alice.root()
+    );
+    assert!(matches!(
+        bob.find_username("nobody@one.test").await,
+        Err(CoreError::Username(UsernameError::NotFound))
+    ));
+    assert!(matches!(
+        bob.find_username("alice@elsewhere.test").await,
+        Err(CoreError::Username(UsernameError::Unavailable))
+    ));
+
+    // Renaming: the old name stops resolving but stays Alice's.
+    assert_eq!(
+        alice.claim_username("alice_w").await.unwrap(),
+        "alice_w@one.test"
+    );
+    assert!(matches!(
+        bob.find_username("alice@one.test").await,
+        Err(CoreError::Username(UsernameError::NotFound))
+    ));
+    assert_eq!(
+        bob.find_username("alice_w@one.test").await.unwrap().root,
+        alice.root()
+    );
+    assert!(matches!(
+        carol.claim_username("alice").await,
+        Err(CoreError::Username(UsernameError::Taken))
+    ));
+
+    // A client pinning different witnesses refuses the server's answer.
+    let mut strict = policy.clone();
+    strict.witnesses.witnesses.truncate(2);
+    carol.set_kt_policy(strict);
+    assert!(matches!(
+        carol.find_username("bob@two.test").await,
+        Err(CoreError::Username(UsernameError::Unverified))
+    ));
 }

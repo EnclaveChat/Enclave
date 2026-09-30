@@ -53,6 +53,12 @@ fn rpc(d: &[u8]) {
     let _ = enclave_rpc::api::unframe(d);
     let _ = enclave_rpc::api::DirRequest::decode(d);
     let _ = enclave_rpc::api::DirReply::decode(d);
+    // Key transparency: everything a client decodes from a server or pin file.
+    let _ = enclave_kt::LookupReply::decode(d);
+    let _ = enclave_kt::SignedHead::decode(d);
+    let _ = enclave_kt::KtInfo::decode(d);
+    let _ = enclave_kt::KtPolicy::decode(d);
+    let _ = enclave_kt::UsernameClaim::decode(d);
 }
 
 fn content(d: &[u8]) {

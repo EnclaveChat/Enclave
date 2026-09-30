@@ -1,0 +1,244 @@
+//! A key-transparency log on its own thread.
+//!
+//! akd is async and spawns tokio tasks, while the server's request handler is
+//! a plain function from one sealed request to one sealed reply. The service
+//! owns the log (and, in development, the witnesses the server contacts after
+//! each epoch) on a dedicated thread with its own runtime; callers block on a
+//! reply channel. That works from sync code and from inside any async runtime,
+//! since the caller's runtime is never used to drive akd.
+//!
+//! In production the witnesses are separate services run by other operators
+//! and reached over TLS; here they are passed in so tests and the dev server
+//! can run the whole cosigning flow in one process.
+
+use crate::head::WitnessPolicy;
+use crate::log::{KtLog, Witness};
+use crate::wire::{KtInfo, KtPolicy, LookupReply};
+use crate::{KtError, Result};
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use std::sync::mpsc;
+
+/// Heads older than this get a heartbeat epoch before a lookup is answered.
+pub const HEARTBEAT_SECS: u64 = 3600;
+
+enum Job {
+    Publish {
+        name: String,
+        value: Vec<u8>,
+        now: u64,
+        reply: mpsc::Sender<Result<u64>>,
+    },
+    Lookup {
+        name: String,
+        now: u64,
+        reply: mpsc::Sender<Result<Vec<u8>>>,
+    },
+}
+
+/// Handle to a running log.
+pub struct KtService {
+    tx: mpsc::Sender<Job>,
+    info: KtInfo,
+}
+
+impl KtService {
+    /// Start a log for `server`. `vrf_secret` must stay fixed for the life of
+    /// the log.
+    pub fn start(
+        server: [u8; 16],
+        domain: &str,
+        operator: &str,
+        signing: CompositeSigningKey,
+        vrf_secret: [u8; 32],
+        witnesses: Vec<Witness>,
+    ) -> Result<Self> {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let (init_tx, init_rx) = mpsc::channel();
+        let head_key = signing.public().clone();
+        std::thread::Builder::new()
+            .name("enclave-kt".into())
+            .spawn(move || run(server, signing, vrf_secret, witnesses, rx, init_tx))
+            .map_err(|e| KtError::Directory(e.to_string()))?;
+        let vrf_public = init_rx.recv().map_err(|_| KtError::Stopped)??;
+        Ok(Self {
+            tx,
+            info: KtInfo {
+                server,
+                domain: domain.to_string(),
+                operator: operator.to_string(),
+                head_key,
+                vrf_public,
+            },
+        })
+    }
+
+    /// **Development only**: a log with fresh keys and three in-process
+    /// witnesses under distinct operator names, plus the policy clients pin
+    /// for it. Real witnesses are other operators' services.
+    pub fn start_dev(server: [u8; 16], domain: &str) -> Result<(Self, KtPolicy)> {
+        let mut rng = HedgedRng::new().map_err(|_| KtError::Directory("rng".into()))?;
+        let key = |rng: &mut HedgedRng| {
+            CompositeSigningKey::generate(rng).map_err(|_| KtError::Directory("keygen".into()))
+        };
+        let mut witnesses = Vec::new();
+        for i in 0..3u8 {
+            let mut id = server;
+            id[15] ^= 0x80 | i;
+            witnesses.push(Witness::new(
+                id,
+                &format!("dev-witness-{i}"),
+                key(&mut rng)?,
+            ));
+        }
+        let pins = witnesses
+            .iter()
+            .map(|w| (w.id, w.public_key().clone(), w.operator.clone()))
+            .collect();
+        let vrf = rng
+            .array::<32>("kt/dev-vrf")
+            .map_err(|_| KtError::Directory("rng".into()))?;
+        let svc = Self::start(server, domain, "dev-server", key(&mut rng)?, vrf, witnesses)?;
+        let policy = KtPolicy {
+            servers: vec![svc.info().clone()],
+            witnesses: WitnessPolicy {
+                witnesses: pins,
+                threshold: 3,
+            },
+        };
+        Ok((svc, policy))
+    }
+
+    /// Parameters clients pin for this log.
+    pub fn info(&self) -> &KtInfo {
+        &self.info
+    }
+
+    /// Bind `name` to `value` in a new epoch and collect witness cosignatures.
+    /// Returns the epoch.
+    pub fn publish(&self, name: &str, value: Vec<u8>, now: u64) -> Result<u64> {
+        let (reply, rx) = mpsc::channel();
+        self.tx
+            .send(Job::Publish {
+                name: name.to_string(),
+                value,
+                now,
+                reply,
+            })
+            .map_err(|_| KtError::Stopped)?;
+        rx.recv().map_err(|_| KtError::Stopped)?
+    }
+
+    /// An encoded [`LookupReply`] for `name` against a fresh, cosigned head.
+    pub fn lookup(&self, name: &str, now: u64) -> Result<Vec<u8>> {
+        let (reply, rx) = mpsc::channel();
+        self.tx
+            .send(Job::Lookup {
+                name: name.to_string(),
+                now,
+                reply,
+            })
+            .map_err(|_| KtError::Stopped)?;
+        rx.recv().map_err(|_| KtError::Stopped)?
+    }
+}
+
+fn run(
+    server: [u8; 16],
+    signing: CompositeSigningKey,
+    vrf_secret: [u8; 32],
+    mut witnesses: Vec<Witness>,
+    rx: mpsc::Receiver<Job>,
+    init: mpsc::Sender<Result<Vec<u8>>>,
+) {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("enclave-kt-akd")
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = init.send(Err(KtError::Directory(e.to_string())));
+            return;
+        }
+    };
+    let mut rng = match HedgedRng::new() {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = init.send(Err(KtError::Directory("rng".into())));
+            return;
+        }
+    };
+    let mut log = match rt.block_on(KtLog::new(server, signing, vrf_secret)) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = init.send(Err(e));
+            return;
+        }
+    };
+    if init.send(Ok(log.vrf_public().to_vec())).is_err() {
+        return;
+    }
+    // Last epoch each witness cosigned.
+    let mut last: Vec<Option<u64>> = vec![None; witnesses.len()];
+    while let Ok(job) = rx.recv() {
+        match job {
+            Job::Publish {
+                name,
+                value,
+                now,
+                reply,
+            } => {
+                let r = rt.block_on(async {
+                    let sh = log.publish(&name, value, now, &mut rng).await?;
+                    cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
+                    Ok(sh.head.epoch)
+                });
+                let _ = reply.send(r);
+            }
+            Job::Lookup { name, now, reply } => {
+                let r = rt.block_on(async {
+                    let fresh = log
+                        .latest()
+                        .is_some_and(|h| h.head.time + HEARTBEAT_SECS > now);
+                    if !fresh {
+                        log.heartbeat(now, &mut rng).await?;
+                        cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
+                    }
+                    let (proof, head) = log.lookup(&name).await?;
+                    LookupReply { head, proof }.encode()
+                });
+                let _ = reply.send(r);
+            }
+        }
+    }
+}
+
+/// Ask every witness to cosign the latest head. A witness that refuses leaves
+/// the head without its cosignature; clients then decide by their quorum.
+async fn cosign_all(
+    log: &mut KtLog,
+    witnesses: &mut [Witness],
+    last: &mut [Option<u64>],
+    now: u64,
+    rng: &mut HedgedRng,
+) {
+    let Some(epoch) = log.latest().map(|h| h.head.epoch) else {
+        return;
+    };
+    let server_key = log.public_key().clone();
+    for (w, seen) in witnesses.iter_mut().zip(last.iter_mut()) {
+        let (heads, proof) = match *seen {
+            Some(l) if l >= epoch => continue,
+            Some(l) => match log.audit(l, epoch).await {
+                Ok(p) => (log.heads_after(l, epoch), Some(p)),
+                Err(_) => continue,
+            },
+            None => (log.heads_after(epoch.saturating_sub(1), epoch), None),
+        };
+        if let Ok(c) = w.cosign(&server_key, &heads, proof, now, rng).await {
+            log.add_cosignature(epoch, c);
+            *seen = Some(epoch);
+        }
+    }
+}

@@ -91,11 +91,14 @@ export component Seal inherits Rectangle {
 export component PrimaryButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
+    // For destructive confirmations only (Brick/Ember, always with words).
+    in property <bool> danger: false;
     callback clicked();
     min-height: Tokens.space-touch-target-min;
     min-width: label.preferred-width + 2 * Tokens.space-l;
     border-radius: Tokens.radius-control;
-    background: !root.enabled ? Tokens.hairline : touch.pressed ? Tokens.pine.darker(20%) : touch.has-hover ? Tokens.pine.darker(8%) : Tokens.pine;
+    property <color> base: root.danger ? Tokens.danger : Tokens.pine;
+    background: !root.enabled ? Tokens.hairline : touch.pressed ? root.base.darker(20%) : touch.has-hover ? root.base.darker(8%) : root.base;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -105,7 +108,7 @@ export component PrimaryButton inherits Rectangle {
         text: root.text;
         font-size: Tokens.type-body;
         font-weight: 600;
-        color: root.enabled ? Tokens.on-pine : Tokens.text-muted;
+        color: !root.enabled ? Tokens.text-muted : root.danger ? Tokens.surface : Tokens.on-pine;
         horizontal-alignment: center;
         vertical-alignment: center;
     }

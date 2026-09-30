@@ -79,11 +79,93 @@ impl SignedHead {
         })
     }
 
+    /// Encoding: `head(64) ‖ u32 len ‖ signature ‖ u8 n ‖ n × (witness(16) ‖
+    /// time(8) ‖ u32 len ‖ signature)`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = self.head.encode().to_vec();
+        v.extend_from_slice(&(self.signature.len() as u32).to_be_bytes());
+        v.extend_from_slice(&self.signature);
+        v.push(self.cosignatures.len().min(255) as u8);
+        for c in self.cosignatures.iter().take(255) {
+            v.extend_from_slice(&c.witness);
+            v.extend_from_slice(&c.time.to_be_bytes());
+            v.extend_from_slice(&(c.signature.len() as u32).to_be_bytes());
+            v.extend_from_slice(&c.signature);
+        }
+        v
+    }
+
+    /// Decode (the whole input must be consumed).
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Cursor(b);
+        let h = r.take(64)?;
+        let head = TreeHead {
+            server: arr(&h[..16])?,
+            epoch: u64::from_be_bytes(arr(&h[16..24])?),
+            root: arr(&h[24..56])?,
+            time: u64::from_be_bytes(arr(&h[56..64])?),
+        };
+        let signature = r.sig()?;
+        let n = r.take(1)?[0] as usize;
+        let mut cosignatures = Vec::with_capacity(n);
+        for _ in 0..n {
+            let witness = arr(r.take(16)?)?;
+            let time = u64::from_be_bytes(arr(r.take(8)?)?);
+            let signature = r.sig()?;
+            cosignatures.push(Cosignature {
+                witness,
+                time,
+                signature,
+            });
+        }
+        if !r.0.is_empty() {
+            return Err(KtError::Malformed);
+        }
+        Ok(Self {
+            head,
+            signature,
+            cosignatures,
+        })
+    }
+
     /// Verify the server's signature.
     pub fn verify_server(&self, server_key: &CompositePublic) -> Result<()> {
         server_key
             .verify(CTX_HEAD, &self.head.encode(), &self.signature)
             .map_err(|_| KtError::Signature)
+    }
+}
+
+/// Largest signature accepted when decoding.
+const MAX_SIG: usize = 8192;
+
+pub(crate) fn arr<const N: usize>(b: &[u8]) -> Result<[u8; N]> {
+    b.try_into().map_err(|_| KtError::Malformed)
+}
+
+/// A minimal reader over a byte slice.
+pub(crate) struct Cursor<'a>(pub &'a [u8]);
+
+impl<'a> Cursor<'a> {
+    pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        if self.0.len() < n {
+            return Err(KtError::Malformed);
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Ok(a)
+    }
+
+    pub fn bytes(&mut self, max: usize) -> Result<&'a [u8]> {
+        let n = u32::from_be_bytes(arr(self.take(4)?)?) as usize;
+        if n > max {
+            return Err(KtError::Malformed);
+        }
+        self.take(n)
+    }
+
+    fn sig(&mut self) -> Result<Vec<u8>> {
+        Ok(self.bytes(MAX_SIG)?.to_vec())
     }
 }
 

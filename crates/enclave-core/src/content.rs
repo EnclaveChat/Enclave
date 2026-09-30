@@ -115,6 +115,9 @@ pub enum Content {
     Read(Vec<MsgId>),
     /// The conversation's disappearing timer changed.
     Timer(u32),
+    /// The sender's device list changed: fetch its manifest, at least this
+    /// version, and stop encrypting to devices no longer in it.
+    Devices(u64),
     /// A copy, for our other devices, of content we sent to `to`.
     SelfCopy {
         /// The conversation it belongs to.
@@ -136,6 +139,7 @@ const K_DELETE: u8 = 9;
 const K_READ: u8 = 10;
 const K_TIMER: u8 = 11;
 const K_SELF_COPY: u8 = 12;
+const K_DEVICES: u8 = 13;
 /// Largest content a self-copy can wrap.
 pub const MAX_SELF_COPY: usize = 9_000;
 
@@ -281,6 +285,9 @@ impl Content {
                 }
                 w.u8(K_TIMER).u32(*secs);
             }
+            Content::Devices(version) => {
+                w.u8(K_DEVICES).u64(*version);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -351,6 +358,7 @@ impl Content {
                 Content::Read((0..n).map(|_| r.array()).collect::<Result<_>>()?)
             }
             K_TIMER => Content::Timer(timer(r.u32()?)?),
+            K_DEVICES => Content::Devices(r.u64()?),
             K_SELF_COPY => {
                 let to = r.array()?;
                 let content = r.bytes(MAX_SELF_COPY)?.to_vec();

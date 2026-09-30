@@ -4,6 +4,10 @@
 //!
 //! Frame: `u32 BE length ‖ bytes`. A zero-length frame asks for the server's
 //! current request key; any other frame is a sealed request.
+//!
+//! `enclave-server [ADDR] [--domain NAME] [--kt-pins FILE]` also runs a
+//! development key-transparency log (in memory, with in-process witnesses) so
+//! usernames work, and writes what clients must pin to `FILE`.
 
 use enclave_server::{Config, Server};
 use std::sync::Arc;
@@ -30,12 +34,33 @@ fn encode_key(k: &enclave_rpc::ServerKey) -> Vec<u8> {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let addr = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |k: &str| {
+        args.iter()
+            .position(|a| a == k)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let addr = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
         .unwrap_or_else(|| "127.0.0.1:7443".to_string());
     let day = (now() / 86_400) as u32;
-    let server =
-        Server::new(Config::default(), day).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let cfg = Config::default();
+    let id = cfg.id;
+    let mut server = Server::new(cfg, day).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let domain = flag("--domain").unwrap_or_else(|| "localhost".to_string());
+    match enclave_kt::KtService::start_dev(id, &domain) {
+        Ok((kt, policy)) => {
+            server.enable_kt(kt);
+            if let Some(path) = flag("--kt-pins") {
+                std::fs::write(&path, policy.encode())?;
+                eprintln!("usernames on @{domain}; clients pin {path}");
+            }
+        }
+        Err(e) => eprintln!("usernames disabled: {e}"),
+    }
     let server = Arc::new(Mutex::new(server));
     // Daily request-key rotation (the old key is kept one day, then deleted)
     // and expiry of stored objects past their TTL.

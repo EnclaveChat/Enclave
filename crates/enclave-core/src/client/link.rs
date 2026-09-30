@@ -38,7 +38,7 @@ use enclave_proto::bundle::PrekeyStore;
 use enclave_proto::codec::{Reader, Writer};
 use enclave_proto::identity::{AccountKeys, DeviceKeys};
 use enclave_proto::manifest::{
-    DeviceEntry, MAX_DEVICES, MAX_VALIDITY_SECS, MlKemPublicBytes, Role, SignedManifest,
+    DeviceEntry, MAX_DEVICES, MAX_VALIDITY_SECS, Manifest, MlKemPublicBytes, Role, SignedManifest,
 };
 use enclave_rpc::api::{self, DirAction, DirKind, FLAG_GROUP, device_key, manifest_key};
 use enclave_store::Store;
@@ -435,6 +435,8 @@ impl LinkingDevice {
             contacts: BTreeMap::new(),
             issuers: HashMap::new(),
             groups: BTreeMap::new(),
+            kt: None,
+            stale_manifests: BTreeMap::new(),
         };
         let own = client.card();
         for (card, name, verified, timer, inbox, server, tokens) in contacts {
@@ -604,39 +606,10 @@ impl Client {
         }
         let now = unix_now();
         // New manifest with the device.
-        let prev = self.current_signed_manifest(now).await?;
-        let mut m = self.manifest.clone();
-        m.version += 1;
-        m.prev_hash = prev.hash();
-        m.issued_at = now;
-        m.expires_at = now + MAX_VALIDITY_SECS;
-        m.devices.push(offer.entry.clone());
-        let signed = m.sign(&self.account, &mut self.rng)?;
-        let root = self.account.root_public.0;
-        self.rpc
-            .dir_put(
-                &self.profile.server,
-                DirKind::Manifest,
-                manifest_key(&root),
-                [0; 32],
-                &signed.to_bytes(),
-                now,
-                &mut self.rng,
-            )
+        let entry = offer.entry.clone();
+        let signed = self
+            .publish_manifest(|m| m.devices.push(entry), now)
             .await?;
-        self.manifest = m;
-        self.store.put(
-            NS_PROFILE,
-            b"manifest",
-            &self.manifest.encode()?,
-            &mut self.rng,
-        )?;
-        self.store.put(
-            NS_PROFILE,
-            b"signed-manifest",
-            &signed.to_bytes(),
-            &mut self.rng,
-        )?;
 
         // The account, as a sealed blob.
         let mut w = Writer::new();
@@ -702,7 +675,56 @@ impl Client {
         Ok(())
     }
 
-    async fn current_signed_manifest(&mut self, now: u64) -> Result<SignedManifest> {
+    /// Sign and publish the next manifest version with `change` applied, and
+    /// make it ours. Needs the root (primary device).
+    pub(crate) async fn publish_manifest(
+        &mut self,
+        change: impl FnOnce(&mut Manifest),
+        now: u64,
+    ) -> Result<SignedManifest> {
+        let prev = self.current_signed_manifest(now).await?;
+        let mut m = self.manifest.clone();
+        m.version += 1;
+        m.prev_hash = prev.hash();
+        m.issued_at = now;
+        m.expires_at = now + MAX_VALIDITY_SECS;
+        change(&mut m);
+        let signed = m.sign(&self.account, &mut self.rng)?;
+        let root = self.account.root_public.0;
+        self.rpc
+            .dir_put(
+                &self.profile.server,
+                DirKind::Manifest,
+                manifest_key(&root),
+                [0; 32],
+                &signed.to_bytes(),
+                now,
+                &mut self.rng,
+            )
+            .await?;
+        self.set_manifest(m, &signed)?;
+        Ok(signed)
+    }
+
+    /// Adopt a verified manifest of our own account.
+    pub(crate) fn set_manifest(&mut self, m: Manifest, signed: &SignedManifest) -> Result<()> {
+        self.manifest = m;
+        self.store.put(
+            NS_PROFILE,
+            b"manifest",
+            &self.manifest.encode()?,
+            &mut self.rng,
+        )?;
+        self.store.put(
+            NS_PROFILE,
+            b"signed-manifest",
+            &signed.to_bytes(),
+            &mut self.rng,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) async fn current_signed_manifest(&mut self, now: u64) -> Result<SignedManifest> {
         if let Some(b) = self.store.get(NS_PROFILE, b"signed-manifest")? {
             return Ok(SignedManifest::from_bytes(&b)?);
         }
@@ -756,6 +778,16 @@ impl Client {
             content: content.encode()?,
         }
         .encode()?;
+        self.send_own(&copy, now).await
+    }
+
+    /// Send encoded content to every other device of ours we have a session
+    /// with (one envelope, one slot per device).
+    pub(crate) async fn send_own(&mut self, copy: &[u8], now: u64) -> Result<()> {
+        let own = self.account.root_public.0;
+        if !self.sessions.keys().any(|(r, _)| *r == own) {
+            return Ok(());
+        }
         let token = self
             .issue_tokens(&own, 1, now)
             .await?
@@ -775,7 +807,7 @@ impl Client {
             }
             let carrier = refs.iter().position(|s| s.wants_pq_slot());
             let env =
-                enclave_proto::envelope::seal_direct(&mut refs, &copy, carrier, &mut self.rng)?;
+                enclave_proto::envelope::seal_direct(&mut refs, copy, carrier, &mut self.rng)?;
             drop(refs);
             for k in keys {
                 if let Some(s) = self.sessions.get(&k) {

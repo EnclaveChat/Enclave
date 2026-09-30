@@ -111,6 +111,7 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/kt/head` | CTX-C | — | `head.rs` `SignedHead::sign`, `verify_server` | Server tree-head signature |
 | `enclave/v1/kt/cosign` | CTX-C | — | `head.rs` `WitnessPolicy::check`; `log.rs` `Witness::cosign` | Witness cosignature |
 | `enclave/v1/kt/gossip` | HASH | 256 | `head.rs` `TreeHead::gossip_digest` | 32 B head digest for gossip |
+| `enclave/v1/kt/claim` | CTX-C | — | `wire.rs` `UsernameClaim`; server `accept_username`; core `claim_username` | Device signature on a username claim |
 
 ### 2.7 Local storage (`enclave-store`)
 

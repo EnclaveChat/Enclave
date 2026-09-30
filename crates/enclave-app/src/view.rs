@@ -53,6 +53,19 @@ pub struct Pick {
     pub selected: bool,
 }
 
+/// A device of the account for display.
+#[derive(Clone, Debug, Default)]
+pub struct Device {
+    /// Hex id.
+    pub id: String,
+    /// "This device", "First device", "Linked device".
+    pub label: String,
+    /// When it was added.
+    pub detail: String,
+    /// This device may remove it.
+    pub removable: bool,
+}
+
 /// A message for display.
 #[derive(Clone, Debug, Default)]
 pub struct Msg {
@@ -97,14 +110,20 @@ pub struct Snapshot {
     pub busy: bool,
     /// Contacts to pick for a new group.
     pub pick: Vec<Pick>,
-    /// Devices: (label, detail).
-    pub devices: Vec<(String, String)>,
+    /// Devices.
+    pub devices: Vec<Device>,
     /// Link word choices (when a link code was scanned).
     pub link_choices: Vec<String>,
     /// Link status line.
     pub link_status: String,
     /// This device can link others.
     pub can_link: bool,
+    /// Our username as `@name@domain`, or empty.
+    pub my_username: String,
+    /// Usernames work on this server.
+    pub usernames: bool,
+    /// Error for the username field.
+    pub username_error: String,
 }
 
 /// Initials for contact art: first letters of up to two words.
@@ -214,6 +233,9 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_recovery_words(strings(&s.recovery_words));
     ui.set_recovery_saved(s.recovery_saved);
     ui.set_add_error(s.add_error.clone().into());
+    ui.set_my_username(s.my_username.clone().into());
+    ui.set_usernames(s.usernames);
+    ui.set_username_error(s.username_error.clone().into());
     ui.set_busy(s.busy);
     let pick: Vec<PickRow> = s
         .pick
@@ -230,9 +252,11 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     let devices: Vec<DeviceRow> = s
         .devices
         .iter()
-        .map(|(l, d)| DeviceRow {
-            label: l.clone().into(),
-            detail: d.clone().into(),
+        .map(|d| DeviceRow {
+            id: d.id.clone().into(),
+            label: d.label.clone().into(),
+            detail: d.detail.clone().into(),
+            removable: d.removable,
         })
         .collect();
     ui.set_devices(ModelRc::from(Rc::new(VecModel::from(devices))));

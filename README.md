@@ -70,8 +70,12 @@ a vulnerability.
 
 ```sh
 cargo run --release -p enclave-app --bin enclave            # offline demo: local server and a demo contact
-cargo run --release -p enclave-server -- 127.0.0.1:7443    # or a dev server…
-cargo run --release -p enclave-app --bin enclave -- --server 127.0.0.1:7443 --profile ~/.enclave-dev
+cargo run --release -p enclave-server -- 127.0.0.1:7443 --kt-pins /tmp/kt-pins   # or a dev server…
+cargo run --release -p enclave-app --bin enclave -- --server 127.0.0.1:7443 --profile ~/.enclave-dev --kt-pins /tmp/kt-pins
 ```
+
+In the demo, the demo contact has the username `@sam@demo.enclave`; choose
+your own under Settings. `--kt-pins` is the file where the dev server writes
+its key-transparency keys and witnesses, which the app pins to check lookups.
 
 ![Conversation](docs/screenshots/05-conversation-light.png)

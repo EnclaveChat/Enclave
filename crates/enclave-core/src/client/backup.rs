@@ -173,6 +173,8 @@ impl Client {
             contacts,
             issuers: HashMap::new(),
             groups: BTreeMap::new(),
+            kt: None,
+            stale_manifests: BTreeMap::new(),
         };
         // Fresh token issuers: the old counters may have been used after the
         // backup was taken.

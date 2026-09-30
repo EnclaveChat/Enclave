@@ -20,4 +20,5 @@ enclave-proto = { path = "../enclave-proto" }
 enclave-tokens = { path = "../enclave-tokens" }
 enclave-server = { path = "../enclave-server" }
 enclave-net = { path = "../enclave-net" }
+enclave-kt = { path = "../enclave-kt" }
 async-trait = "0.1"

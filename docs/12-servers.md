@@ -70,6 +70,7 @@ Nothing in this table is an IP address, a Nym identity or an account identifier.
 | 1 `Manifest` | `SHAKE256("enclave/v1/dir/manifest" ‖ root_pk, 32)` (`manifest_key`) | `SignedManifest` encoding (`03-identity.md` §3) | The account | Anyone with the root public key |
 | 2 `Bundle` | `device_id (16) ‖ 0^16` (`device_key`) | `Publication` on put; `Bundle` on claim | The device | Initiators, through claims |
 | 3 `Vault` | 32 B random locator | Opaque bytes (the client-sealed vault key) | The account | Holders of the locator and its key (contact card) |
+| 4 `Username` | The name's bytes, zero-padded to 32 (`name_key`) on put and on the first get; the reply ID on later gets | `UsernameClaim` on put; `LookupReply` on get (§3.7) | A device of the account | Anyone who knows the name |
 
 Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B (`08-envelope.md` §9.3).
 
@@ -79,6 +80,7 @@ Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B
 
 - **Manifest:** decode the signed manifest and its body (`Malformed`); the key must equal `manifest_key(root)` of the manifest's own root (`Invalid`); the root signature and validity window must verify (`SignedManifest::verify` with the manifest's root, `Invalid`); the version must be higher than the stored one (`Invalid`). Then store it.
 - **Bundle:** decode the publication (`Malformed`); the key must equal `device_key` of the signed prekey's device (`Invalid`); some stored manifest must list that device (`NotFound`), and `Publication::verify` must pass with that device's composite key (`Invalid`). Then store it and reset the one-time-prekey pointer to 0.
+- **Username:** see §3.7.
 - **Vault:** `DirRequest.proof` is the owner secret. If the locator exists with a different owner hash: `Denied`. Otherwise store the bytes with `credential_hash(owner secret)`. The server does not interpret the bytes.
 
 ### 2.3 Get and claim
@@ -86,6 +88,7 @@ Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B
 - `Manifest`/`Get` and `Vault`/`Get` return chunk `index` of the stored object with the total chunk count, or `NotFound`.
 - `Bundle`/`Claim`: verify the PoW in `proof` (`Pow`); look up the publication of `key[0..16]` (`NotFound`); build a `Bundle` with the signed prekey, the next unserved one-time prekey and its batch header (none if all 100 are served), and the last-resort prekey; advance the pointer; store the encoded bundle under a fresh random 32 B claim ID for 600 s; reply with chunk 0 and the claim ID.
 - `Bundle`/`Get` with `key` = claim ID returns further chunks of a claimed bundle.
+- `Username`/`Get` with `index` 0 and `key` = `name_key(name)` runs a lookup (§3.7), stores the encoded reply under a fresh random 32 B reply ID for 600 s and returns chunk 0 with that ID; `index` > 0 with `key` = reply ID returns further chunks. A lookup of an unknown name, or on a server without a log, is `NotFound`.
 - Any other kind and action combination: `Malformed`.
 
 Each one-time prekey is served once. Manifests and publications are stored in the clear (`01-threat-model.md` §4 note 1).
@@ -94,7 +97,8 @@ Each one-time prekey is served once. Manifests and publications are stored in th
 
 ### 3.1 Tree and configuration
 
-- `KtLog` wraps Meta's **akd** 0.13 (NCC-audited 2023) with an in-memory store and a VRF key held in memory. Each `publish` call is one epoch; there is no fixed epoch interval yet.
+- `KtLog` wraps Meta's **akd** 0.13 (NCC-audited 2023) with an in-memory store and a VRF key held in memory. Each `publish` call is one epoch. `heartbeat` starts an epoch with no username change (label `0x00 ‖ "heartbeat"`, which no valid username can equal) so heads stay fresh.
+- `KtService` runs the log on its own thread with its own tokio runtime (akd spawns tasks), so the synchronous request handler can call it from any context. After every epoch it asks each attached witness to cosign (§3.3). A lookup against a head older than 1 h first starts a heartbeat epoch.
 - `EnclaveKtConfig` replaces every akd hash with domain-separated SHAKE256-256:
 
 ```
@@ -113,7 +117,7 @@ empty label              = { value: 0x01 ‖ 0^31, length: 0 }
 ```
 
 - Label privacy uses akd's classical ECVRF (Ed25519); it only hides usernames from enumeration. Binding is hash-based and post-quantum.
-- The leaf value is opaque bytes chosen by the publisher (intended: a hash binding the root key and the manifest locator). `publish` performs no authorization; the server operation that calls it is not wired yet.
+- The leaf value is `root_pk (64) ‖ ContactCard` (`03-identity.md`). A bare `root_pk` is a released name. `KtLog::publish` performs no authorization; the server's `Username` put does (§3.7).
 
 ### 3.2 Signed tree heads
 
@@ -164,11 +168,30 @@ PLAN's quorum values (≥3 independent witnesses, ≥2 during beta) are policy i
 
 `username::skeleton(name)` maps look-alikes to one form: first replace `rn` → `m`, `vv` → `w`, `cl` → `d`, and remove `_`; then map characters `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`. `KtLog::publish` refuses a new name whose skeleton equals that of a different registered name (RT-26).
 
-The username format is `@name@server`. Unicode names (NFKC and UTS #39 skeletons), one username per account, registration PoW, operator tombstones and account-deletion tombstones are not implemented.
+The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons), operator tombstones and account-deletion tombstones are not implemented.
 
 ### 3.6 Not implemented yet
 
-Gossip comparison between contacts and the split-view alert; client self-audit on launch; the device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors; the KT server operation.
+Gossip comparison between contacts and the split-view alert; client self-audit on launch; the device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+
+### 3.7 Claims and lookups
+
+**Pins.** A client pins `KtPolicy { servers: [KtInfo], witnesses: WitnessPolicy }`, shipped with the app's server list; nothing about a log is learned from the log at lookup time. `KtInfo` is `server (16) ‖ domain ‖ operator ‖ head key ‖ VRF public key` (each variable field `u32 length ‖ bytes`).
+
+**Claim** (`Username`/`Put`, `key` = `name_key(name)`, `proof` = Equi-X over `"claim-username" ‖ key ‖ u64(day)` at `effort_username`, default 64):
+
+```
+UsernameClaim = u32 len ‖ name ‖ u32 len ‖ value ‖ u32 len ‖ signature ‖ device (16) ‖ u64(time)
+value         = root_pk (64) ‖ ContactCard
+signature     = CompositeSign(device_sk, ctx = "enclave/v1/kt/claim",
+                  server (16) ‖ u32(len) ‖ name ‖ u32(len) ‖ value ‖ u64(time))
+```
+
+The server checks, in order: the PoW (`Pow`); the claim decodes (`Malformed`); the name is valid, already normalized and equal to the key's name, and `time` is within 1 h of the server clock (`Invalid`); the server holds a manifest for the value's root (`NotFound`); a device in that manifest with the claim's device ID verifies the signature (`Invalid`); the name is unowned or owned by the same root (`Denied`) and `time` is later than the owner's last accepted claim (`Invalid`, stops replays). One name per account: if the root owns a different name, that name is republished as the bare root (released, but still reserved for this root). Then the name is published; a confusable skeleton of another root's name is `Denied`.
+
+**Lookup reply** = `u32 len ‖ SignedHead ‖ u32 len ‖ akd LookupProof (akd's protobuf encoding)`, with `SignedHead = head (64) ‖ u32 len ‖ server sig ‖ u8 n ‖ n × (witness (16) ‖ u64(time) ‖ u32 len ‖ sig)`.
+
+**Client** (`Client::find_username`): parse `@name@domain` (a bare name means the home server), pick the pinned log by domain (`Unavailable`), normalize (`NotAllowed`), fetch, then `verify_lookup` with the pinned head key, operator, VRF key and witness policy. Any decoding or verification failure is `Unverified`, never "not found", and the UI refuses to add anyone. A bare root is `NotFound`. The card's root must equal the value's root and its server the log's server (`Unverified`). The result is only a contact card: the usual message request and security-code check follow.
 
 ## 4. Discovery and migration (not yet implemented)
 

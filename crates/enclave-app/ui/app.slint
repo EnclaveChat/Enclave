@@ -37,8 +37,10 @@ export struct PickRow {
 }
 
 export struct DeviceRow {
+    id: string,
     label: string,
     detail: string,
+    removable: bool,
 }
 
 // status: 0 sending privately, 1 on its way, 2 delivered.
@@ -279,6 +281,10 @@ export component AppWindow inherits Window {
     in property <image> my-qr;
     in property <[string]> code-groups;
     in property <string> add-error;
+    in property <string> my-username;
+    in property <bool> usernames;
+    in property <string> username-error;
+    in-out property <string> username-input;
     in property <bool> busy;
     in property <string> status-line;
     in property <bool> show-delivery-hint: true;
@@ -304,6 +310,9 @@ export component AppWindow inherits Window {
     callback accept(string);
     callback decline(string);
     callback add-contact(string, string);
+    callback claim-username(string);
+    callback remove-device(string);
+    in-out property <string> confirm-remove;
     callback mark-checked(string);
     callback copy-text(string);
     callback set-privacy(int);
@@ -620,17 +629,31 @@ export component AppWindow inherits Window {
             color: Tokens.text-muted;
             overflow: elide;
         }
+        if root.my-username != "": HorizontalLayout {
+            spacing: Tokens.space-s;
+            Secondary { text: "Or they can look you up as"; vertical-alignment: center; horizontal-stretch: 0; }
+            Text {
+                text: root.my-username;
+                font-family: "Atkinson Hyperlegible Mono";
+                font-size: Tokens.type-secondary;
+                color: Tokens.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+        }
         HorizontalLayout {
             alignment: start;
+            spacing: Tokens.space-s;
             PrimaryButton { text: "Copy invite link"; clicked => { root.copy-text(root.my-link); } }
+            if root.my-username != "": QuietButton { text: "Copy username"; clicked => { root.copy-text(root.my-username); } }
         }
     }
 
     if root.sheet == Sheet.add: SheetFrame {
         title: "Add someone";
         close => { root.sheet = Sheet.none; }
-        Secondary { text: "Paste the invite link they sent you."; }
-        Field { placeholder: "enclave:add#…"; mono: true; text <=> root.add-link; }
+        Secondary { text: root.usernames ? "Paste the invite link they sent you, or type their username." : "Paste the invite link they sent you."; }
+        Field { placeholder: root.usernames ? "enclave:add#…  or  @name@server" : "enclave:add#…"; mono: true; text <=> root.add-link; }
         Field { placeholder: "Say hello (optional)"; text <=> root.add-text; }
         if root.add-error != "": HorizontalLayout {
             spacing: Tokens.space-s;
@@ -641,7 +664,7 @@ export component AppWindow inherits Window {
                 background: Tokens.danger;
                 Text { text: "!"; color: Tokens.surface; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
             }
-            Text { text: "Can't use this link"; color: Tokens.danger; font-size: Tokens.type-body; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            Text { text: "Couldn't add them"; color: Tokens.danger; font-size: Tokens.type-body; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
         }
         if root.add-error != "": Text {
             text: root.add-error;
@@ -696,7 +719,7 @@ export component AppWindow inherits Window {
     }
 
     if root.sheet == Sheet.settings: SheetFrame {
-        title: "Privacy";
+        title: "Settings";
         close => { root.sheet = Sheet.none; }
         for option[i] in [
             { title: "Standard", text: "Hides who you talk to. Uses about 60 MB an hour while Enclave is open, and about 40 MB a day in the background." },
@@ -731,6 +754,35 @@ export component AppWindow inherits Window {
                     Secondary { text: option.text; }
                 }
             }
+        }
+        if root.usernames: Rectangle { height: 1px; background: Tokens.hairline; }
+        if root.usernames: Body { text: "Username"; font-weight: 600; }
+        if root.usernames && root.my-username != "": Text {
+            text: root.my-username;
+            font-family: "Atkinson Hyperlegible Mono";
+            font-size: Tokens.type-body;
+            color: Tokens.text;
+            accessible-label: "Your username: " + root.my-username;
+        }
+        if root.usernames: Secondary {
+            text: root.my-username == ""
+                ? "Optional. A username is public, like an email address: anyone who knows it can send you a message request."
+                : "Anyone who knows it can send you a message request. Choosing a new one retires this one.";
+        }
+        if root.usernames: HorizontalLayout {
+            spacing: Tokens.space-s;
+            Field { placeholder: "name"; mono: true; text <=> root.username-input; horizontal-stretch: 1; }
+            PrimaryButton {
+                text: root.busy ? "Checking…" : (root.my-username == "" ? "Choose" : "Change");
+                enabled: root.username-input != "" && !root.busy;
+                clicked => { root.claim-username(root.username-input); }
+            }
+        }
+        if root.usernames && root.username-error != "": Text {
+            text: root.username-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
         }
         HorizontalLayout {
             spacing: Tokens.space-s;
@@ -804,25 +856,55 @@ export component AppWindow inherits Window {
     if root.sheet == Sheet.devices: SheetFrame {
         title: "Your devices";
         close => { root.sheet = Sheet.none; }
-        for d in root.devices: HorizontalLayout {
-            spacing: Tokens.space-sm;
-            VerticalLayout {
-                horizontal-stretch: 1;
-                Body { text: d.label; font-weight: 600; }
-                Secondary { text: d.detail; }
+        for d in root.devices: VerticalLayout {
+            spacing: Tokens.space-s;
+            HorizontalLayout {
+                spacing: Tokens.space-sm;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Body { text: d.label; font-weight: 600; }
+                    Secondary { text: d.detail; }
+                }
+                if d.removable && root.confirm-remove != d.id: QuietButton {
+                    text: "Remove";
+                    accessible-label: "Remove " + d.label;
+                    clicked => { root.confirm-remove = d.id; }
+                }
+            }
+            if root.confirm-remove == d.id: Rectangle {
+                min-height: confirm.preferred-height;
+                border-radius: Tokens.radius-control;
+                border-width: 1px;
+                border-color: Tokens.danger;
+                confirm := VerticalLayout {
+                    padding: Tokens.space-m;
+                    spacing: Tokens.space-s;
+                    Body { text: "Remove this device?"; font-weight: 600; }
+                    Secondary { text: "It stops getting new messages, and your contacts stop sending to it. Messages already on it stay there until it's erased."; }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: Tokens.space-s;
+                        PrimaryButton {
+                            text: root.busy ? "Removing…" : "Remove device";
+                            danger: true;
+                            enabled: !root.busy;
+                            clicked => { root.remove-device(d.id); }
+                        }
+                        QuietButton { text: "Keep it"; clicked => { root.confirm-remove = ""; } }
+                    }
+                }
             }
         }
-        if root.can-link && root.link-choices.length == 0: VerticalLayout {
-            spacing: Tokens.space-s;
-            Secondary { text: "To link a new device, open Enclave on it, choose \"I already have Enclave\", and paste its link code here. Only do this with your own device."; }
-            Field { placeholder: "enclave:link#…"; mono: true; text <=> root.link-code; }
-            HorizontalLayout {
-                alignment: start;
-                PrimaryButton {
-                    text: root.busy ? "Checking…" : "Continue";
-                    enabled: root.link-code != "" && !root.busy;
-                    clicked => { root.link-scan(root.link-code); }
-                }
+        if root.can-link && root.link-choices.length == 0: Secondary {
+            text: "To link a new device, open Enclave on it, choose \"I already have Enclave\", and paste its link code here. Only do this with your own device.";
+        }
+        if root.can-link && root.link-choices.length == 0: Field { placeholder: "enclave:link#…"; mono: true; text <=> root.link-code; }
+        if root.can-link && root.link-choices.length == 0: HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Checking…" : "Continue";
+                enabled: root.link-code != "" && !root.busy;
+                clicked => { root.link-scan(root.link-code); }
             }
         }
         if root.link-choices.length > 0: VerticalLayout {

@@ -141,13 +141,21 @@ The rendezvous mailbox accepts writes and reads authorized by `link_cap` (`02b-k
 - **Key.** `EnclaveCombine(TwoKem, [X448, ML-KEM-1024], [X_new, ek, X_primary, ct, transcript], psk = link_secret)` with transcript `"enclave/v1/proto/link-transcript" ‖ commit ‖ mailbox`. Both screens derive three BIP-39 words (`link-phrase`); the primary shows four choices and links only on the right one.
 - **Handover.** The primary signs and publishes manifest `version + 1` (with `prev_hash`), then uploads the account as a sealed blob: profile, shared account keys, the signed manifest, and every accepted contact's card, name, checked state, timer, inbox and **half of its write tokens** (tokens are single use, so each device needs its own). The blob reference travels sealed under `link-keys`.
 - **After linking.** The new device publishes its prekeys and opens sessions with every contact's devices (contacts accept them silently: the device is in the root-signed manifest) and with the account's other devices. Every message sent from one device is copied to the others (`Content::SelfCopy`) through the shared account inbox.
-- **Not implemented:** the 24 h history-transfer delay and history transfer itself, the 7-day "new device" banner, automatic removal of inactive devices, revocation, the 72 h pending-root veto, group membership for the new device, and contacts without a card (from before cards were exchanged) are not handed over.
+- **Not implemented:** the 24 h history-transfer delay and history transfer itself, the 7-day "new device" banner, automatic removal of inactive devices, the 72 h pending-root veto, group membership for the new device, and contacts without a card (from before cards were exchanged) are not handed over.
 
 ## 5. Revocation and "Secure my account"
 
 ### 5.1 Revocation
 
 Revocation publishes a new manifest without the device (PIN required on the primary). Contacts learn of it through a ratchet control message and the manifest refresh. Other devices delete their pairwise sessions with the revoked device. If the revoked device was possibly compromised, the UI offers "Secure my account" next.
+
+**Implementation (`client/devices.rs`).** `Client::remove_device(id)` runs only on the device holding the root and never on itself:
+
+1. sign and publish manifest version `v + 1` without the device (`publish_manifest`);
+2. send `Content::Devices(v + 1)` (kind 13, `u64` version) to our other devices, the removed one included so it can tell its user, then drop our sessions with the removed device;
+3. send the same notice to every accepted contact.
+
+A receiver records `(root, version)` and, at the end of the same `sync`, fetches the account's manifest from its server, verifies the root signature, ignores it if its version is lower than announced or not newer than the one held, then adopts it and deletes its sessions with devices it no longer lists. A device that finds itself missing from its own account's manifest reports `Event::RemovedFromAccount`. The removed device is then shut out both ways: nothing new is encrypted to it, and its new initial messages name an old manifest version, which fails the rollback check. Not yet done: the PIN gate, and rotating the inbox and vault key (so the removed device can still see that envelopes arrive and could delete them) — those belong to §5.2.
 
 ### 5.2 "Secure my account"
 

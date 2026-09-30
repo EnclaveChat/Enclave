@@ -1,0 +1,184 @@
+//! Usernames (`@name@domain`) backed by each server's key-transparency log.
+//!
+//! Claiming binds the name to `root ‖ contact card` with a device signature
+//! the server checks against the account's root-signed manifest. Finding
+//! someone checks the lookup proof against a head signed by the pinned log
+//! key and cosigned by a quorum of pinned witnesses, then checks that the
+//! card names the same root and server. A name only ever leads to a card; the
+//! usual contact request and security-code check follow as for a QR code.
+
+use super::Client;
+use crate::card::ContactCard;
+use crate::rpc::EFFORT_LADDER;
+use crate::{CoreError, Result, UsernameError, unix_now};
+use enclave_kt::username::normalize;
+use enclave_kt::wire::{CTX_CLAIM, ROOT_LEN};
+use enclave_kt::{KtError, KtPolicy, LookupReply, UsernameClaim, verify_lookup};
+use enclave_rpc::api::{self, DirAction, DirKind, Status};
+
+const SETTING: &str = "username";
+
+/// Split `@name@domain`, `name@domain` or `name`.
+pub(crate) fn parse_address(address: &str) -> (String, Option<String>) {
+    let a = address.trim().trim_start_matches('@');
+    match a.split_once('@') {
+        Some((n, d)) => (n.to_string(), Some(d.trim().to_string())),
+        None => (a.to_string(), None),
+    }
+}
+
+impl Client {
+    /// Pin key-transparency logs and witnesses (from the app's server list).
+    /// Not stored: the app supplies it at every start.
+    pub fn set_kt_policy(&mut self, policy: KtPolicy) {
+        self.kt = Some(policy);
+    }
+
+    /// This account's username as `name@domain`, if it has one.
+    pub fn username(&self) -> Option<String> {
+        let name = String::from_utf8(self.setting(SETTING).ok()??).ok()?;
+        let domain = self
+            .kt
+            .as_ref()
+            .and_then(|p| p.by_server(&self.profile.server))
+            .map(|i| i.domain.clone())?;
+        Some(format!("{name}@{domain}"))
+    }
+
+    /// Claim `name` on the home server. Replaces any earlier name (which stays
+    /// reserved for this account). Returns the full address.
+    pub async fn claim_username(&mut self, name: &str) -> Result<String> {
+        let info = self
+            .kt
+            .as_ref()
+            .and_then(|p| p.by_server(&self.profile.server))
+            .cloned()
+            .ok_or(UsernameError::Unavailable)?;
+        let name = normalize(name).map_err(|_| UsernameError::NotAllowed)?;
+        let key = api::name_key(&name).ok_or(UsernameError::NotAllowed)?;
+        let now = unix_now();
+        let mut value = self.account.root_public.0.to_vec();
+        value.extend_from_slice(&self.card().encode());
+        let msg = UsernameClaim::message(&self.profile.server, &name, &value, now);
+        let signature = self.device.signing.sign(CTX_CLAIM, &msg, &mut self.rng)?;
+        let claim = UsernameClaim {
+            name: name.clone(),
+            value,
+            device: self.device.id,
+            time: now,
+            signature,
+        }
+        .encode();
+        let ctx = api::pow_context_username(&key, now / 86_400);
+        let server = self.profile.server;
+        let mut result = Err(CoreError::Server(Status::Pow));
+        for effort in EFFORT_LADDER {
+            let proof = enclave_tokens::solve(&ctx, effort, &mut self.rng)?;
+            result = self
+                .rpc
+                .dir_put(
+                    &server,
+                    DirKind::Username,
+                    key,
+                    proof.0,
+                    &claim,
+                    now,
+                    &mut self.rng,
+                )
+                .await;
+            if !matches!(result, Err(CoreError::Server(Status::Pow))) {
+                break;
+            }
+        }
+        match result {
+            Ok(()) => {}
+            Err(CoreError::Server(Status::Denied)) => return Err(UsernameError::Taken.into()),
+            Err(CoreError::Server(Status::NotFound)) => {
+                return Err(UsernameError::Unavailable.into());
+            }
+            Err(CoreError::Server(Status::Invalid)) => {
+                return Err(UsernameError::NotAllowed.into());
+            }
+            Err(e) => return Err(e),
+        }
+        self.set_setting(SETTING, name.as_bytes())?;
+        Ok(format!("{name}@{}", info.domain))
+    }
+
+    /// Find the contact card behind `@name@domain` (or `name` on the home
+    /// server), verified against the pinned log and witness quorum.
+    pub async fn find_username(&mut self, address: &str) -> Result<ContactCard> {
+        let policy = self.kt.clone().ok_or(UsernameError::Unavailable)?;
+        let (name, domain) = parse_address(address);
+        let info = match &domain {
+            Some(d) => policy.by_domain(d),
+            None => policy.by_server(&self.profile.server),
+        }
+        .cloned()
+        .ok_or(UsernameError::Unavailable)?;
+        let name = normalize(&name).map_err(|_| UsernameError::NotAllowed)?;
+        let key = api::name_key(&name).ok_or(UsernameError::NotAllowed)?;
+        let now = unix_now();
+        let bytes = match self
+            .rpc
+            .dir_get(
+                &info.server,
+                DirKind::Username,
+                DirAction::Get,
+                key,
+                [0; 32],
+                now,
+                &mut self.rng,
+            )
+            .await
+        {
+            Err(CoreError::Server(Status::NotFound)) => {
+                return Err(UsernameError::NotFound.into());
+            }
+            other => other?,
+        };
+        let reply = LookupReply::decode(&bytes).map_err(|_| UsernameError::Unverified)?;
+        let (value, _, _) = verify_lookup(
+            &policy.witnesses,
+            &info.head_key,
+            &info.operator,
+            &info.vrf_public,
+            &reply.head,
+            &name,
+            reply.proof,
+            now,
+        )
+        .map_err(|e| match e {
+            KtError::Username => UsernameError::NotAllowed,
+            _ => UsernameError::Unverified,
+        })?;
+        // A bare root is a released name.
+        if value.len() <= ROOT_LEN {
+            return Err(UsernameError::NotFound.into());
+        }
+        let card =
+            ContactCard::decode(&value[ROOT_LEN..]).map_err(|_| UsernameError::Unverified)?;
+        if card.root[..] != value[..ROOT_LEN] || card.server != info.server {
+            return Err(UsernameError::Unverified.into());
+        }
+        Ok(card)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_address;
+
+    #[test]
+    fn addresses() {
+        assert_eq!(
+            parse_address(" @sam@enclave.example "),
+            ("sam".into(), Some("enclave.example".into()))
+        );
+        assert_eq!(
+            parse_address("sam@enclave.example"),
+            ("sam".into(), Some("enclave.example".into()))
+        );
+        assert_eq!(parse_address("sam"), ("sam".into(), None));
+    }
+}

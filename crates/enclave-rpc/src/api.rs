@@ -95,6 +95,9 @@ pub enum DirKind {
     Bundle = 2,
     /// Encrypted McEliece vault key, keyed by a random locator.
     Vault = 3,
+    /// Username claims (put, keyed by the name) and key-transparency lookups
+    /// (get: index 0 keyed by the name, later chunks by the returned reply id).
+    Username = 4,
 }
 
 /// Directory action.
@@ -152,6 +155,7 @@ impl DirRequest {
             1 => DirKind::Manifest,
             2 => DirKind::Bundle,
             3 => DirKind::Vault,
+            4 => DirKind::Username,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {
@@ -235,6 +239,29 @@ pub fn pow_context_request(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> 
 /// Context string for a bundle-claim proof of work.
 pub fn pow_context_claim(device: &[u8; 32], day: u64) -> Vec<u8> {
     [b"claim-bundle".as_slice(), device, &day.to_be_bytes()].concat()
+}
+
+/// Context string for a username-claim proof of work.
+pub fn pow_context_username(name: &[u8; 32], day: u64) -> Vec<u8> {
+    [b"claim-username".as_slice(), name, &day.to_be_bytes()].concat()
+}
+
+/// A username as a directory key: its bytes, zero-padded (names are at most
+/// 32 ASCII characters).
+pub fn name_key(name: &str) -> Option<[u8; 32]> {
+    let b = name.as_bytes();
+    if b.len() > 32 || b.contains(&0) {
+        return None;
+    }
+    let mut k = [0u8; 32];
+    k[..b.len()].copy_from_slice(b);
+    Some(k)
+}
+
+/// Inverse of [`name_key`].
+pub fn key_name(key: &[u8; 32]) -> Option<String> {
+    let n = key.iter().position(|&b| b == 0).unwrap_or(32);
+    String::from_utf8(key[..n].to_vec()).ok()
 }
 
 /// Context string for a blob-upload proof of work.

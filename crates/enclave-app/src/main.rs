@@ -2,7 +2,8 @@
 //!
 //! `enclave` runs a self-contained demo (local server, demo contact, nothing
 //! leaves the computer). `enclave --server HOST:PORT --profile DIR` talks to
-//! a dev server (`enclave-server`) over TCP; the Tor and Nym transports are
+//! a dev server (`enclave-server`) over TCP (add `--kt-pins FILE`, written by
+//! the server, to use usernames); the Tor and Nym transports are
 //! wired in by M4's gate.
 #![deny(unsafe_code)]
 
@@ -26,6 +27,7 @@ fn main() -> Result<(), slint::PlatformError> {
         (Some(addr), Some(p)) => Mode::Server {
             profile: p.into(),
             addr,
+            kt_pins: arg("--kt-pins").map(Into::into),
         },
         _ => Mode::Demo,
     };

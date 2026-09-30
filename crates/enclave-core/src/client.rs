@@ -96,9 +96,11 @@ impl Contact {
 }
 
 mod backup;
+mod devices;
 mod groups;
 mod link;
 mod messages;
+mod usernames;
 pub use groups::{GroupInfo, GroupMessage};
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
@@ -143,6 +145,9 @@ pub enum Event {
     },
     /// A device was linked to (or is now talking with) this account.
     DevicesChanged,
+    /// This device was removed from the account by another device. It can
+    /// no longer read new messages; the app should say so and offer to erase.
+    RemovedFromAccount,
     /// We were added to a group.
     GroupJoined {
         /// Group.
@@ -190,6 +195,11 @@ pub struct Client {
     contacts: BTreeMap<[u8; 64], Contact>,
     issuers: HashMap<[u8; 64], TokenIssuer>,
     groups: BTreeMap<[u8; 32], groups::GroupEntry>,
+    /// Pinned key-transparency logs and witnesses (from the app's server list).
+    kt: Option<enclave_kt::KtPolicy>,
+    /// Accounts whose device list changed (root → announced manifest
+    /// version), refreshed at the end of `sync`.
+    stale_manifests: BTreeMap<[u8; 64], u64>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -350,6 +360,8 @@ impl Client {
             contacts: BTreeMap::new(),
             issuers: HashMap::new(),
             groups: BTreeMap::new(),
+            kt: None,
+            stale_manifests: BTreeMap::new(),
         };
         Ok((client, words))
     }
@@ -416,6 +428,8 @@ impl Client {
             contacts,
             issuers,
             groups,
+            kt: None,
+            stale_manifests: BTreeMap::new(),
         })
     }
 
@@ -833,6 +847,7 @@ impl Client {
             self.profile.cursor = cursor;
             self.save_profile()?;
         }
+        events.append(&mut self.refresh_manifests(now).await?);
 
         // Token refills for contacts who have been writing without replies.
         let due: Vec<([u8; 64], usize)> = self
@@ -1101,9 +1116,13 @@ impl Client {
             self.save_session(&root, &dev, &s)?;
         }
         if root == self.account.root_public.0 {
-            // From another device of ours: only self-copies are meaningful.
+            // From another device of ours: self-copies and device changes.
             return match Content::decode(&content)? {
                 Content::SelfCopy { to, content } => self.on_self_copy(&to, &content, now),
+                Content::Devices(v) => {
+                    self.stale_manifests.insert(root, v);
+                    Ok(Vec::new())
+                }
                 _ => Ok(Vec::new()),
             };
         }
@@ -1150,6 +1169,12 @@ impl Client {
             Content::Tokens(tokens) => {
                 add_tokens(&mut c.tokens, self.my_share(tokens));
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
+            }
+            Content::Devices(v) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                if v > c.manifest.version {
+                    self.stale_manifests.insert(root, v);
+                }
             }
             Content::GroupWelcome(welcome) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
