@@ -211,6 +211,7 @@ fn fixture() -> Snapshot {
         share_threshold: 0,
         holds_share: false,
         shown_share: String::new(),
+        pins: Vec::new(),
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
@@ -490,6 +491,18 @@ fn main() -> Result<(), slint::PlatformError> {
         view::apply(&ui, &poll);
         shot("30-poll", desktop);
         shot("30-poll-phone", phone);
+        let mut pinned = group.clone();
+        if let Some(m) = pinned.messages.iter_mut().find(|m| !m.outgoing) {
+            m.pinned = true;
+            pinned.pins = vec![format!(
+                "{}: {}",
+                m.sender,
+                m.text.lines().next().unwrap_or("")
+            )];
+        }
+        view::apply(&ui, &pinned);
+        shot("36-pinned", desktop);
+        shot("36-pinned-phone", phone);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

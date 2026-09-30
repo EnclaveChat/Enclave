@@ -10,6 +10,7 @@
 //! * Edits and deletes for everyone are advisory: they apply only to the
 //!   author's own messages, edits only within 24 hours.
 
+use super::search::Place;
 use super::{Client, ContactState, Event};
 use crate::content::{Content, MAX_TEXT, MsgId};
 use crate::files::{self, Attachment};
@@ -231,7 +232,7 @@ impl Client {
         Ok(())
     }
 
-    fn get_message(&mut self, root: &[u8; 64], seq: u64) -> Result<Message> {
+    pub(crate) fn get_message(&mut self, root: &[u8; 64], seq: u64) -> Result<Message> {
         let b = self
             .store
             .get(&msg_ns(root), &seq.to_be_bytes())?
@@ -240,7 +241,7 @@ impl Client {
         Self::decode_record(&shred, root, &b).ok_or(CoreError::NotFound)
     }
 
-    fn find(&mut self, root: &[u8; 64], id: &MsgId) -> Result<Message> {
+    pub(crate) fn find(&mut self, root: &[u8; 64], id: &MsgId) -> Result<Message> {
         let b = self
             .store
             .get(&id_ns(root), id)?
@@ -610,6 +611,12 @@ impl Client {
                 self.save_contact(&c)?;
                 events.push(Event::TimerChanged { root: *root, secs });
             }
+            Content::Pin { target, on } => {
+                let place = Place::Contact(*root);
+                if self.find(root, &target).is_ok() && self.apply_pin(&place, &target, on)? {
+                    events.push(Event::PinsChanged { place });
+                }
+            }
             _ => return Err(ProtoError::Decode.into()),
         }
         Ok(events)
@@ -704,6 +711,12 @@ impl Client {
                 let c = c.clone();
                 self.save_contact(&c)?;
                 events.push(Event::TimerChanged { root: *to, secs });
+            }
+            Content::Pin { target, on } => {
+                let place = Place::Contact(*to);
+                if self.find(to, &target).is_ok() && self.apply_pin(&place, &target, on)? {
+                    events.push(Event::PinsChanged { place });
+                }
             }
             _ => {}
         }

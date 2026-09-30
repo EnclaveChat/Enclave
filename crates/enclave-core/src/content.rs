@@ -129,6 +129,13 @@ pub enum Content {
     /// Our signed key-transparency head for an epoch where the sender's
     /// gossip disagreed, as a sealed file reference (RT-04).
     KtHead(Vec<u8>),
+    /// Pin (or unpin) a message of the conversation, for both people.
+    Pin {
+        /// Target message.
+        target: MsgId,
+        /// Pinned (else unpinned).
+        on: bool,
+    },
     /// A copy, for our other devices, of content we sent to `to`.
     SelfCopy {
         /// The conversation it belongs to.
@@ -155,6 +162,7 @@ const K_HISTORY: u8 = 14;
 const K_VETO: u8 = 15;
 const K_KT_HEAD: u8 = 16;
 const K_RECOVERY_SHARE: u8 = 17;
+const K_PIN: u8 = 18;
 /// Longest recovery share (33 words of at most 8 letters).
 pub const MAX_RECOVERY_SHARE: usize = 512;
 /// Largest content a self-copy can wrap.
@@ -329,6 +337,9 @@ impl Content {
                 }
                 w.u8(K_KT_HEAD).bytes(att);
             }
+            Content::Pin { target, on } => {
+                w.u8(K_PIN).fixed(target).u8(u8::from(*on));
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -404,6 +415,14 @@ impl Content {
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
+            K_PIN => Content::Pin {
+                target: r.array()?,
+                on: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(ProtoError::Decode),
+                },
+            },
             K_SELF_COPY => {
                 let to = r.array()?;
                 let content = r.bytes(MAX_SELF_COPY)?.to_vec();
@@ -466,6 +485,10 @@ mod tests {
             Content::Delete { target: [4; 16] },
             Content::Read(vec![[5; 16]; 10]),
             Content::Timer(86_400),
+            Content::Pin {
+                target: [4; 16],
+                on: true,
+            },
             Content::SelfCopy {
                 to: [9; 64],
                 content: vec![K_TEXT, 0, 0, 0, 0, 0],

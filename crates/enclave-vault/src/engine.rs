@@ -2,7 +2,9 @@
 //! commands into protocol actions. Its only outputs are display snapshots and
 //! UI resets ([`Out`]); nothing secret crosses to the UI.
 
-use enclave_core::{Client, ContactCard, ContactState, CoreError, Event, LinkError, Options};
+use enclave_core::{
+    Client, ContactCard, ContactState, CoreError, Event, LinkError, Options, Place,
+};
 use enclave_crypto::pwhash::PwParams;
 use enclave_ipc::{Cmd, Device, Effect, Msg, Out, Pick, Row, Snapshot, tint_for};
 use enclave_net::transport::{ServerId, TcpTransport, Transport};
@@ -216,6 +218,23 @@ fn mime_for(name: &str) -> &'static str {
 
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
+
+/// Longest pinned-message line, in characters.
+const PIN_CHARS: usize = 80;
+
+/// One line for the pinned-message bar: the first line of the text, cut to
+/// [`PIN_CHARS`] (a file without a caption reads "File").
+fn pin_text(text: &str, file: bool) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return if file { "File".into() } else { String::new() };
+    }
+    let mut out: String = line.chars().take(PIN_CHARS).collect();
+    if line.chars().count() > PIN_CHARS {
+        out.push('…');
+    }
+    out
+}
 
 /// How a stored message reads in the conversation.
 fn display(m: &enclave_core::Message, now: u64) -> Msg {
@@ -846,6 +865,25 @@ impl Engine {
                     }
                 }
                 self.busy = false;
+            }
+            Cmd::Pin(id, seq, on) => {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let r = match (root, gid) {
+                    (Some(root), _) => c.pin_message(&root, seq, on).await,
+                    (None, Some(gid)) => c.pin_group_message(&gid, seq, on).await,
+                    (None, None) => Ok(()),
+                };
+                if r.is_err() {
+                    self.status = if on {
+                        "Couldn't pin that message. Check your connection."
+                    } else {
+                        "Couldn't unpin that message. Check your connection."
+                    }
+                    .into();
+                }
             }
             Cmd::React(id, seq, emoji) => {
                 if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
@@ -1543,7 +1581,19 @@ impl Engine {
             if self.selected == Some(ct.root) {
                 s.current = Some(row.clone());
                 s.timer = ct.timer;
-                s.messages = msgs.iter().map(|m| display(m, now)).collect();
+                let pinned = c.pinned_ids(&Place::Contact(ct.root));
+                s.messages = msgs
+                    .iter()
+                    .map(|m| Msg {
+                        pinned: !m.deleted && pinned.contains(&m.id),
+                        ..display(m, now)
+                    })
+                    .collect();
+                s.pins = pinned
+                    .iter()
+                    .filter_map(|id| msgs.iter().find(|m| m.id == *id && !m.deleted))
+                    .map(|m| pin_text(&m.text, m.attachment.is_some()))
+                    .collect();
                 let digits: String = c
                     .security_code(&ct.root)
                     .chars()
@@ -1613,6 +1663,19 @@ impl Engine {
                         })
                         .collect();
                 }
+                let pinned = c.pinned_ids(&Place::Group(g.id));
+                s.pins = pinned
+                    .iter()
+                    .filter_map(|id| msgs.iter().find(|m| m.id == *id))
+                    .map(|m| {
+                        let text = pin_text(&m.text, false);
+                        if m.from.is_none() {
+                            text
+                        } else {
+                            format!("{}: {text}", m.from_name)
+                        }
+                    })
+                    .collect();
                 s.messages = msgs
                     .iter()
                     .map(|m| {
@@ -1623,6 +1686,7 @@ impl Engine {
                             status: if m.delivered { 1 } else { 0 },
                             sender: m.from_name.clone(),
                             seq: m.seq,
+                            pinned: pinned.contains(&m.id),
                             ..Default::default()
                         };
                         if let Some(p) = m.poll.and_then(|id| c.poll(&g.id, &id)) {

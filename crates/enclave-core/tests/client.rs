@@ -1321,6 +1321,87 @@ async fn polls_in_groups() {
     assert!(jo.vote(&gid, &id, 0).await.is_err(), "closed");
 }
 
+/// Pinned messages: in a 1:1 conversation either person pins for both;
+/// in a group any member pins for all. At most three stay pinned, newest
+/// first, and a deleted message drops out.
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_messages() {
+    use enclave_core::Place;
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+
+    // 1:1.
+    let mut seqs = Vec::new();
+    for t in ["one", "two", "three", "four"] {
+        seqs.push(ada.send_text(&mo.root(), t).await.unwrap().seq);
+    }
+    mo.sync().await.unwrap();
+    let theirs: Vec<u64> = mo
+        .messages(&ada.root())
+        .unwrap()
+        .iter()
+        .filter(|m| ["one", "two", "three", "four"].contains(&m.text.as_str()))
+        .map(|m| m.seq)
+        .collect();
+    assert_eq!(theirs.len(), 4);
+    for &s in &theirs {
+        mo.pin_message(&ada.root(), s, true).await.unwrap();
+    }
+    let ev = ada.sync().await.unwrap();
+    let here = Place::Contact(mo.root());
+    assert!(ev.contains(&enclave_core::Event::PinsChanged { place: here }));
+    assert_eq!(
+        ada.pinned(&here),
+        vec![seqs[3], seqs[2], seqs[1]],
+        "newest first, three at most"
+    );
+    ada.pin_message(&mo.root(), seqs[2], false).await.unwrap();
+    ada.delete_for_everyone(&mo.root(), seqs[3]).await.unwrap();
+    mo.sync().await.unwrap();
+    assert_eq!(ada.pinned(&here), vec![seqs[1]]);
+    assert_eq!(mo.pinned(&Place::Contact(ada.root())), vec![theirs[1]]);
+
+    // Group.
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    let sent = jo
+        .send_group_text(&gid, "Meet at the station")
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let at_mo = mo
+        .group_messages(&gid)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.text == "Meet at the station")
+        .unwrap();
+    assert_eq!(at_mo.id, sent.id, "same id for every member");
+    mo.pin_group_message(&gid, at_mo.seq, true).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    assert_eq!(jo.pinned(&Place::Group(gid)), vec![sent.seq]);
+    assert_eq!(mo.pinned(&Place::Group(gid)), vec![at_mo.seq]);
+    assert_eq!(ada.pinned(&Place::Group(gid)).len(), 1);
+    jo.pin_group_message(&gid, sent.seq, false).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    for c in [&mut ada, &mut mo, &mut jo] {
+        assert!(c.pinned(&Place::Group(gid)).is_empty());
+    }
+}
+
 /// Push (10-push.md): a message to Bob's inbox makes his server schedule
 /// one wake per window for his sealed token, released in the next window;
 /// the relay opens it to Bob's UnifiedPush endpoint. The server never sees

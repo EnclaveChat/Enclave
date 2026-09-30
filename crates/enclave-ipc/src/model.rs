@@ -100,6 +100,8 @@ pub struct Msg {
     pub poll_state: i32,
     /// We created the poll (and may close it).
     pub poll_ours: bool,
+    /// Pinned in this conversation.
+    pub pinned: bool,
 }
 
 /// Everything the window shows.
@@ -189,6 +191,9 @@ pub struct Snapshot {
     pub holds_share: bool,
     /// The share we hold for the open contact: only while shown.
     pub shown_share: String,
+    /// The open conversation's pinned messages (text, most recently
+    /// pinned first).
+    pub pins: Vec<String>,
     /// Members of the open group (other than us).
     pub members: Vec<Row>,
     /// We are an admin of the open group.
@@ -306,6 +311,8 @@ pub enum Cmd {
     GiveShares(Vec<String>, u32),
     /// Show the recovery share we hold for this contact (empty id: hide it).
     RevealShare(String),
+    /// Pin (true) or unpin a message: conversation, position.
+    Pin(String, u64, bool),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -443,7 +450,10 @@ impl Snapshot {
             for c in &m.poll_counts {
                 w.u32(*c);
             }
-            w.i32(m.poll_mine).i32(m.poll_state).bool(m.poll_ours);
+            w.i32(m.poll_mine)
+                .i32(m.poll_state)
+                .bool(m.poll_ours)
+                .bool(m.pinned);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -497,7 +507,8 @@ impl Snapshot {
         w.strs(&self.share_holders)
             .u32(self.share_threshold)
             .bool(self.holds_share)
-            .str(&self.shown_share);
+            .str(&self.shown_share)
+            .strs(&self.pins);
         put_rows(&mut w, &self.members);
         w.bool(self.group_admin);
         w.len(self.addable.len());
@@ -548,6 +559,7 @@ impl Snapshot {
                     poll_mine: r.i32()?,
                     poll_state: r.i32()?,
                     poll_ours: r.bool()?,
+                    pinned: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -633,6 +645,7 @@ impl Snapshot {
             share_threshold: r.u32()?,
             holds_share: r.bool()?,
             shown_share: r.str()?,
+            pins: r.strs()?,
             members: get_rows(&mut r)?,
             group_admin: r.bool()?,
             addable: {
@@ -710,6 +723,7 @@ impl Cmd {
             Cmd::Restore(s, b) => w.u8(45).strs(s).bytes(b),
             Cmd::GiveShares(ids, t) => w.u8(46).strs(ids).u32(*t),
             Cmd::RevealShare(id) => w.u8(47).str(id),
+            Cmd::Pin(c, s, on) => w.u8(48).str(c).u64(*s).bool(*on),
         };
         w.0
     }
@@ -765,6 +779,7 @@ impl Cmd {
             45 => Cmd::Restore(r.strs()?, r.bytes()?),
             46 => Cmd::GiveShares(r.strs()?, r.u32()?),
             47 => Cmd::RevealShare(r.str()?),
+            48 => Cmd::Pin(r.str()?, r.u64()?, r.bool()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

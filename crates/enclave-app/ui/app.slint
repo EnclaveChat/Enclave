@@ -73,6 +73,7 @@ export struct MessageRow {
     poll-state: int,
     poll-options: [PollOption],
     poll-ours: bool,
+    pinned: bool,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
@@ -465,6 +466,9 @@ export component AppWindow inherits Window {
     in property <[ContactRow]> search-results;
     in-out property <string> search-query;
     callback react(string, string, string);
+    callback pin(string, string, bool);
+    // The open conversation's pinned messages, most recently pinned first.
+    in property <[string]> pins;
     callback edit-message(string, string, string);
     callback delete-message(string, string);
     callback set-timer(string, int);
@@ -935,6 +939,34 @@ export component AppWindow inherits Window {
                     Rectangle { y: parent.height - 1px; height: 1px; background: Tokens.hairline; }
                 }
 
+                // Pinned messages: the most recent one, and how many.
+                if root.pins.length > 0: Rectangle {
+                    background: Tokens.surface;
+                    accessible-role: text;
+                    accessible-label: (root.pins.length == 1 ? "Pinned message: " : root.pins.length + " pinned messages. Latest: ") + root.pins[0];
+                    HorizontalLayout {
+                        padding-left: Tokens.space-m;
+                        padding-right: Tokens.space-m;
+                        padding-top: Tokens.space-s;
+                        padding-bottom: Tokens.space-s;
+                        spacing: Tokens.space-sm;
+                        Rectangle { width: 3px; border-radius: 1.5px; background: Tokens.pine; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Caption { text: root.pins.length == 1 ? "Pinned" : "Pinned · " + root.pins.length; }
+                            Text {
+                                text: root.pins[0];
+                                font-size: Tokens.type-secondary;
+                                color: Tokens.text;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+                        }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Tokens.hairline; }
+                }
+
                 // Messages.
                 Flickable {
                     vertical-stretch: 1;
@@ -954,7 +986,7 @@ export component AppWindow inherits Window {
                             bubble-max: min(480px, root.width * 0.7);
                             selected: root.selected-seq == m.seq;
                             tapped => {
-                                if root.current.state == 2 && root.current.kind == 0 && !m.deleted {
+                                if root.current.state == 2 && !m.deleted {
                                     root.selected-seq = root.selected-seq == m.seq ? "" : m.seq;
                                 }
                             }
@@ -998,6 +1030,9 @@ export component AppWindow inherits Window {
                         padding-right: Tokens.space-m;
                         padding-top: Tokens.space-s;
                         spacing: Tokens.space-xs;
+                        // Reactions are 1:1 only for now.
+                        if root.current.kind == 0: HorizontalLayout {
+                        spacing: Tokens.space-xs;
                         for e in ["👍", "❤", "😂", "😮", "😢", "🙏"]: Rectangle {
                             width: Tokens.space-touch-target-min;
                             height: Tokens.space-touch-target-min;
@@ -1024,9 +1059,18 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        }
                         Rectangle { horizontal-stretch: 1; }
                         for m in root.messages: HorizontalLayout {
                             spacing: Tokens.space-xs;
+                            if m.seq == root.selected-seq: QuietButton {
+                                text: m.pinned ? "Unpin" : "Pin";
+                                accessible-label: m.pinned ? "Unpin for everyone" : "Pin for everyone";
+                                clicked => {
+                                    root.pin(root.current-id, m.seq, !m.pinned);
+                                    root.selected-seq = "";
+                                }
+                            }
                             if m.seq == root.selected-seq && m.can-edit: QuietButton {
                                 text: "Edit";
                                 clicked => {

@@ -69,12 +69,15 @@ pub struct GroupMessage {
     pub delivered: bool,
     /// The poll this message opened, if any ([`Client::poll`]).
     pub poll: Option<[u8; 16]>,
+    /// Id chosen by the sender (the poll id for a poll), so later messages
+    /// can refer to it.
+    pub id: [u8; 16],
 }
 
 impl GroupMessage {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(2).u64(self.seq);
+        w.u8(3).u64(self.seq);
         match &self.from {
             Some(r) => w.u8(1).fixed(r),
             None => w.u8(0),
@@ -87,13 +90,14 @@ impl GroupMessage {
             Some(p) => w.u8(1).fixed(p),
             None => w.u8(0),
         };
+        w.fixed(&self.id);
         w.finish()
     }
 
     fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if version != 1 && version != 2 {
+        if !(1..=3).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let seq = r.u64()?;
@@ -113,13 +117,18 @@ impl GroupMessage {
             at: r.u64()?,
             delivered: r.u8()? == 1,
             poll: None,
+            id: [0; 16],
         };
         let m = GroupMessage {
-            poll: if version == 2 && r.u8()? == 1 {
+            poll: if version >= 2 && r.u8()? == 1 {
                 Some(r.array()?)
             } else {
                 None
             },
+            ..m
+        };
+        let m = GroupMessage {
+            id: if version == 3 { r.array()? } else { [0; 16] },
             ..m
         };
         r.end()?;
@@ -392,8 +401,10 @@ impl Client {
         }
         let now = self.now();
         self.prepare_group_send(gid, now).await?;
-        let mut msg = self.store_group_message(gid, None, text, now)?;
-        self.post_group(gid, text.as_bytes(), 0, now).await?;
+        let id: [u8; 16] = self.rng.array("core/group-msg-id")?;
+        let mut msg = self.store_group_message(gid, id, None, text, now)?;
+        let content = [&id[..], text.as_bytes()].concat();
+        self.post_group(gid, &content, 0, now).await?;
         msg.delivered = true;
         self.store.put(
             &msg_ns(gid),
@@ -923,12 +934,20 @@ impl Client {
             };
             return self.on_group_rich(gid, &sender_root, name, &msg.content, now);
         }
-        let text = String::from_utf8(msg.content).map_err(|_| ProtoError::Decode)?;
+        let (id, text) = msg
+            .content
+            .split_first_chunk::<16>()
+            .ok_or(ProtoError::Decode)?;
+        let id = *id;
+        if self.group_messages(gid)?.iter().any(|m| m.id == id) {
+            return Ok(None); // a duplicate
+        }
+        let text = String::from_utf8(text.to_vec()).map_err(|_| ProtoError::Decode)?;
         let name = {
             let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
             self.member_name(e, &sender_root)
         };
-        let m = self.store_group_message(gid, Some((sender_root, name)), &text, now)?;
+        let m = self.store_group_message(gid, id, Some((sender_root, name)), &text, now)?;
         if let Some(e) = self.groups.get_mut(gid) {
             e.unread = e.unread.saturating_add(1);
         }
@@ -1046,6 +1065,7 @@ impl Client {
     pub(crate) fn store_group_message(
         &mut self,
         gid: &[u8; 32],
+        id: [u8; 16],
         from: Option<([u8; 64], String)>,
         text: &str,
         now: u64,
@@ -1065,6 +1085,7 @@ impl Client {
             at: now,
             delivered: false,
             poll: None,
+            id,
         };
         self.store
             .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;

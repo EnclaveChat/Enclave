@@ -176,6 +176,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             picture: m.image,
             poll_state: m.poll_state,
             poll_ours: m.poll_ours,
+            pinned: m.pinned,
             poll_options: ModelRc::from(Rc::new(VecModel::from(
                 m.poll_options
                     .iter()
@@ -239,6 +240,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_share_threshold(s.share_threshold as i32);
     ui.set_holds_share(s.holds_share);
     ui.set_shown_share(s.shown_share.clone().into());
+    ui.set_pins(strings(&s.pins));
     ui.set_unlock_error(s.unlock_error.clone().into());
     ui.set_can_lock(s.can_lock);
     ui.set_invites(s.invites as i32);

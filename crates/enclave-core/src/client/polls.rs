@@ -9,6 +9,7 @@
 //! ‖ poll_id ‖ u32 counts…)`, and every member compares it with the tally
 //! they counted themselves, so a vote that didn't reach someone shows.
 
+use super::search::Place;
 use super::{Client, Event};
 use crate::content::MAX_TEXT;
 use crate::{CoreError, Result};
@@ -28,6 +29,7 @@ pub const MAX_OPTION: usize = 200;
 const K_POLL: u8 = 1;
 const K_VOTE: u8 = 2;
 const K_CLOSE: u8 = 3;
+const K_PIN: u8 = 4;
 
 enum Rich {
     Poll {
@@ -42,6 +44,11 @@ enum Rich {
     Close {
         poll: [u8; 16],
         tally: [u8; 64],
+    },
+    /// Pin or unpin a message (`pins.rs`).
+    Pin {
+        id: [u8; 16],
+        on: bool,
     },
 }
 
@@ -71,6 +78,9 @@ impl Rich {
             }
             Rich::Close { poll, tally } => {
                 w.u8(K_CLOSE).fixed(poll).fixed(tally);
+            }
+            Rich::Pin { id, on } => {
+                w.u8(K_PIN).fixed(id).u8(u8::from(*on));
             }
         }
         w.finish()
@@ -102,6 +112,14 @@ impl Rich {
             K_CLOSE => Rich::Close {
                 poll: r.array()?,
                 tally: r.array()?,
+            },
+            K_PIN => Rich::Pin {
+                id: r.array()?,
+                on: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(ProtoError::Decode),
+                },
             },
             _ => return Err(ProtoError::Decode),
         };
@@ -255,7 +273,7 @@ impl Client {
             closed: None,
         };
         self.save_poll(gid, &id, &poll)?;
-        let mut m = self.store_group_message(gid, None, &poll.question, now)?;
+        let mut m = self.store_group_message(gid, id, None, &poll.question, now)?;
         m.poll = Some(id);
         let rich = Rich::Poll {
             id,
@@ -297,6 +315,19 @@ impl Client {
         p.closed = Some(tally);
         self.save_poll(gid, id, &p)?;
         let rich = Rich::Close { poll: *id, tally };
+        self.post_group(gid, &rich.encode(), FLAG_RICH, now).await
+    }
+
+    /// Tell the group we pinned (or unpinned) message `id`.
+    pub(crate) async fn post_group_pin(
+        &mut self,
+        gid: &[u8; 32],
+        id: &[u8; 16],
+        on: bool,
+    ) -> Result<()> {
+        let now = self.now();
+        self.prepare_group_send(gid, now).await?;
+        let rich = Rich::Pin { id: *id, on };
         self.post_group(gid, &rich.encode(), FLAG_RICH, now).await
     }
 
@@ -343,7 +374,8 @@ impl Client {
                     closed: None,
                 };
                 self.save_poll(gid, &id, &poll)?;
-                let mut m = self.store_group_message(gid, Some((*from, name)), &question, now)?;
+                let mut m =
+                    self.store_group_message(gid, id, Some((*from, name)), &question, now)?;
                 m.poll = Some(id);
                 self.put_group_message(gid, &m)?;
                 if let Some(e) = self.groups.get_mut(gid) {
@@ -381,6 +413,12 @@ impl Client {
                     group_id: *gid,
                     poll,
                 }))
+            }
+            Rich::Pin { id, on } => {
+                let place = Place::Group(*gid);
+                let known = self.group_messages(gid)?.iter().any(|m| m.id == id);
+                Ok((known && self.apply_pin(&place, &id, on)?)
+                    .then_some(Event::PinsChanged { place }))
             }
         }
     }

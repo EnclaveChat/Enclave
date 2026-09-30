@@ -105,6 +105,7 @@ mod invites;
 mod link;
 mod meet;
 mod messages;
+mod pins;
 mod polls;
 mod push;
 mod search;
@@ -118,6 +119,7 @@ pub use invites::{InviteInfo, JOIN_PREFIX, JoinLink};
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
+pub use pins::MAX_PINS;
 pub use polls::{MAX_OPTIONS, PollView};
 pub use search::{Hit, Place};
 pub use social::{MAX_HOLDERS, words_from_shares};
@@ -229,6 +231,11 @@ pub enum Event {
     GroupChanged {
         /// Group.
         group_id: [u8; 32],
+    },
+    /// Someone pinned or unpinned a message ([`Client::pinned`]).
+    PinsChanged {
+        /// The conversation.
+        place: Place,
     },
 }
 
