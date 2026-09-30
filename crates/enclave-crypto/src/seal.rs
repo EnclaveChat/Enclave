@@ -185,6 +185,61 @@ pub fn open(key: &SealKey, ad: &[u8], sealed: &[u8]) -> Result<Vec<u8>> {
     Ok(pt)
 }
 
+/// Seal without transmitting a nonce ("compact" form): output is `C ‖ T`.
+///
+/// The nonce is `KMAC256(K, frame(nonce_material) ‖ frame(AD), 256, NONCE label)`,
+/// so `nonce_material` must never repeat under one key with different plaintext.
+/// Callers pass a value that is unique per message *and* depends on the content
+/// (for example a ratchet lookup tag plus the hash of the sealed body), which keeps
+/// the hedging property: a rolled-back state that reuses the counter with other
+/// content gets a different keystream. Used for device slots and PQ slots, where
+/// every byte counts.
+pub fn seal_compact(key: &SealKey, nonce_material: &[u8], ad: &[u8], pt: &[u8]) -> Result<Vec<u8>> {
+    if pt.len() > MAX_PLAINTEXT {
+        return Err(Error::TooLarge);
+    }
+    let nonce = compact_nonce(key, nonce_material, ad);
+    let s = subkeys(key, &nonce);
+    let mut out = Vec::with_capacity(pt.len() + TAG_LEN);
+    out.extend_from_slice(pt);
+    apply_keystreams(&s, &mut out);
+    let t = tag(&s.k_m, ad, &nonce, &out);
+    out.extend_from_slice(&t);
+    Ok(out)
+}
+
+/// Open a compact seal produced by [`seal_compact`].
+pub fn open_compact(
+    key: &SealKey,
+    nonce_material: &[u8],
+    ad: &[u8],
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    if sealed.len() < TAG_LEN || sealed.len() - TAG_LEN > MAX_PLAINTEXT {
+        return Err(Error::Auth);
+    }
+    let (ct, t) = sealed.split_at(sealed.len() - TAG_LEN);
+    let nonce = compact_nonce(key, nonce_material, ad);
+    let s = subkeys(key, &nonce);
+    let expect = tag(&s.k_m, ad, &nonce, ct);
+    if !bool::from(expect.ct_eq(t)) {
+        return Err(Error::Auth);
+    }
+    let mut pt = ct.to_vec();
+    apply_keystreams(&s, &mut pt);
+    Ok(pt)
+}
+
+fn compact_nonce(key: &SealKey, nonce_material: &[u8], ad: &[u8]) -> [u8; NONCE_LEN] {
+    let mut k = Kmac256::new(key.as_bytes(), labels::SEAL_NONCE.as_bytes());
+    k.update_framed(b"compact");
+    k.update_framed(nonce_material);
+    k.update_framed(ad);
+    let mut out = [0u8; NONCE_LEN];
+    k.finalize_into(&mut out);
+    out
+}
+
 /// Derive a per-record storage key: `KMAC256(master, frame(salt) ‖ frame(id))`.
 pub fn record_key(master: &SealKey, salt: &[u8], record_id: &[u8]) -> SealKey {
     let mut k = Kmac256::new(master.as_bytes(), labels::STORE_RECORD.as_bytes());
@@ -275,6 +330,22 @@ mod tests {
         let a = seal_with_randomness(&k, b"a", b"m", &[3; 32]).unwrap();
         let b = seal_with_randomness(&k, b"a", b"m", &[3; 32]).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn compact_roundtrip_and_tamper() {
+        let k = key(9);
+        let c = seal_compact(&k, b"tag-1", b"ad", b"device slot").unwrap();
+        assert_eq!(c.len(), 11 + TAG_LEN);
+        assert_eq!(
+            open_compact(&k, b"tag-1", b"ad", &c).unwrap(),
+            b"device slot"
+        );
+        assert_eq!(open_compact(&k, b"tag-2", b"ad", &c), Err(Error::Auth));
+        assert_eq!(open_compact(&k, b"tag-1", b"ae", &c), Err(Error::Auth));
+        let mut m = c.clone();
+        m[0] ^= 1;
+        assert_eq!(open_compact(&k, b"tag-1", b"ad", &m), Err(Error::Auth));
     }
 
     #[test]

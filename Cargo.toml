@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/enclave-crypto",
     "crates/enclave-wire",
+    "crates/enclave-proto",
     "xtask",
 ]
 
@@ -29,6 +30,7 @@ panic = "warn"
 indexing_slicing = "allow"
 dbg_macro = "deny"
 todo = "deny"
+too_many_arguments = "allow"
 
 [profile.release]
 lto = "thin"
