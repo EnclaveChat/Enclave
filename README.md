@@ -65,3 +65,13 @@ GPL-3.0-only, with the additional permissions in
 distribution and linking with Slint). See [`CONTRIBUTING.md`](CONTRIBUTING.md)
 for the sign-off every commit needs, and [`SECURITY.md`](SECURITY.md) to report
 a vulnerability.
+
+## Try the desktop app
+
+```sh
+cargo run --release -p enclave-app --bin enclave            # offline demo: local server and a demo contact
+cargo run --release -p enclave-server -- 127.0.0.1:7443    # or a dev server…
+cargo run --release -p enclave-app --bin enclave -- --server 127.0.0.1:7443 --profile ~/.enclave-dev
+```
+
+![Conversation](docs/screenshots/05-conversation-light.png)

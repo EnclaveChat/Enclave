@@ -14,6 +14,7 @@ pub(crate) const NS_CONTACTS: &str = "contacts";
 pub(crate) const NS_SESSIONS: &str = "sessions";
 pub(crate) const NS_ISSUERS: &str = "issuers";
 pub(crate) const NS_REPLAY: &str = "replay";
+pub(crate) const NS_SETTINGS: &str = "settings";
 
 /// Namespace holding one contact's messages.
 pub(crate) fn msg_ns(root: &[u8; 64]) -> String {

@@ -1,0 +1,52 @@
+[package]
+name = "enclave-app"
+description = "The Enclave app (Slint): desktop now, Android and iOS from the same code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Workspace lints, except `unsafe_code` is `deny` rather than `forbid`: the
+# code Slint generates for the UI needs it, and is allowed only in `mod ui`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "deny"
+todo = "deny"
+
+[[bin]]
+name = "enclave"
+path = "src/main.rs"
+
+[[bin]]
+name = "enclave-shots"
+path = "src/bin/shots.rs"
+
+[dependencies]
+enclave-core = { path = "../enclave-core" }
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-net = { path = "../enclave-net" }
+enclave-store = { path = "../enclave-store" }
+enclave-sim = { path = "../enclave-sim" }
+enclave-server = { path = "../enclave-server" }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+qrcodegen = "1.8"
+png = "0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+zeroize = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+arboard = { version = "3", default-features = false }
+
+[build-dependencies]
+slint-build = "1.18"
+enclave-design = { path = "../enclave-design" }
+
+[lib]
+path = "src/lib.rs"

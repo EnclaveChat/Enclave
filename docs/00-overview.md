@@ -243,7 +243,7 @@ The code is normative where it and these documents disagree; each document lists
 | M3 servers | `enclave-server`, `enclave-kt`, `enclave-tokens`, `enclave-rpc`, `enclave-sim` | Implemented; the end-to-end simulation and the KT split-view test pass. |
 | M4 network | `enclave-net` | Transport trait, dev TCP, Tor (arti) behind `tor`, cover scheduler. Nym not integrated; nothing measured on a live network (`docs/spikes/m4-network.md`). **Gate open.** |
 | M5 client | `enclave-store`, `enclave-core` | Sealed store, shred keyring, backups, client engine (accounts, contacts, requests, messaging, refills, restart, erase). Device linking, restore, the 72 h veto and the process split are not done. |
-| M6 app | `enclave-design`, `enclave-app` | Tokens and contrast checks done; the Slint app is in progress. |
+| M6 app | `enclave-design`, `enclave-app` | Desktop MVP in Slint: onboarding, message requests, 1:1 chat, contact codes and invite links, security-code check, privacy profile choice, recovery words. Runs as an offline demo or against a dev server. Screenshots render headlessly (`enclave-shots`, `docs/screenshots/`). Not done: Android/iOS packaging, images, voice notes, disappearing messages, push, app lock, the screen-reader audit. |
 | M7–M12 | — | Not started. |
 
 Known code gaps raised by the documentation pass: skipped message keys have no 7-day expiry (05 §10); the conversation mode is not yet bound into device-slot associated data (05 §9).

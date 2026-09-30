@@ -1,0 +1,737 @@
+// Enclave app window. Point of view (docs/17-design.md): private
+// correspondence done well: warm paper, deep pine ink, and one saffron seal
+// that appears only when something has really been confirmed.
+import "fonts/AtkinsonHyperlegibleNext-Regular.ttf";
+import "fonts/AtkinsonHyperlegibleNext-SemiBold.ttf";
+import "fonts/AtkinsonHyperlegibleMono-Regular.ttf";
+import { Tokens } from "tokens.slint";
+import {
+    Body, Secondary, Caption, Title, ScreenTitle, Code, Seal, SealState, PrimaryButton,
+    QuietButton, ActionTile, Field, Avatar, Notice, Icons,
+} from "controls.slint";
+
+export { Tokens }
+
+// 0 = waiting for them, 1 = request to us, 2 = talking.
+export struct ContactRow {
+    id: string,
+    name: string,
+    initials: string,
+    tint: color,
+    preview: string,
+    time: string,
+    unread: int,
+    state: int,
+    verified: bool,
+}
+
+// status: 0 sending privately, 1 on its way, 2 delivered.
+export struct MessageRow {
+    text: string,
+    outgoing: bool,
+    time: string,
+    status: int,
+}
+
+export enum Screen { welcome, name, setting-up, main }
+export enum Sheet { none, my-code, add, check-code, settings, recovery }
+
+component DeliveryMark inherits Rectangle {
+    in property <int> status;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    border-width: 1.5px;
+    border-color: Tokens.meta-on-bubble-out;
+    background: root.status >= 2 ? Tokens.meta-on-bubble-out : transparent;
+    accessible-role: image;
+    accessible-label: root.status == 0 ? "Sending privately" : root.status == 1 ? "On its way" : "Delivered";
+    if root.status == 1: Rectangle {
+        x: 0;
+        width: parent.width / 2;
+        border-top-left-radius: 5px;
+        border-bottom-left-radius: 5px;
+        background: Tokens.meta-on-bubble-out;
+    }
+}
+
+component Bubble inherits HorizontalLayout {
+    in property <MessageRow> msg;
+    in property <length> bubble-max;
+    alignment: root.msg.outgoing ? end : start;
+    Rectangle {
+        max-width: root.bubble-max;
+        background: root.msg.outgoing ? Tokens.bubble-out : Tokens.bubble-in;
+        border-top-left-radius: Tokens.radius-bubble;
+        border-top-right-radius: Tokens.radius-bubble;
+        border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
+        border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
+        accessible-role: text;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + root.msg.text + ", " + root.msg.time;
+        VerticalLayout {
+            padding-left: Tokens.space-sm;
+            padding-right: Tokens.space-sm;
+            padding-top: Tokens.space-s;
+            padding-bottom: Tokens.space-s;
+            spacing: Tokens.space-xs;
+            Text {
+                text: root.msg.text;
+                font-size: Tokens.type-body;
+                color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Tokens.space-xs;
+                Text {
+                    text: root.msg.time;
+                    font-size: Tokens.type-caption;
+                    color: root.msg.outgoing ? Tokens.meta-on-bubble-out : Tokens.text-muted;
+                    vertical-alignment: center;
+                }
+                if root.msg.outgoing: VerticalLayout {
+                    alignment: center;
+                    DeliveryMark { status: root.msg.status; }
+                }
+            }
+        }
+    }
+}
+
+component ContactItem inherits Rectangle {
+    in property <ContactRow> item;
+    in property <bool> selected;
+    callback clicked();
+    height: 72px;
+    background: root.selected ? Tokens.bubble-in : touch.has-hover ? Tokens.surface : transparent;
+    border-radius: Tokens.radius-control;
+    accessible-role: list-item;
+    accessible-label: root.item.name + (root.item.unread > 0 ? ", " + root.item.unread + " unread" : "") + ", " + root.item.preview;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Tokens.space-sm;
+        padding-right: Tokens.space-sm;
+        spacing: Tokens.space-sm;
+        VerticalLayout {
+            alignment: center;
+            Avatar { initials: root.item.initials; tint: root.item.tint; size: 44px; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            HorizontalLayout {
+                spacing: Tokens.space-xs;
+                Text {
+                    text: root.item.name;
+                    font-size: Tokens.type-body;
+                    font-weight: root.item.unread > 0 ? 600 : 400;
+                    color: Tokens.text;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.item.verified: VerticalLayout {
+                    alignment: center;
+                    Seal { state: SealState.checked; size: 16px; }
+                }
+                Caption { text: root.item.time; vertical-alignment: center; }
+            }
+            HorizontalLayout {
+                spacing: Tokens.space-s;
+                Text {
+                    text: root.item.state == 1 ? "Wants to talk" : root.item.state == 0 ? "Waiting for them to accept" : root.item.preview;
+                    font-size: Tokens.type-secondary;
+                    color: Tokens.text-muted;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if root.item.unread > 0: Rectangle {
+                    min-width: 22px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: Tokens.pine;
+                    Text {
+                        text: root.item.unread;
+                        font-size: Tokens.type-caption;
+                        font-weight: 600;
+                        color: Tokens.on-pine;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> filled: false;
+    callback clicked();
+    width: Tokens.space-touch-target-min;
+    height: Tokens.space-touch-target-min;
+    border-radius: root.filled ? self.width / 2 : Tokens.radius-control;
+    background: root.filled ? (touch.pressed ? Tokens.pine.darker(20%) : Tokens.pine) : (touch.has-hover ? Tokens.bubble-in : transparent);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    Path {
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        stroke: root.filled ? Tokens.on-pine : Tokens.pine;
+        stroke-width: 1.75px;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == " " || e.text == "\n" { root.clicked(); return accept; }
+            reject
+        }
+    }
+    if focus.has-focus: Rectangle {
+        border-radius: parent.border-radius;
+        border-width: Tokens.icon-focus-ring-width;
+        border-color: Tokens.focus-ring;
+    }
+}
+
+component SheetFrame inherits Rectangle {
+    in property <string> title;
+    in property <length> max-card-width: 520px;
+    callback close();
+    background: #0000008c;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    TouchArea { clicked => { root.close(); } }
+    card := Rectangle {
+        width: min(root.width - 2 * Tokens.space-m, root.max-card-width);
+        height: min(root.height - 2 * Tokens.space-m, inner.preferred-height);
+        background: Tokens.surface;
+        border-radius: Tokens.radius-sheet;
+        TouchArea { }
+        inner := VerticalLayout {
+            padding: Tokens.space-l;
+            spacing: Tokens.space-m;
+            HorizontalLayout {
+                spacing: Tokens.space-s;
+                Title { text: root.title; vertical-alignment: center; horizontal-stretch: 1; }
+                IconButton { icon: Icons.close; label: "Close"; clicked => { root.close(); } }
+            }
+            @children
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Enclave";
+    preferred-width: 1180px;
+    preferred-height: 780px;
+    min-width: 360px;
+    min-height: 560px;
+    background: Tokens.background;
+    default-font-family: "Atkinson Hyperlegible Next";
+    default-font-size: Tokens.type-body;
+
+    in-out property <Screen> screen: Screen.welcome;
+    in-out property <Sheet> sheet: Sheet.none;
+    in property <string> my-name;
+    in property <string> my-initials;
+    in property <color> my-tint: Tokens.pine;
+    in property <[ContactRow]> contacts;
+    in property <[ContactRow]> requests;
+    in property <[MessageRow]> messages;
+    in-out property <string> current-id;
+    in property <ContactRow> current;
+    in property <string> my-link;
+    in property <image> my-qr;
+    in property <[string]> code-groups;
+    in property <string> add-error;
+    in property <bool> busy;
+    in property <string> status-line;
+    in property <bool> show-delivery-hint: true;
+    in-out property <int> privacy: 0;
+    in property <[string]> recovery-words;
+    in property <bool> recovery-saved;
+    in-out property <string> draft;
+    in-out property <string> add-link;
+    in-out property <string> add-text;
+    in-out property <string> name-input;
+
+    callback get-started();
+    callback create-account(string);
+    callback select(string);
+    callback send(string, string);
+    callback accept(string);
+    callback decline(string);
+    callback add-contact(string, string);
+    callback mark-checked(string);
+    callback copy-text(string);
+    callback set-privacy(int);
+    callback open-sheet(Sheet);
+    callback words-saved();
+
+    property <bool> wide: root.width >= 760px;
+    property <bool> has-current: root.current-id != "";
+
+    // ---------------------------------------------------------------- welcome
+    if root.screen == Screen.welcome: VerticalLayout {
+        alignment: center;
+        padding: Tokens.space-l;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: min(440px, root.width - 2 * Tokens.space-l);
+                spacing: Tokens.space-l;
+                HorizontalLayout { alignment: start; Seal { state: SealState.checked; size: 64px; } }
+                VerticalLayout {
+                    spacing: Tokens.space-s;
+                    Text {
+                        text: "Talk privately.";
+                        font-size: Tokens.type-onboarding;
+                        font-weight: 600;
+                        color: Tokens.text;
+                        wrap: word-wrap;
+                    }
+                    Body { text: "No phone number. No email. Only the people you choose can reach you."; color: Tokens.text-muted; }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    PrimaryButton { text: "Get started"; clicked => { root.get-started(); } }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------- name
+    if root.screen == Screen.name: VerticalLayout {
+        alignment: center;
+        padding: Tokens.space-l;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: min(440px, root.width - 2 * Tokens.space-l);
+                spacing: Tokens.space-m;
+                ScreenTitle { text: "What should people call you?"; }
+                name-field := Field {
+                    placeholder: "Your name";
+                    text <=> root.name-input;
+                    accepted => { if root.name-input != "" { root.create-account(root.name-input); } }
+                    init => { self.focus(); }
+                }
+                Secondary { text: "Only people you talk to can see this."; }
+                HorizontalLayout {
+                    alignment: start;
+                    PrimaryButton {
+                        text: "Continue";
+                        enabled: root.name-input != "";
+                        clicked => { root.create-account(root.name-input); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- setting up
+    if root.screen == Screen.setting-up: VerticalLayout {
+        alignment: center;
+        padding: Tokens.space-l;
+        spacing: Tokens.space-m;
+        HorizontalLayout { alignment: center; Seal { size: 48px; } }
+        Body { text: "Setting up your private address…"; horizontal-alignment: center; }
+        Secondary { text: root.status-line; horizontal-alignment: center; }
+    }
+
+    // ------------------------------------------------------------------- main
+    if root.screen == Screen.main: HorizontalLayout {
+        // Conversation list.
+        if root.wide || !root.has-current: Rectangle {
+            width: root.wide ? 320px : root.width;
+            background: Tokens.background;
+            VerticalLayout {
+                padding: Tokens.space-m;
+                spacing: Tokens.space-m;
+                HorizontalLayout {
+                    spacing: Tokens.space-sm;
+                    Avatar { initials: root.my-initials; tint: root.my-tint; size: 36px; }
+                    Title { text: root.my-name; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    IconButton {
+                        icon: Icons.settings;
+                        label: "Settings";
+                        clicked => { root.open-sheet(Sheet.settings); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Tokens.space-s;
+                    ActionTile { text: "My code"; icon: Icons.qr; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.my-code); } }
+                    ActionTile { text: "Add"; icon: Icons.link; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.add); } }
+                    ActionTile { text: "Invite"; icon: Icons.share; horizontal-stretch: 1; clicked => { root.copy-text(root.my-link); } }
+                }
+                if !root.recovery-saved: Notice {
+                    title: "Save your recovery words";
+                    text: "They bring your account back if you lose this device.";
+                    kind: 0;
+                    HorizontalLayout {
+                        alignment: start;
+                        QuietButton { text: "Show words"; clicked => { root.open-sheet(Sheet.recovery); } }
+                    }
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    content-height: list.preferred-height;
+                    list := VerticalLayout {
+                        alignment: start;
+                        spacing: 2px;
+                        if root.requests.length > 0: Caption {
+                            text: "Message requests";
+                            font-weight: 600;
+                            height: 28px;
+                            vertical-alignment: center;
+                        }
+                        for r in root.requests: ContactItem {
+                            item: r;
+                            selected: r.id == root.current-id;
+                            clicked => { root.select(r.id); }
+                        }
+                        if root.requests.length > 0 && root.contacts.length > 0: Caption {
+                            text: "Conversations";
+                            font-weight: 600;
+                            height: 28px;
+                            vertical-alignment: center;
+                        }
+                        for c in root.contacts: ContactItem {
+                            item: c;
+                            selected: c.id == root.current-id;
+                            clicked => { root.select(c.id); }
+                        }
+                    }
+                }
+                Caption { text: root.status-line; wrap: word-wrap; }
+            }
+        }
+        if root.wide: Rectangle { width: 1px; background: Tokens.hairline; }
+
+        // Conversation.
+        if root.wide || root.has-current: Rectangle {
+            horizontal-stretch: 1;
+            background: Tokens.background;
+
+            if !root.has-current: VerticalLayout {
+                alignment: center;
+                padding: Tokens.space-xl;
+                spacing: Tokens.space-m;
+                HorizontalLayout {
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(420px, parent.width - 2 * Tokens.space-xl);
+                        spacing: Tokens.space-m;
+                        Title { text: root.contacts.length + root.requests.length == 0 ? "Start your first conversation" : "Choose a conversation"; }
+                        Secondary {
+                            text: "Show your code to someone next to you, or send them your invite link. Meeting in person is the strongest way to check it's really them.";
+                        }
+                    }
+                }
+            }
+
+            if root.has-current: VerticalLayout {
+                // Header.
+                Rectangle {
+                    height: 72px;
+                    HorizontalLayout {
+                        padding-left: Tokens.space-m;
+                        padding-right: Tokens.space-m;
+                        spacing: Tokens.space-sm;
+                        if !root.wide: VerticalLayout {
+                            alignment: center;
+                            IconButton { icon: Icons.back; label: "Back"; clicked => { root.current-id = ""; } }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Avatar { initials: root.current.initials; tint: root.current.tint; size: 40px; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            Title { text: root.current.name; overflow: elide; wrap: no-wrap; }
+                            HorizontalLayout {
+                                spacing: Tokens.space-xs;
+                                Seal { state: root.current.verified ? SealState.checked : SealState.unchecked; size: 16px; }
+                                Caption {
+                                    text: (root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        if root.current.state == 2: VerticalLayout {
+                            alignment: center;
+                            QuietButton {
+                                text: !root.wide ? "Code" : root.current.verified ? "Security code" : "Check code";
+                                clicked => { root.open-sheet(Sheet.check-code); }
+                            }
+                        }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Tokens.hairline; }
+                }
+
+                // Messages.
+                Flickable {
+                    vertical-stretch: 1;
+                    content-height: max(self.height, thread.preferred-height);
+                    content-y: min(0px, self.height - self.content-height);
+                    thread := VerticalLayout {
+                        alignment: end;
+                        padding: Tokens.space-m;
+                        spacing: Tokens.space-s;
+                        if root.show-delivery-hint && root.current.state == 2: Caption {
+                            text: "Private delivery takes a few seconds. That pause is part of what hides who you talk to.";
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        for m in root.messages: Bubble {
+                            msg: m;
+                            bubble-max: min(480px, root.width * 0.7);
+                        }
+                    }
+                }
+
+                // Request, pending or composer.
+                if root.current.state == 1: Rectangle {
+                    VerticalLayout {
+                        padding: Tokens.space-m;
+                        Notice {
+                            title: root.current.name + " wants to talk";
+                            text: "You haven't talked before. They can't see whether you've read this until you accept. The name is what they typed; check their security code before sharing anything private.";
+                            HorizontalLayout {
+                                spacing: Tokens.space-s;
+                                alignment: start;
+                                PrimaryButton { text: "Accept"; clicked => { root.accept(root.current-id); } }
+                                QuietButton { text: "Delete"; danger: true; clicked => { root.decline(root.current-id); } }
+                            }
+                        }
+                    }
+                }
+                if root.current.state == 0: Rectangle {
+                    VerticalLayout {
+                        padding: Tokens.space-m;
+                        Notice {
+                            title: "Waiting for " + root.current.name + " to accept";
+                            text: "You can write again once they accept your request.";
+                        }
+                    }
+                }
+                if root.current.state == 2: Rectangle {
+                    HorizontalLayout {
+                        padding: Tokens.space-m;
+                        spacing: Tokens.space-s;
+                        composer := Field {
+                            placeholder: "Message";
+                            text <=> root.draft;
+                            horizontal-stretch: 1;
+                            accepted => {
+                                if root.draft != "" { root.send(root.current-id, root.draft); root.draft = ""; }
+                            }
+                        }
+                        IconButton {
+                            icon: Icons.send;
+                            label: "Send";
+                            filled: true;
+                            clicked => {
+                                if root.draft != "" { root.send(root.current-id, root.draft); root.draft = ""; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- sheets
+    if root.sheet == Sheet.my-code: SheetFrame {
+        title: "Your code";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Let someone scan this, or send them your invite link. They can then send you a message request."; }
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 248px;
+                height: 248px;
+                background: #ffffff;
+                border-radius: Tokens.radius-control;
+                Image {
+                    width: 232px;
+                    height: 232px;
+                    source: root.my-qr;
+                    image-rendering: pixelated;
+                    accessible-role: image;
+                    accessible-label: "QR code of your invite link";
+                }
+            }
+        }
+        Text {
+            text: root.my-link;
+            font-family: "Atkinson Hyperlegible Mono";
+            font-size: Tokens.type-caption;
+            color: Tokens.text-muted;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton { text: "Copy invite link"; clicked => { root.copy-text(root.my-link); } }
+        }
+    }
+
+    if root.sheet == Sheet.add: SheetFrame {
+        title: "Add someone";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Paste the invite link they sent you."; }
+        Field { placeholder: "enclave:add#…"; mono: true; text <=> root.add-link; }
+        Field { placeholder: "Say hello (optional)"; text <=> root.add-text; }
+        if root.add-error != "": HorizontalLayout {
+            spacing: Tokens.space-s;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                background: Tokens.danger;
+                Text { text: "!"; color: Tokens.surface; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Text { text: "Can't use this link"; color: Tokens.danger; font-size: Tokens.type-body; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+        }
+        if root.add-error != "": Text {
+            text: root.add-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-s;
+            PrimaryButton {
+                text: root.busy ? "Sending request…" : "Send request";
+                enabled: root.add-link != "" && !root.busy;
+                clicked => { root.add-contact(root.add-link, root.add-text); }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.check-code: SheetFrame {
+        title: root.current.verified ? "You and " + root.current.name + " are checked" : "Check it's really " + root.current.name;
+        close => { root.sheet = Sheet.none; }
+        Secondary {
+            text: root.current.verified
+                ? "If anything changes, we'll tell you before you send anything."
+                : "Compare these numbers with " + root.current.name + " in person or on a call. If every group matches, tap They match.";
+        }
+        HorizontalLayout {
+            alignment: center;
+            GridLayout {
+                spacing-horizontal: Tokens.space-l;
+                spacing-vertical: Tokens.space-s;
+                for g[i] in root.code-groups: Code {
+                    text: g;
+                    row: i / 3;
+                    col: mod(i, 3);
+                    accessible-label: "Group " + (i + 1) + ": " + g;
+                }
+            }
+        }
+        if root.current.verified: HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-s;
+            Seal { state: SealState.checked; size: 24px; }
+            Body { text: "Checked"; vertical-alignment: center; }
+        }
+        if !root.current.verified: HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-s;
+            PrimaryButton { text: "They match"; clicked => { root.mark-checked(root.current-id); } }
+            QuietButton { text: "Not now"; clicked => { root.sheet = Sheet.none; } }
+        }
+    }
+
+    if root.sheet == Sheet.settings: SheetFrame {
+        title: "Privacy";
+        close => { root.sheet = Sheet.none; }
+        for option[i] in [
+            { title: "Standard", text: "Hides who you talk to. Uses about 60 MB an hour while Enclave is open, and about 40 MB a day in the background." },
+            { title: "Maximum", text: "Also hides when you're using Enclave. Uses about 1.5 GB a day. Large files send slowly." },
+        ]: Rectangle {
+            min-height: row.preferred-height;
+            border-radius: Tokens.radius-control;
+            border-width: root.privacy == i ? 2px : 1px;
+            border-color: root.privacy == i ? Tokens.pine : Tokens.hairline;
+            accessible-role: radio-button;
+            accessible-checked: root.privacy == i;
+            accessible-label: option.title;
+            accessible-action-default => { root.set-privacy(i); }
+            TouchArea { clicked => { root.set-privacy(i); } }
+            row := HorizontalLayout {
+                padding: Tokens.space-m;
+                spacing: Tokens.space-sm;
+                VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 10px;
+                        border-width: 2px;
+                        border-color: root.privacy == i ? Tokens.pine : Tokens.text-muted;
+                        if root.privacy == i: Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Tokens.pine; }
+                    }
+                }
+                VerticalLayout {
+                    spacing: Tokens.space-xs;
+                    Body { text: option.title; font-weight: 600; }
+                    Secondary { text: option.text; }
+                }
+            }
+        }
+        QuietButton {
+            text: "Recovery words";
+            outlined: true;
+            clicked => { root.open-sheet(Sheet.recovery); }
+        }
+    }
+
+    if root.sheet == Sheet.recovery: SheetFrame {
+        title: "Your recovery words";
+        max-card-width: 640px;
+        close => { root.sheet = Sheet.none; }
+        Secondary {
+            text: "If you lose this device, these 24 words bring your account back. Anyone who has them can become you. Write them down on paper and keep them somewhere safe.";
+        }
+        GridLayout {
+            spacing-horizontal: Tokens.space-m;
+            spacing-vertical: Tokens.space-xs;
+            for w[i] in root.recovery-words: HorizontalLayout {
+                row: root.wide ? mod(i, 6) : i / 2;
+                col: root.wide ? i / 6 : mod(i, 2);
+                spacing: Tokens.space-s;
+                Caption { text: i + 1; width: 20px; horizontal-alignment: right; vertical-alignment: center; }
+                Text {
+                    text: w;
+                    font-family: "Atkinson Hyperlegible Mono";
+                    font-size: Tokens.type-body;
+                    color: Tokens.text;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.recovery-saved ? "Done" : "I've written them down";
+                clicked => { root.words-saved(); root.sheet = Sheet.none; }
+            }
+        }
+    }
+}

@@ -31,8 +31,13 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 impl Rgb {
     /// Parse `#RRGGBB`.
     pub fn parse(s: &str) -> Result<Self, TokenError> {
-        let h = s.strip_prefix('#').filter(|h| h.len() == 6).ok_or_else(|| TokenError::Color(s.into()))?;
-        let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| TokenError::Color(s.into()));
+        let h = s
+            .strip_prefix('#')
+            .filter(|h| h.len() == 6)
+            .ok_or_else(|| TokenError::Color(s.into()))?;
+        let p = |i: usize| {
+            u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| TokenError::Color(s.into()))
+        };
         Ok(Self(p(0)?, p(2)?, p(4)?))
     }
 
@@ -40,7 +45,11 @@ impl Rgb {
     pub fn luminance(self) -> f64 {
         let lin = |c: u8| {
             let c = f64::from(c) / 255.0;
-            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * lin(self.0) + 0.7152 * lin(self.1) + 0.0722 * lin(self.2)
     }
@@ -93,7 +102,9 @@ fn colors(v: &Value, mode: &str) -> Result<BTreeMap<String, Rgb>, TokenError> {
         .ok_or_else(|| TokenError::Missing(format!("color.{mode}")))?;
     t.iter()
         .map(|(k, v)| {
-            let s = v.as_str().ok_or_else(|| TokenError::Missing(format!("color.{mode}.{k}")))?;
+            let s = v
+                .as_str()
+                .ok_or_else(|| TokenError::Missing(format!("color.{mode}.{k}")))?;
             Ok((k.clone(), Rgb::parse(s)?))
         })
         .collect()
@@ -102,7 +113,9 @@ fn colors(v: &Value, mode: &str) -> Result<BTreeMap<String, Rgb>, TokenError> {
 impl Tokens {
     /// Parse `tokens.toml` text.
     pub fn parse(text: &str) -> Result<Self, TokenError> {
-        let v: Value = text.parse().map_err(|e: toml::de::Error| TokenError::Parse(e.to_string()))?;
+        let v: Value = text
+            .parse()
+            .map_err(|e: toml::de::Error| TokenError::Parse(e.to_string()))?;
         let light = colors(&v, "light")?;
         let dark = colors(&v, "dark")?;
         let pairs = v
@@ -112,14 +125,27 @@ impl Tokens {
             .ok_or_else(|| TokenError::Missing("contrast.pairs".into()))?
             .iter()
             .map(|p| {
-                let a = p.as_array().filter(|a| a.len() == 3).ok_or_else(|| TokenError::Missing("pair".into()))?;
-                let s = |i: usize| a[i].as_str().map(str::to_string).ok_or_else(|| TokenError::Missing("pair".into()));
-                let min = a[2].as_float().or_else(|| a[2].as_integer().map(|i| i as f64));
-                Ok((s(0)?, s(1)?, min.ok_or_else(|| TokenError::Missing("pair min".into()))?))
+                let a = p
+                    .as_array()
+                    .filter(|a| a.len() == 3)
+                    .ok_or_else(|| TokenError::Missing("pair".into()))?;
+                let s = |i: usize| {
+                    a[i].as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| TokenError::Missing("pair".into()))
+                };
+                let min = a[2]
+                    .as_float()
+                    .or_else(|| a[2].as_integer().map(|i| i as f64));
+                Ok((
+                    s(0)?,
+                    s(1)?,
+                    min.ok_or_else(|| TokenError::Missing("pair min".into()))?,
+                ))
             })
             .collect::<Result<Vec<_>, TokenError>>()?;
         let mut numbers = BTreeMap::new();
-        for section in ["type", "space", "radius", "motion"] {
+        for section in ["type", "space", "radius", "motion", "icon"] {
             if let Some(t) = v.get(section).and_then(Value::as_table) {
                 for (k, x) in t {
                     let n = x.as_float().or_else(|| x.as_integer().map(|i| i as f64));
@@ -129,7 +155,12 @@ impl Tokens {
                 }
             }
         }
-        Ok(Self { light, dark, pairs, numbers })
+        Ok(Self {
+            light,
+            dark,
+            pairs,
+            numbers,
+        })
     }
 
     /// Check every declared pair in both modes.
@@ -137,11 +168,21 @@ impl Tokens {
         let mut out = Vec::new();
         for (mode, map) in [("light", &self.light), ("dark", &self.dark)] {
             for (fg, bg, min) in &self.pairs {
-                let f = *map.get(fg).ok_or_else(|| TokenError::Missing(format!("{mode}.{fg}")))?;
-                let b = *map.get(bg).ok_or_else(|| TokenError::Missing(format!("{mode}.{bg}")))?;
+                let f = *map
+                    .get(fg)
+                    .ok_or_else(|| TokenError::Missing(format!("{mode}.{fg}")))?;
+                let b = *map
+                    .get(bg)
+                    .ok_or_else(|| TokenError::Missing(format!("{mode}.{bg}")))?;
                 let ratio = contrast(f, b);
                 if ratio + 1e-9 < *min {
-                    out.push(Failure { mode, fg: fg.clone(), bg: bg.clone(), ratio, min: *min });
+                    out.push(Failure {
+                        mode,
+                        fg: fg.clone(),
+                        bg: bg.clone(),
+                        ratio,
+                        min: *min,
+                    });
                 }
             }
         }
@@ -156,7 +197,10 @@ impl Tokens {
              export global Tokens {\n    in-out property <bool> dark: false;\n    in-out property <float> text-scale: 1.0;\n    in-out property <bool> reduce-motion: false;\n",
         );
         for (name, light) in &self.light {
-            let dark = self.dark.get(name).ok_or_else(|| TokenError::Missing(format!("dark.{name}")))?;
+            let dark = self
+                .dark
+                .get(name)
+                .ok_or_else(|| TokenError::Missing(format!("dark.{name}")))?;
             let _ = writeln!(
                 s,
                 "    out property <color> {}: dark ? {} : {};",
@@ -166,7 +210,11 @@ impl Tokens {
             );
         }
         for (name, n) in &self.numbers {
-            let (kind, value) = if name.starts_with("type-") && !name.contains("line-height") && !name.contains("tracking") && !name.contains("scale") {
+            let (kind, value) = if name.starts_with("type-")
+                && !name.contains("line-height")
+                && !name.contains("tracking")
+                && !name.contains("scale")
+            {
                 ("length", format!("{n}px * text-scale"))
             } else if name.starts_with("type-") {
                 ("float", format!("{n}"))
@@ -195,7 +243,10 @@ mod tests {
         let black = Rgb(0, 0, 0);
         assert!((contrast(white, black) - 21.0).abs() < 1e-9);
         // Paper on Pine, as documented in docs/17-design.md.
-        let r = contrast(Rgb::parse("#F6F3EC").unwrap(), Rgb::parse("#1D5646").unwrap());
+        let r = contrast(
+            Rgb::parse("#F6F3EC").unwrap(),
+            Rgb::parse("#1D5646").unwrap(),
+        );
         assert!((r - 7.67).abs() < 0.01, "{r}");
     }
 

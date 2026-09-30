@@ -3,7 +3,8 @@
 use crate::card::{ContactCard, LinkError, MAX_NAME};
 use crate::content::{Content, MAX_TEXT, Token};
 use crate::persist::{
-    self, NS_CONTACTS, NS_ISSUERS, NS_PROFILE, NS_REPLAY, NS_SECRETS, NS_SESSIONS, Profile,
+    self, NS_CONTACTS, NS_ISSUERS, NS_PROFILE, NS_REPLAY, NS_SECRETS, NS_SESSIONS, NS_SETTINGS,
+    Profile,
 };
 use crate::rpc::Rpc;
 use crate::{CoreError, Result, unix_now};
@@ -464,6 +465,18 @@ impl Client {
     // ------------------------------------------------------------------
     // Commands
     // ------------------------------------------------------------------
+
+    /// Store an app setting (sealed like everything else).
+    pub fn set_setting(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        Ok(self
+            .store
+            .put(NS_SETTINGS, key.as_bytes(), value, &mut self.rng)?)
+    }
+
+    /// Read an app setting.
+    pub fn setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.store.get(NS_SETTINGS, key.as_bytes())?)
+    }
 
     /// Mark a contact as checked (or not).
     pub fn set_verified(&mut self, root: &[u8; 64], verified: bool) -> Result<()> {

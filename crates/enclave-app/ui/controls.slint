@@ -1,0 +1,352 @@
+// Paper & Seal controls (docs/17-design.md). Every control reads the Tokens
+// global generated from design/tokens.toml; no literal colors here.
+import { Tokens } from "tokens.slint";
+
+// ---------------------------------------------------------------------------
+// Type
+// ---------------------------------------------------------------------------
+
+export component Body inherits Text {
+    font-size: Tokens.type-body;
+    color: Tokens.text;
+    wrap: word-wrap;
+}
+
+export component Secondary inherits Text {
+    font-size: Tokens.type-secondary;
+    color: Tokens.text-muted;
+    wrap: word-wrap;
+}
+
+export component Caption inherits Text {
+    font-size: Tokens.type-caption;
+    color: Tokens.text-muted;
+}
+
+export component Title inherits Text {
+    font-size: Tokens.type-title;
+    font-weight: 600;
+    color: Tokens.text;
+    wrap: word-wrap;
+}
+
+export component ScreenTitle inherits Text {
+    font-size: Tokens.type-screen-title;
+    font-weight: 600;
+    color: Tokens.text;
+    wrap: word-wrap;
+}
+
+// Only for things people compare or copy exactly.
+export component Code inherits Text {
+    font-family: "Atkinson Hyperlegible Mono";
+    font-size: Tokens.type-mono-code;
+    letter-spacing: Tokens.type-mono-code * Tokens.type-mono-code-tracking-em / Tokens.text-scale;
+    color: Tokens.text;
+}
+
+// ---------------------------------------------------------------------------
+// The Seal: the only use of Saffron. Filled = checked by you; outline = not
+// checked yet; notched = code changed. Never a padlock.
+// ---------------------------------------------------------------------------
+
+export enum SealState { unchecked, checked, changed }
+
+export component Seal inherits Rectangle {
+    in property <SealState> state: SealState.unchecked;
+    in property <length> size: 20px;
+    width: root.size;
+    height: root.size;
+    accessible-role: image;
+    accessible-label: root.state == SealState.checked ? "Checked" : root.state == SealState.changed ? "Security code changed" : "Not checked yet";
+
+    // A round seal pressed over an envelope flap. Changed = the ring is broken.
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.state == SealState.changed
+            ? "M 15 3 A 9.5 9.5 0 1 1 9 3"
+            : "M 12 2.5 A 9.5 9.5 0 1 1 11.99 2.5 Z";
+        fill: root.state == SealState.checked ? Tokens.saffron : transparent;
+        stroke: root.state == SealState.checked ? Tokens.seal-stroke : root.state == SealState.changed ? Tokens.text : Tokens.text-muted;
+        stroke-width: 1.75px;
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M 7 9.5 L 12 13.5 L 17 9.5";
+        stroke: root.state == SealState.checked ? Tokens.seal-stroke : root.state == SealState.changed ? Tokens.text : Tokens.text-muted;
+        stroke-width: 1.75px;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buttons: 48 px minimum target, 2 px focus ring, sentence case labels.
+// ---------------------------------------------------------------------------
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-height: Tokens.space-touch-target-min;
+    min-width: label.preferred-width + 2 * Tokens.space-l;
+    border-radius: Tokens.radius-control;
+    background: !root.enabled ? Tokens.hairline : touch.pressed ? Tokens.pine.darker(20%) : touch.has-hover ? Tokens.pine.darker(8%) : Tokens.pine;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    label := Text {
+        text: root.text;
+        font-size: Tokens.type-body;
+        font-weight: 600;
+        color: root.enabled ? Tokens.on-pine : Tokens.text-muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            if e.text == " " || e.text == "\n" { root.clicked(); return accept; }
+            reject
+        }
+    }
+    if focus.has-focus: Rectangle {
+        x: -4px;
+        y: -4px;
+        width: parent.width + 8px;
+        height: parent.height + 8px;
+        border-radius: Tokens.radius-control + 4px;
+        border-width: Tokens.icon-focus-ring-width;
+        border-color: Tokens.focus-ring;
+    }
+}
+
+export component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger: false;
+    in property <bool> outlined: false;
+    callback clicked();
+    min-height: Tokens.space-touch-target-min;
+    min-width: max(Tokens.space-touch-target-min, label.preferred-width + 2 * Tokens.space-m);
+    border-radius: Tokens.radius-control;
+    border-width: root.outlined ? 1px : 0px;
+    border-color: Tokens.text-muted;
+    background: touch.pressed ? Tokens.hairline : touch.has-hover ? Tokens.bubble-in : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    label := Text {
+        text: root.text;
+        font-size: Tokens.type-body;
+        font-weight: 600;
+        color: root.danger ? Tokens.danger : Tokens.pine;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == " " || e.text == "\n" { root.clicked(); return accept; }
+            reject
+        }
+    }
+    if focus.has-focus: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Tokens.radius-control + 2px;
+        border-width: Tokens.icon-focus-ring-width;
+        border-color: Tokens.focus-ring;
+    }
+}
+
+// An action with a drawn icon above its label (home screen actions).
+export component ActionTile inherits Rectangle {
+    in property <string> text;
+    in property <string> icon; // SVG path in a 24x24 box, stroked
+    callback clicked();
+    min-height: 72px;
+    border-radius: Tokens.radius-control;
+    border-width: 1px;
+    border-color: Tokens.hairline;
+    background: touch.pressed ? Tokens.hairline : touch.has-hover ? Tokens.bubble-in : Tokens.surface;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Tokens.space-xs;
+        padding: Tokens.space-s;
+        HorizontalLayout {
+            alignment: center;
+            Path {
+                width: 24px;
+                height: 24px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon;
+                stroke: Tokens.pine;
+                stroke-width: 1.75px;
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: Tokens.type-secondary;
+            font-weight: 600;
+            color: Tokens.text;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == " " || e.text == "\n" { root.clicked(); return accept; }
+            reject
+        }
+    }
+    if focus.has-focus: Rectangle {
+        border-radius: Tokens.radius-control;
+        border-width: Tokens.icon-focus-ring-width;
+        border-color: Tokens.focus-ring;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text <=> input.text;
+    in property <bool> mono: false;
+    in property <bool> multiline: false;
+    callback accepted();
+    callback edited();
+    min-height: Tokens.space-touch-target-min;
+    border-radius: Tokens.radius-control;
+    border-width: input.has-focus ? Tokens.icon-focus-ring-width : 1px;
+    border-color: input.has-focus ? Tokens.focus-ring : Tokens.text-muted;
+    background: Tokens.surface;
+    accessible-role: text-input;
+    accessible-label: root.placeholder;
+    accessible-value: root.text;
+    forward-focus: input;
+
+    HorizontalLayout {
+        padding-left: Tokens.space-sm;
+        padding-right: Tokens.space-sm;
+        padding-top: Tokens.space-sm;
+        padding-bottom: Tokens.space-sm;
+        input := TextInput {
+            font-size: root.mono ? Tokens.type-secondary : Tokens.type-body;
+            font-family: root.mono ? "Atkinson Hyperlegible Mono" : "Atkinson Hyperlegible Next";
+            color: Tokens.text;
+            selection-background-color: Tokens.bubble-out;
+            selection-foreground-color: Tokens.on-bubble-out;
+            single-line: !root.multiline;
+            wrap: root.multiline ? word-wrap : no-wrap;
+            vertical-alignment: center;
+            accepted => { root.accepted(); }
+            edited => { root.edited(); }
+        }
+    }
+    if input.text == "": Text {
+        x: Tokens.space-sm;
+        height: parent.height;
+        text: root.placeholder;
+        font-size: Tokens.type-body;
+        color: Tokens.text-muted;
+        vertical-alignment: center;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+// Contact art: initials on a tint derived from the contact's key.
+export component Avatar inherits Rectangle {
+    in property <string> initials;
+    in property <color> tint;
+    in property <length> size: 40px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: root.tint;
+    accessible-role: image;
+    accessible-label: "";
+    Text {
+        text: root.initials;
+        font-size: root.size * 0.4;
+        font-weight: 600;
+        color: #F6F3EC;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Inline, persistent notice (never a toast). `kind`: 0 info, 1 changed, 2 danger.
+export component Notice inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <int> kind: 0;
+    background: Tokens.surface;
+    border-radius: Tokens.radius-control;
+    border-width: 1px;
+    border-color: Tokens.hairline;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    HorizontalLayout {
+        Rectangle {
+            width: 4px;
+            border-top-left-radius: Tokens.radius-control;
+            border-bottom-left-radius: Tokens.radius-control;
+            background: root.kind == 1 ? Tokens.saffron : root.kind == 2 ? Tokens.danger : Tokens.pine;
+        }
+        VerticalLayout {
+            padding: Tokens.space-m;
+            spacing: Tokens.space-xs;
+            if root.title != "": Text {
+                text: root.title;
+                font-size: Tokens.type-body;
+                font-weight: 600;
+                color: root.kind == 2 ? Tokens.danger : Tokens.text;
+                wrap: word-wrap;
+            }
+            Secondary { text: root.text; }
+            @children
+        }
+    }
+}
+
+// Icon paths (24x24, stroked, Lucide-derived). No locks, shields or keyholes.
+export global Icons {
+    out property <string> qr: "M 4 4 H 10 V 10 H 4 Z M 14 4 H 20 V 10 H 14 Z M 4 14 H 10 V 20 H 4 Z M 14 14 H 16 V 16 H 14 Z M 18 18 H 20 V 20 H 18 Z M 14 20 H 16 M 20 14 V 16";
+    out property <string> link: "M 10 14 A 4 4 0 0 1 10 8.3 L 13 5.3 A 4 4 0 0 1 18.7 11 L 17 12.7 M 14 10 A 4 4 0 0 1 14 15.7 L 11 18.7 A 4 4 0 0 1 5.3 13 L 7 11.3";
+    out property <string> share: "M 12 3 V 15 M 7 8 L 12 3 L 17 8 M 5 13 V 20 H 19 V 13";
+    out property <string> send: "M 4 12 L 20 4 L 14 20 L 11 13 Z M 11 13 L 20 4";
+    out property <string> back: "M 15 5 L 8 12 L 15 19";
+    out property <string> settings: "M 4 7 H 14 M 18 7 H 20 M 16 5 V 9 M 4 17 H 8 M 12 17 H 20 M 10 15 V 19";
+    out property <string> close: "M 6 6 L 18 18 M 18 6 L 6 18";
+}
