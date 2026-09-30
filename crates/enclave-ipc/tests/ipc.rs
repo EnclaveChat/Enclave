@@ -13,6 +13,7 @@ fn snapshot() -> Snapshot {
         unread: 2,
         state: 2,
         verified: true,
+        met: true,
         tint: 5,
         kind: 0,
         members: 0,
@@ -59,6 +60,11 @@ fn snapshot() -> Snapshot {
         join_code: "enclave:link#q".into(),
         join_words: "x y z".into(),
         recovery_alert: "3 Oct 14:02".into(),
+        meet_code: "enclave:meet#abc".into(),
+        meet_words: "harbor ivory kettle".into(),
+        meet_name: "Sam".into(),
+        meet_error: String::new(),
+        meet_done: String::new(),
     }
 }
 
@@ -85,6 +91,9 @@ fn cmds() -> Vec<Cmd> {
         Cmd::SendHistory("00ff".into()),
         Cmd::StopRecovery,
         Cmd::ApproveRecovery,
+        Cmd::Meet(true),
+        Cmd::MeetScan("enclave:meet#x".into()),
+        Cmd::MeetConfirm,
     ]
 }
 

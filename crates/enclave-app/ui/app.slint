@@ -23,6 +23,7 @@ export struct ContactRow {
     unread: int,
     state: int,
     verified: bool,
+    met: bool,
     // 0 person, 1 group
     kind: int,
     members: int,
@@ -54,7 +55,7 @@ export struct MessageRow {
 }
 
 export enum Screen { welcome, name, setting-up, join, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -324,6 +325,15 @@ export component AppWindow inherits Window {
     in property <string> join-words;
     in property <string> recovery-alert;
     callback stop-recovery();
+    callback meet-scan(string);
+    callback meet-confirm();
+    in property <string> meet-code;
+    in property <image> meet-qr;
+    in property <string> meet-words;
+    in property <string> meet-name;
+    in property <string> meet-error;
+    in property <string> meet-done;
+    in-out property <string> meet-input;
     callback approve-recovery();
     in-out property <string> confirm-remove;
     callback mark-checked(string);
@@ -598,7 +608,7 @@ export component AppWindow inherits Window {
                                 Caption {
                                     text: root.current.kind == 1
                                         ? root.current.members + " people · Off the record"
-                                        : (root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
+                                        : (root.current.met ? "Met in person" : root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
                                     vertical-alignment: center;
                                 }
                             }
@@ -767,6 +777,90 @@ export component AppWindow inherits Window {
                 clicked => { root.add-contact(root.add-link, root.add-text); }
             }
         }
+        HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Together right now? Meet in person"; outlined: true; clicked => { root.open-sheet(Sheet.meet); } }
+        }
+    }
+
+    if root.sheet == Sheet.meet: SheetFrame {
+        title: root.meet-done != "" ? "You and " + root.meet-done + " are checked in person" : root.meet-words != "" ? "Do you both see these words?" : "Meet in person";
+        close => { root.sheet = Sheet.none; }
+        if root.meet-done != "": HorizontalLayout {
+            alignment: start;
+            Seal { state: SealState.checked; size: 48px; }
+        }
+        if root.meet-done != "": Secondary { text: "If anything changes, we'll tell you before you send anything. Your conversation now also rests on a secret that only crossed the room between your two screens."; }
+        if root.meet-done != "": HorizontalLayout {
+            alignment: start;
+            PrimaryButton { text: "Done"; clicked => { root.sheet = Sheet.none; } }
+        }
+
+        if root.meet-done == "" && root.meet-words == "": Secondary {
+            text: "Show this code to the other person and scan theirs. It only works face to face: codes sent over a message or a call don't count.";
+        }
+        if root.meet-done == "" && root.meet-words == "" && root.meet-code != "": HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 216px;
+                height: 216px;
+                background: #ffffff;
+                border-radius: Tokens.radius-control;
+                Image {
+                    width: 200px;
+                    height: 200px;
+                    source: root.meet-qr;
+                    image-rendering: pixelated;
+                    accessible-role: image;
+                    accessible-label: "Your in-person code";
+                }
+            }
+        }
+        if root.meet-done == "" && root.meet-words == "": Field { placeholder: "Their code: enclave:meet#…"; mono: true; text <=> root.meet-input; }
+        if root.meet-done == "" && root.meet-words == "" && root.meet-error != "": Text {
+            text: root.meet-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
+        }
+        if root.meet-done == "" && root.meet-words == "": HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: "Continue";
+                enabled: root.meet-input != "";
+                clicked => { root.meet-scan(root.meet-input); root.meet-input = ""; }
+            }
+        }
+
+        if root.meet-done == "" && root.meet-words != "": HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-sm;
+            Seal { state: SealState.checked; size: 32px; }
+            Code {
+                text: root.meet-words;
+                vertical-alignment: center;
+                accessible-label: "Seal words: " + root.meet-words;
+            }
+        }
+        if root.meet-done == "" && root.meet-words != "": Secondary {
+            text: root.meet-name + "'s phone should show the same three words. If it does, you scanned each other and nobody else.";
+        }
+        if root.meet-done == "" && root.meet-words != "" && root.meet-error != "": Text {
+            text: root.meet-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
+        }
+        if root.meet-done == "" && root.meet-words != "": HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-s;
+            PrimaryButton {
+                text: root.busy ? "Checking…" : "They match";
+                enabled: !root.busy;
+                clicked => { root.meet-confirm(); }
+            }
+            QuietButton { text: "They don't"; clicked => { root.sheet = Sheet.none; } }
+        }
     }
 
     if root.sheet == Sheet.check-code: SheetFrame {
@@ -794,13 +888,17 @@ export component AppWindow inherits Window {
             alignment: start;
             spacing: Tokens.space-s;
             Seal { state: SealState.checked; size: 24px; }
-            Body { text: "Checked"; vertical-alignment: center; }
+            Body { text: root.current.met ? "Checked in person" : "Checked"; vertical-alignment: center; }
         }
         if !root.current.verified: HorizontalLayout {
             alignment: start;
             spacing: Tokens.space-s;
             PrimaryButton { text: "They match"; clicked => { root.mark-checked(root.current-id); } }
             QuietButton { text: "Not now"; clicked => { root.sheet = Sheet.none; } }
+        }
+        if !root.current.met: HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Together right now? Meet in person"; outlined: true; clicked => { root.open-sheet(Sheet.meet); } }
         }
     }
 

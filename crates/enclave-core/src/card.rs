@@ -24,6 +24,9 @@ pub enum LinkError {
     /// A device-link code scanned in the wrong place.
     #[error("this code links a device; only scan it from Settings → Your devices")]
     DeviceLinkCode,
+    /// An in-person code used where an invite was expected.
+    #[error("this is an in-person code; open Meet in person to use it")]
+    MeetCode,
     /// The person scanned their own code.
     #[error("this is your own code")]
     OwnCode,
@@ -94,6 +97,9 @@ impl ContactCard {
         let s = s.trim();
         if s.starts_with(LINK_PREFIX) {
             return Err(LinkError::DeviceLinkCode);
+        }
+        if s.starts_with(crate::client::MEET_PREFIX) {
+            return Err(LinkError::MeetCode);
         }
         let body = s.strip_prefix(ADD_PREFIX).ok_or(LinkError::NotEnclave)?;
         Self::decode(&b64url_decode(body).ok_or(LinkError::Malformed)?)

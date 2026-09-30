@@ -46,6 +46,7 @@ fn row(r: &Row) -> ContactRow {
         unread: r.unread,
         state: r.state,
         verified: r.verified,
+        met: r.met,
         kind: r.kind,
         members: r.members,
     }
@@ -158,6 +159,16 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     }
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
+    if ui.get_meet_code().as_str() != s.meet_code {
+        ui.set_meet_code(s.meet_code.clone().into());
+        if !s.meet_code.is_empty() {
+            ui.set_meet_qr(qr_image(&s.meet_code));
+        }
+    }
+    ui.set_meet_words(s.meet_words.clone().into());
+    ui.set_meet_name(s.meet_name.clone().into());
+    ui.set_meet_error(s.meet_error.clone().into());
+    ui.set_meet_done(s.meet_done.clone().into());
     if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
     }

@@ -177,6 +177,8 @@ impl Client {
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             recovery_alert: None,
+            meet: None,
+            pending_bond: None,
         };
         // Fresh token issuers: the old counters may have been used after the
         // backup was taken.
@@ -196,7 +198,7 @@ impl Client {
             }
             let hello = client.hello_for(&root, now).await?;
             client
-                .initiate_to(&card, &peer_manifest, &vault, &hello, None, now)
+                .initiate_to(&card, &peer_manifest, &vault, &hello, None, now, None)
                 .await?;
         }
         Ok(client)

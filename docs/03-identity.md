@@ -214,6 +214,14 @@ Invite QR codes and invite links carry a 256-bit `invite_secret` in the fragment
 
 A new mutual scan with an existing contact produces a new `psk_bond`. Each device pair session mixes it into its root key at the next DH ratchet step after both sides have processed the "re-root" control message: `RK = KMAC256(RK, psk_bond_new, 256, "enclave/v1/proto/bond-reroot")`. This heals the session through a physical channel even if every KEM has been broken.
 
+### 7.4a Implementation (`client/meet.rs`)
+
+- The code is `enclave:meet#` + base64url(`u8(1) ‖ bytes(ContactCard) ‖ s (32)`), made fresh each time the Meet sheet opens; the secret lives in memory only and is dropped when the sheet closes. The general "Add" field and invite parser refuse it.
+- After scanning, both phones compute `psk_bond = eqxdh::bond_psk(s_A, s_B, Q_A, Q_B)` (ordered by payload) and show `seal_words(psk_bond)`. Nothing is stored until the person taps **They match**; then the bond is kept per contact root and the contact is marked checked.
+- **Re-rooting differs from §7.4**: instead of mixing the PSK into the running ratchet, the side with the lower root key drops its sessions with the other account and starts new EQXDH sessions with `psk = psk_bond` to each of their devices (a greeting with fresh tokens), which the other side takes in place of the old ones. Strangers who meet become contacts this way; the receiving side accepts a bonded greeting without a message request.
+- A greeting with the PSK flag is tried against each stored bond (the responder can't know the sender before opening it). A failed try burns nothing: one-time prekeys are removed only after a handshake succeeds.
+- The header shows "Met in person" for bonded contacts. Not done: the invite-link one-way PSK (§7.3), the Seal animation and haptics, and camera scanning on desktop (the code is pasted).
+
 ### 7.5 Formal model and copy
 
 A Tamarin lemma covers the case "all KEMs broken, the optical exchange not recorded" (`20-assurance.md` §2). Product copy MUST NOT claim this makes messages "unbreakable" or similar.

@@ -122,6 +122,11 @@ struct Engine {
     busy: bool,
     /// The recovery sheet is open: only then do the words leave the vault.
     reveal_words: bool,
+    meet_code: String,
+    meet_words: String,
+    meet_name: String,
+    meet_error: String,
+    meet_done: String,
     out: mpsc::UnboundedSender<Out>,
 }
 
@@ -217,6 +222,7 @@ fn link_error(e: &CoreError) -> String {
         CoreError::Username(U::NotFound | U::Taken) => "Nobody has that username. Check the spelling, or ask them for their invite link.".into(),
         CoreError::Username(U::Unverified) => "Enclave couldn't confirm that this username is genuine, so it didn't add anyone. Ask them for their invite link instead.".into(),
         CoreError::Link(LinkError::DeviceLinkCode) => "This code links a device to your account. Only scan it from Settings → Your devices, on your own new device. No one from Enclave will ever ask you to scan one.".into(),
+        CoreError::Link(LinkError::MeetCode) => "That's an in-person code. It only works in Meet in person, with them next to you.".into(),
         CoreError::Link(LinkError::NotEnclave) => "That isn't an Enclave invite link.".into(),
         CoreError::Link(LinkError::Malformed) => "This link is damaged. Ask them to send it again.".into(),
         CoreError::Link(LinkError::OwnCode) => "That's your own invite link.".into(),
@@ -297,6 +303,11 @@ pub async fn run(
         join_words: String::new(),
         busy: false,
         reveal_words: false,
+        meet_code: String::new(),
+        meet_words: String::new(),
+        meet_name: String::new(),
+        meet_error: String::new(),
+        meet_done: String::new(),
         out,
     };
     // Reopen an existing profile.
@@ -582,6 +593,60 @@ impl Engine {
                 }
             }
             Cmd::RevealWords(on) => self.reveal_words = on,
+            Cmd::Meet(open) => {
+                self.meet_words.clear();
+                self.meet_name.clear();
+                self.meet_error.clear();
+                self.meet_done.clear();
+                self.meet_code.clear();
+                if let Some(c) = self.client.as_mut() {
+                    c.meet_cancel();
+                    if open && let Ok(code) = c.meet_code() {
+                        self.meet_code = code;
+                    }
+                }
+            }
+            Cmd::MeetScan(code) => {
+                self.meet_error.clear();
+                if let Some(c) = self.client.as_mut() {
+                    match c.meet_scan(&code) {
+                        Ok(m) => {
+                            self.meet_words = m.words.join(" ");
+                            self.meet_name = m.name;
+                        }
+                        Err(CoreError::Link(LinkError::OwnCode)) => {
+                            self.meet_error =
+                                "That's your own code. Scan the other person's.".into();
+                        }
+                        Err(_) => {
+                            self.meet_error = "That isn't an in-person code. Ask them to open Meet in person and show theirs.".into();
+                        }
+                    }
+                }
+            }
+            Cmd::MeetConfirm => {
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    match c.meet_confirm().await {
+                        Ok(root) => {
+                            self.meet_done = std::mem::take(&mut self.meet_name);
+                            self.meet_words.clear();
+                            self.meet_code.clear();
+                            self.selected = Some(root);
+                            self.selected_group = None;
+                        }
+                        Err(CoreError::Net(_)) => {
+                            self.meet_error = "Checked, but couldn't reach the server to update your conversation. It will finish when you're back online.".into();
+                        }
+                        Err(_) => {
+                            self.meet_error =
+                                "Something went wrong. Scan each other's codes again.".into()
+                        }
+                    }
+                }
+                self.busy = false;
+            }
             Cmd::CancelJoin => {
                 self.joining = None;
                 self.join_code.clear();
@@ -785,6 +850,11 @@ impl Engine {
             can_join: matches!(self.mode, Mode::Server { .. }),
             join_code: self.join_code.clone(),
             join_words: self.join_words.clone(),
+            meet_code: self.meet_code.clone(),
+            meet_words: self.meet_words.clone(),
+            meet_name: self.meet_name.clone(),
+            meet_error: self.meet_error.clone(),
+            meet_done: self.meet_done.clone(),
             busy: self.busy,
             ..Default::default()
         };
@@ -830,6 +900,7 @@ impl Engine {
                     ContactState::Accepted => 2,
                 },
                 verified: ct.verified,
+                met: c.met_in_person(&ct.root),
                 tint: tint_for(&ct.root),
                 kind: 0,
                 members: 0,
@@ -869,6 +940,7 @@ impl Engine {
                 unread: g.unread as i32,
                 state: 2,
                 verified: false,
+                met: false,
                 tint: tint_for(&g.id),
                 kind: 1,
                 members: g.members.len() as i32 + 1,

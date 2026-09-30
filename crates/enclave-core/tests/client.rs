@@ -849,3 +849,94 @@ async fn recovery_without_a_device_waits_and_can_be_vetoed() {
     let ev = a.sync().await.unwrap();
     assert!(ev.contains(&Event::RemovedFromAccount), "{ev:?}");
 }
+
+/// Meeting in person: both phones show the same Seal words, contacts end up
+/// in sessions keyed with the optical secret and checked in person, and two
+/// strangers who meet become contacts without a request.
+#[tokio::test(flavor = "multi_thread")]
+async fn meeting_in_person() {
+    let net = network();
+    let (mut a, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Cy")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+
+    // Ada and Ben scan each other.
+    let code_a = a.meet_code().unwrap();
+    let code_b = b.meet_code().unwrap();
+    assert_eq!(
+        ContactCard::from_link(&code_a).unwrap_err(),
+        enclave_core::LinkError::MeetCode
+    );
+    assert!(matches!(
+        a.meet_scan(&code_a),
+        Err(CoreError::Link(enclave_core::LinkError::OwnCode))
+    ));
+    let on_a = a.meet_scan(&code_b).unwrap();
+    let on_b = b.meet_scan(&code_a).unwrap();
+    assert_eq!(on_a.words, on_b.words);
+    assert_eq!((on_a.root, on_a.name.as_str()), (b.root(), "Ben"));
+    // A bystander's scan of Ada's code shows different words.
+    c.meet_code().unwrap();
+    assert_ne!(c.meet_scan(&code_a).unwrap().words, on_a.words);
+    c.meet_cancel();
+
+    a.meet_confirm().await.unwrap();
+    b.meet_confirm().await.unwrap();
+    for _ in 0..2 {
+        a.sync().await.unwrap();
+        b.sync().await.unwrap();
+    }
+    assert!(a.met_in_person(&b.root()) && b.met_in_person(&a.root()));
+    assert!(a.contact(&b.root()).unwrap().verified && b.contact(&a.root()).unwrap().verified);
+    a.send_text(&b.root(), "after we met").await.unwrap();
+    assert!(
+        b.sync()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::Message { message, .. } if message.text == "after we met"))
+    );
+    b.send_text(&a.root(), "same here").await.unwrap();
+    assert!(
+        a.sync()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::Message { message, .. } if message.text == "same here"))
+    );
+
+    // Ada and Cy have never talked: meeting makes them contacts, no request.
+    let code_a = a.meet_code().unwrap();
+    let code_c = c.meet_code().unwrap();
+    assert_eq!(
+        a.meet_scan(&code_c).unwrap().words,
+        c.meet_scan(&code_a).unwrap().words
+    );
+    a.meet_confirm().await.unwrap();
+    c.meet_confirm().await.unwrap();
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(a.sync().await.unwrap());
+        events.extend(c.sync().await.unwrap());
+    }
+    assert!(
+        events.iter().all(|e| !matches!(e, Event::Request { .. })),
+        "{events:?}"
+    );
+    for (me, them) in [(&a, c.root()), (&c, a.root())] {
+        let ct = me.contact(&them).unwrap();
+        assert_eq!(ct.state, ContactState::Accepted);
+        assert!(ct.verified && me.met_in_person(&them));
+    }
+    c.send_text(&a.root(), "nice to meet you").await.unwrap();
+    assert!(a.sync().await.unwrap().iter().any(
+        |e| matches!(e, Event::Message { message, .. } if message.text == "nice to meet you")
+    ));
+}

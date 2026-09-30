@@ -439,6 +439,8 @@ impl LinkingDevice {
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             recovery_alert: None,
+            meet: None,
+            pending_bond: None,
         };
         let own = client.card();
         for (card, name, verified, timer, inbox, server, tokens) in contacts {
@@ -467,7 +469,7 @@ impl LinkingDevice {
             client.save_contact(&c)?;
             let hello = client.hello_for(&card.root, now).await?;
             client
-                .initiate_to(&card, &peer_manifest, &vault, &hello, None, now)
+                .initiate_to(&card, &peer_manifest, &vault, &hello, None, now, None)
                 .await?;
         }
         // Our other devices, for self-copies.
@@ -476,7 +478,7 @@ impl LinkingDevice {
         let hello = Content::Tokens(Vec::new()).encode()?;
         let me = client.device.id;
         client
-            .initiate_to(&own, &own_manifest, &own_vault, &hello, Some(me), now)
+            .initiate_to(&own, &own_manifest, &own_vault, &hello, Some(me), now, None)
             .await?;
         Ok(client)
     }

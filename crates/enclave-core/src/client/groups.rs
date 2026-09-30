@@ -692,7 +692,7 @@ impl Client {
         for card in cards {
             match self.contacts.get(&card.root).map(|c| c.state) {
                 None => {
-                    let _ = self.add_contact_with(&card, "", Some(*gid)).await;
+                    let _ = self.add_contact_with(&card, "", Some(*gid), None).await;
                 }
                 Some(ContactState::Request) => {
                     let _ = self.accept_with(&card.root, Some(*gid)).await;

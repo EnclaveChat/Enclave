@@ -37,6 +37,7 @@ fn fixture() -> Snapshot {
         unread,
         state,
         verified,
+        met: verified,
         tint,
         kind: 0,
         members: 0,
@@ -187,6 +188,11 @@ fn fixture() -> Snapshot {
         join_code: String::new(),
         join_words: String::new(),
         recovery_alert: String::new(),
+        meet_code: String::new(),
+        meet_words: String::new(),
+        meet_name: String::new(),
+        meet_error: String::new(),
+        meet_done: String::new(),
     }
 }
 
@@ -200,6 +206,7 @@ fn group_fixture(base: &Snapshot) -> Snapshot {
         unread: 0,
         state: 2,
         verified: false,
+        met: false,
         tint: 5,
         kind: 1,
         members: 4,
@@ -396,6 +403,19 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::None);
         ui.set_current_id("".into());
         shot("19-recovery-alert-phone", phone);
+        let mut meet = data.clone();
+        meet.meet_code = "enclave:meet#AQCDAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4_QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A".into();
+        view::apply(&ui, &meet);
+        ui.set_sheet(Sheet::Meet);
+        shot("20-meet-code-phone", phone);
+        meet.meet_words = "harbor ivory kettle".into();
+        meet.meet_name = "Sam Okafor".into();
+        view::apply(&ui, &meet);
+        shot("20-meet-words-phone", phone);
+        meet.meet_words.clear();
+        meet.meet_done = "Sam Okafor".into();
+        view::apply(&ui, &meet);
+        shot("20-meet-done-phone", phone);
         view::apply(&ui, &data);
         ui.set_sheet(Sheet::Settings);
         ui.set_sheet(Sheet::Recovery);

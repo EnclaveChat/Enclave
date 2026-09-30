@@ -28,6 +28,8 @@ pub struct Row {
     pub state: i32,
     /// Checked.
     pub verified: bool,
+    /// Checked in person (bonded).
+    pub met: bool,
     /// Tint index (below [`TINT_COUNT`]).
     pub tint: usize,
     /// 0 person, 1 group.
@@ -131,6 +133,16 @@ pub struct Snapshot {
     /// When someone else's change to this account takes effect unless it is
     /// stopped ("3 Oct 14:02"), or empty.
     pub recovery_alert: String,
+    /// Our in-person code while the meet sheet is open.
+    pub meet_code: String,
+    /// Seal words after scanning their code.
+    pub meet_words: String,
+    /// Who we scanned.
+    pub meet_name: String,
+    /// Why their code didn't work.
+    pub meet_error: String,
+    /// Name of the person we just met (confirmed), or empty.
+    pub meet_done: String,
 }
 
 /// UI → vault.
@@ -176,6 +188,12 @@ pub enum Cmd {
     StopRecovery,
     /// "It's me": approve the pending change to this account.
     ApproveRecovery,
+    /// The meet sheet opened (make a code) or closed (forget it).
+    Meet(bool),
+    /// Their in-person code.
+    MeetScan(String),
+    /// The Seal words match.
+    MeetConfirm,
     /// Include the recovery words in snapshots (only while the recovery
     /// sheet is open), or stop.
     RevealWords(bool),
@@ -211,6 +229,7 @@ fn put_row(w: &mut Writer, r: &Row) {
         .i32(r.unread)
         .i32(r.state)
         .bool(r.verified)
+        .bool(r.met)
         .u8((r.tint % TINT_COUNT) as u8)
         .i32(r.kind)
         .i32(r.members);
@@ -225,6 +244,7 @@ fn get_row(r: &mut Reader<'_>) -> Result<Row> {
         unread: r.i32()?,
         state: r.i32()?,
         verified: r.bool()?,
+        met: r.bool()?,
         tint: tint(r.u8()?)?,
         kind: r.i32()?,
         members: r.i32()?,
@@ -306,7 +326,12 @@ impl Snapshot {
             .bool(self.can_join)
             .str(&self.join_code)
             .str(&self.join_words)
-            .str(&self.recovery_alert);
+            .str(&self.recovery_alert)
+            .str(&self.meet_code)
+            .str(&self.meet_words)
+            .str(&self.meet_name)
+            .str(&self.meet_error)
+            .str(&self.meet_done);
         w.0
     }
 
@@ -388,6 +413,11 @@ impl Snapshot {
             join_code: r.str()?,
             join_words: r.str()?,
             recovery_alert: r.str()?,
+            meet_code: r.str()?,
+            meet_words: r.str()?,
+            meet_name: r.str()?,
+            meet_error: r.str()?,
+            meet_done: r.str()?,
         };
         r.end()?;
         Ok(s)
@@ -420,6 +450,9 @@ impl Cmd {
             Cmd::SendHistory(s) => w.u8(19).str(s),
             Cmd::StopRecovery => w.u8(20),
             Cmd::ApproveRecovery => w.u8(21),
+            Cmd::Meet(b) => w.u8(22).bool(*b),
+            Cmd::MeetScan(s) => w.u8(23).str(s),
+            Cmd::MeetConfirm => w.u8(24),
         };
         w.0
     }
@@ -449,6 +482,9 @@ impl Cmd {
             19 => Cmd::SendHistory(r.str()?),
             20 => Cmd::StopRecovery,
             21 => Cmd::ApproveRecovery,
+            22 => Cmd::Meet(r.bool()?),
+            23 => Cmd::MeetScan(r.str()?),
+            24 => Cmd::MeetConfirm,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

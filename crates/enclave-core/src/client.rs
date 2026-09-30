@@ -101,12 +101,14 @@ mod groups;
 mod guard;
 mod history;
 mod link;
+mod meet;
 mod messages;
 mod usernames;
 
 pub use groups::{GroupInfo, GroupMessage};
 pub use guard::RecoveryAlert;
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
+pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
 
 /// Something the UI should show.
@@ -217,6 +219,10 @@ pub struct Client {
     pending_history: Vec<crate::files::Attachment>,
     /// A change to our manifest that none of our devices made.
     recovery_alert: Option<guard::RecoveryAlert>,
+    /// Our in-person code while it is on screen: (secret, payload).
+    meet: Option<(zeroize::Zeroizing<[u8; 32]>, Vec<u8>)>,
+    /// Scanned their code; waiting for the person to compare Seal words.
+    pending_bond: Option<(ContactCard, zeroize::Zeroizing<[u8; 32]>)>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -387,6 +393,8 @@ impl Client {
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             recovery_alert: None,
+            meet: None,
+            pending_bond: None,
         };
         Ok((client, words))
     }
@@ -457,6 +465,8 @@ impl Client {
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             recovery_alert: None,
+            meet: None,
+            pending_bond: None,
         })
     }
 
@@ -563,7 +573,7 @@ impl Client {
     /// Add someone from their card and send a first message. Fetches and
     /// verifies their manifest, McEliece vault key and a bundle per device.
     pub async fn add_contact(&mut self, card: &ContactCard, text: &str) -> Result<()> {
-        self.add_contact_with(card, text, None).await
+        self.add_contact_with(card, text, None, None).await
     }
 
     /// Add a contact, optionally as an introduction through a group.
@@ -572,6 +582,7 @@ impl Client {
         card: &ContactCard,
         text: &str,
         group: Option<[u8; 32]>,
+        psk: Option<&[u8; 32]>,
     ) -> Result<()> {
         if card.root == self.account.root_public.0 {
             return Err(LinkError::OwnCode.into());
@@ -604,7 +615,7 @@ impl Client {
             root: card.root,
             name: card.name.clone(),
             state: ContactState::Pending,
-            verified: false,
+            verified: psk.is_some(),
             server,
             request_inbox: card.request_inbox,
             inbox: None,
@@ -624,7 +635,7 @@ impl Client {
             self.new_message(&card.root, hello_id, true, text, 0, now)?;
         }
 
-        self.initiate_to(card, &peer_manifest, &vault, &hello, None, now)
+        self.initiate_to(card, &peer_manifest, &vault, &hello, None, now, psk)
             .await?;
         let _ = server;
         Ok(())
@@ -682,6 +693,7 @@ impl Client {
         hello: &[u8],
         skip: Option<[u8; 16]>,
         now: u64,
+        psk: Option<&[u8; 32]>,
     ) -> Result<()> {
         let server = card.server;
         for dev in peer_manifest.devices.iter().take(MAX_DEVICES) {
@@ -707,7 +719,7 @@ impl Client {
                     bundle: &bundle,
                     vault: Some(vault),
                 };
-                let init = eqxdh::initiate(&local, &peer, Mode::OffTheRecord, None, &mut self.rng)?;
+                let init = eqxdh::initiate(&local, &peer, Mode::OffTheRecord, psk, &mut self.rng)?;
                 let mut session = init.session;
                 let env =
                     envelope::seal_request(&init.message, &mut session, hello, &mut self.rng)?;
@@ -935,7 +947,19 @@ impl Client {
             return Ok(None);
         }
         let mut fetched: Option<Manifest> = None;
+        // A greeting from someone we met in person carries the bond PSK; we
+        // don't know who it is before opening it, so try each bond.
+        let candidates: Vec<Option<zeroize::Zeroizing<[u8; 32]>>> = if msg.psk {
+            self.bonds()?.into_iter().map(Some).collect()
+        } else {
+            vec![None]
+        };
+        if candidates.is_empty() {
+            return Err(ProtoError::Crypto.into());
+        }
+        let mut candidate = 0;
         let resp = loop {
+            let psk = candidates[candidate].clone();
             let (result, wanted) = {
                 let local = Local {
                     account: &self.account,
@@ -952,7 +976,7 @@ impl Client {
                     &local,
                     &mut self.prekeys,
                     &msg,
-                    None,
+                    psk.as_deref(),
                     &mut resolver,
                     &mut self.rng,
                 );
@@ -1011,9 +1035,11 @@ impl Client {
                     }
                     fetched = Some(m);
                 }
+                (Err(_), _) if candidate + 1 < candidates.len() => candidate += 1,
                 (Err(e), _) => return Err(e.into()),
             }
         };
+        let bonded = msg.psk;
         let mut session = resp.session;
         let content = Content::decode(&envelope::open_request(&mut session, env, &mut self.rng)?)?;
         let root = resp.identity.root;
@@ -1118,7 +1144,7 @@ impl Client {
                     group_only: introduced_by.is_some(),
                     timer: 0,
                 };
-                let ev = if introduced_by.is_some() {
+                let ev = if introduced_by.is_some() || bonded {
                     None
                 } else {
                     Some(Event::Request {
@@ -1137,7 +1163,12 @@ impl Client {
         if contact.card.is_none() {
             contact.card = card.clone();
         }
-        let auto_accept = contact.state == ContactState::Request && introduced_by.is_some();
+        if bonded {
+            // We met in person and both confirmed the Seal words.
+            contact.verified = true;
+        }
+        let auto_accept =
+            contact.state == ContactState::Request && (introduced_by.is_some() || bonded);
         self.contacts.insert(root, contact.clone());
         self.save_contact(&contact)?;
         if auto_accept {

@@ -160,6 +160,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let t = tx.clone();
     ui.on_sheet_changed(move |s| {
         let _ = t.send(Cmd::RevealWords(s == Sheet::Recovery));
+        let _ = t.send(Cmd::Meet(s == Sheet::Meet));
+    });
+    let t = tx.clone();
+    ui.on_meet_scan(move |code| {
+        let _ = t.send(Cmd::MeetScan(code.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_meet_confirm(move || {
+        let _ = t.send(Cmd::MeetConfirm);
     });
     let w = ui.as_weak();
     ui.on_copy_text(move |text| {
