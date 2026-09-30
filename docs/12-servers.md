@@ -35,9 +35,9 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 |---|---|
 | `Cover` | Count it; reply `Ok`. |
 | `RegisterTokens` + `CREATE` | If the address exists: `Denied`. Otherwise create the inbox with `owner = credential_hash(token)`, `read = credential_hash(read_credential(token))`, request flag from `REQUEST_INBOX`, sequence numbers starting at 1. |
-| `RegisterTokens` | Inbox must exist (`NotFound`) and `credential_hash(token)` must equal `owner` (`Denied`). The payload must be a multiple of 32 B (`Malformed`); the unspent total must stay ≤ `token_quota` (`Quota`). Insert the hashes. |
+| `RegisterTokens` | Inbox must exist (`NotFound`) and `credential_hash(token)` must equal `owner` (`Denied`). The payload must be a multiple of 32 B (`Malformed`); the unspent total must stay ≤ `token_quota` (`Quota`). Insert the hashes; with `REVOKE` (0x08), remove them instead (cancelled invite links). On a request inbox the hashes are invite capabilities. |
 | `Write` | Inbox must exist and not be a request inbox (`Denied`). Burn `token_hash(token)` or reply `Denied`. Store the envelope under the next sequence number, or `Quota` if the inbox holds `inbox_quota` envelopes. |
-| `WriteRequest` | Inbox must be a request inbox (`Denied`). Verify the PoW (`Pow`). Store; when `request_quota` envelopes are pending, drop the oldest first (FIFO). |
+| `WriteRequest` | Inbox must be a request inbox (`Denied`). With `INVITE` (0x08), burn `token_hash(token)` (an invite capability, `03-identity.md` §9.2) or reply `Denied`; otherwise verify the PoW (`Pow`). Store; when `request_quota` envelopes are pending, drop the oldest first (FIFO). |
 | `Poll` | `credential_hash(token[0..24])` must equal `read` (`Denied`). Return the first envelope with sequence number > `u64(token[24..32])`, with `FOUND`, the sequence number in the reply token, and `MORE` if another follows; or `Ok` with no envelope. |
 | `Ack` | Same credential check. Delete every envelope with sequence number ≤ `u64(token[24..32])`. |
 | `BlobPut` | If the chunk ID exists: `Denied`. Verify the PoW (`Pow`). Store the envelope region under the ID. |

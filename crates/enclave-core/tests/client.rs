@@ -1013,3 +1013,88 @@ async fn meeting_in_person() {
         |e| matches!(e, Event::Message { message, .. } if message.text == "nice to meet you")
     ));
 }
+
+/// Invite links (03 §7.3, §9.2): the link's capabilities stand in for the
+/// proof of work (here a server demands more than any client will do), the
+/// session carries the link's one-way PSK, a used link lets nobody else
+/// in, and cancelled or lapsed links stop working.
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_links() {
+    const STRICT: [u8; 16] = [9; 16];
+    let net = network();
+    net.add_server(enclave_server::Config {
+        id: STRICT,
+        effort_request: 1 << 30,
+        effort_claim: 1,
+        effort_blob: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let (mut host, _) = Client::create(memory(), Arc::new(net.clone()), STRICT, "Hana")
+        .await
+        .unwrap();
+    let (mut a, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+
+    let link = host.create_invite(1).await.unwrap();
+    let card = ContactCard::from_link(&link).unwrap();
+    assert_eq!(card.invite.as_ref().map(|i| i.uses), Some(1));
+    assert_eq!(host.invites().unwrap().len(), 1);
+    a.add_contact(&card, "hello via link").await.unwrap();
+    let ev = host.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { text, .. } if text == "hello via link")),
+        "{ev:?}"
+    );
+    // An invite is not a check in person.
+    assert!(!host.contact(&a.root()).unwrap().verified);
+    assert!(host.invites().unwrap().is_empty(), "used up");
+    host.accept(&a.root()).await.unwrap();
+    a.sync().await.unwrap();
+    a.send_text(&host.root(), "we're talking").await.unwrap();
+    assert!(
+        host.sync().await.unwrap().iter().any(
+            |e| matches!(e, Event::Message { message, .. } if message.text == "we're talking")
+        )
+    );
+
+    // The same link again: its capability is spent.
+    assert!(matches!(
+        b.add_contact(&card, "me too").await,
+        Err(CoreError::Link(enclave_core::LinkError::InviteUsed))
+    ));
+    assert!(b.contact(&host.root()).is_none(), "nothing half-added");
+
+    // A cancelled link, and a lapsed one.
+    let cancelled = ContactCard::from_link(&host.create_invite(2).await.unwrap()).unwrap();
+    host.cancel_invites().await.unwrap();
+    assert!(host.invites().unwrap().is_empty());
+    assert!(matches!(
+        b.add_contact(&cancelled, "").await,
+        Err(CoreError::Link(enclave_core::LinkError::InviteUsed))
+    ));
+    let lapsed = ContactCard::from_link(&host.create_invite(1).await.unwrap()).unwrap();
+    net.advance(8 * 86_400);
+    host.sync().await.unwrap();
+    b.sync().await.unwrap();
+    let r = b.add_contact(&lapsed, "").await;
+    assert!(
+        matches!(r, Err(CoreError::Link(enclave_core::LinkError::InviteUsed))),
+        "{r:?}"
+    );
+
+    // A link for two brings two.
+    let two = ContactCard::from_link(&host.create_invite(2).await.unwrap()).unwrap();
+    b.add_contact(&two, "Ben here").await.unwrap();
+    let ev = host.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { root, .. } if *root == b.root()))
+    );
+    assert_eq!(host.invites().unwrap()[0].used, 1);
+}

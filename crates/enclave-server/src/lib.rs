@@ -25,8 +25,8 @@ use enclave_kt::{KtInfo, KtService, UsernameClaim};
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{
-    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_FOUND, FLAG_GROUP, FLAG_MORE,
-    FLAG_REQUEST_INBOX, Status,
+    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_FOUND, FLAG_GROUP,
+    FLAG_INVITE, FLAG_MORE, FLAG_REQUEST_INBOX, FLAG_REVOKE, Status,
 };
 use enclave_rpc::{ServerKey, ServerSecret};
 use enclave_tokens::{PowProof, token_hash};
@@ -343,6 +343,14 @@ impl Server {
         if p.len() % 32 != 0 {
             return Status::Malformed;
         }
+        if h.flags & FLAG_REVOKE != 0 {
+            for c in p.chunks_exact(32) {
+                let mut t = [0u8; 32];
+                t.copy_from_slice(c);
+                ib.tokens.remove(&t);
+            }
+            return Status::Ok;
+        }
         if ib.tokens.len() + p.len() / 32 > self.cfg.token_quota {
             return Status::Quota;
         }
@@ -420,15 +428,23 @@ impl Server {
     }
 
     fn write_request(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
-        let Some(ib) = self.inboxes.get(&h.mailbox) else {
+        let Some(ib) = self.inboxes.get_mut(&h.mailbox) else {
             return Status::NotFound;
         };
         if !ib.request {
             return Status::Denied;
         }
-        let ctx = api::pow_context_request(&h.mailbox, &sha3_512(env));
-        if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
-            return Status::Pow;
+        if h.flags & FLAG_INVITE != 0 {
+            // An invite capability stands in for the proof of work.
+            if !ib.tokens.remove(&token_hash(&h.token)) {
+                return Status::Denied;
+            }
+            self.stats.tokens_burned += 1;
+        } else {
+            let ctx = api::pow_context_request(&h.mailbox, &sha3_512(env));
+            if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
+                return Status::Pow;
+            }
         }
         let q = self.cfg.request_quota;
         let saved = self.cfg.inbox_quota;

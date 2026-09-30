@@ -78,6 +78,7 @@ fn snapshot() -> Snapshot {
         locked: true,
         unlock_error: "no".into(),
         can_lock: true,
+        invites: 2,
     }
 }
 
@@ -87,6 +88,8 @@ fn cmds() -> Vec<Cmd> {
         Cmd::Unlock("correct horse".into()),
         Cmd::Lock,
         Cmd::SetPassphrase(String::new()),
+        Cmd::NewInvite(1),
+        Cmd::CancelInvites,
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),
@@ -144,6 +147,7 @@ fn round_trips() {
         Out::Effect(Effect::LeftGroup),
         Out::Effect(Effect::PassphraseChanged),
         Out::File("a.txt".into(), vec![1, 2, 3]),
+        Out::Invite("enclave:add#AAAA".into()),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);
     }

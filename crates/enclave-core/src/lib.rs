@@ -25,7 +25,7 @@ pub mod files;
 mod persist;
 mod rpc;
 
-pub use card::{ContactCard, LinkError};
+pub use card::{ContactCard, Invite, LinkError};
 pub use client::{
     Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
     LinkProgress, LinkingDevice, Message, Options, Reaction,

@@ -166,6 +166,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_username_problem(s.username_problem.clone().into());
     ui.set_unlock_error(s.unlock_error.clone().into());
     ui.set_can_lock(s.can_lock);
+    ui.set_invites(s.invites as i32);
     ui.set_members(ModelRc::from(Rc::new(VecModel::from(
         s.members.iter().map(row).collect::<Vec<_>>(),
     ))));

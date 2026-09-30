@@ -266,6 +266,7 @@ fn link_error(e: &CoreError) -> String {
         CoreError::Link(LinkError::NotEnclave) => "That isn't an Enclave invite link.".into(),
         CoreError::Link(LinkError::Malformed) => "This link is damaged. Ask them to send it again.".into(),
         CoreError::Link(LinkError::OwnCode) => "That's your own invite link.".into(),
+        CoreError::Link(LinkError::InviteUsed) => "This invite link was already used, has expired or was cancelled. Ask them for a new one.".into(),
         CoreError::Net(_) => "Couldn't reach their server. Check your connection and try again.".into(),
         _ => "Couldn't add them with this link. Ask them to send a new one.".into(),
     }
@@ -782,6 +783,31 @@ impl Engine {
                 self.busy = false;
             }
             Cmd::SetPassphrase(_) => {}
+            Cmd::NewInvite(uses) => {
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    match c.create_invite(uses).await {
+                        Ok(link) => {
+                            let _ = self.out.send(Out::Invite(link));
+                        }
+                        Err(_) => {
+                            self.status =
+                                "Couldn't make an invite link. Check your connection and try again."
+                                    .into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::CancelInvites => {
+                if let Some(c) = self.client.as_mut() {
+                    self.status = match c.cancel_invites().await {
+                        Ok(()) => "Your unused invite links no longer work.".into(),
+                        Err(_) => "Couldn't cancel your invite links. Check your connection and try again.".into(),
+                    };
+                }
+            }
             Cmd::Search(q) => self.search = q,
             Cmd::AddMembers(id) => {
                 let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();
@@ -1133,6 +1159,7 @@ impl Engine {
                 .collect();
         }
         s.my_link = c.card().to_link();
+        s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.recovery_alert = c
             .recovery_alert()

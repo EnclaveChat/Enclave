@@ -60,6 +60,7 @@ signature    = CompositeSign(device_sk, ctx = "enclave/v1/ctx/last-resort", sign
 - `PrekeyStore::publish` generates a signed prekey, a batch of 100 one-time prekeys and a last-resort prekey, keeps their secrets, and returns the `Publication` (202,527 B encoded). The signed-prekey ID, batch ID and last-resort ID are consecutive values of one per-store counter.
 - The directory serves a **bundle** per claim: the signed prekey, the next unserved one-time prekey with its batch header (if any remain), and the last-resort prekey (`Bundle`, 19,376 B with a one-time prekey, 12,731 B without).
 - `Bundle::verify(device_key, now)` checks every signature, both expiries, the Merkle path, and that all parts name the same device. The initiator MUST verify the bundle against the device key in Bob's verified manifest before `initiate`; `initiate` itself does not.
+- The client republishes (`maintain_prekeys`, on every sync) when one-time prekeys run low **or** the signed or last-resort prekey is within 2 days of expiry. Before this rule counted the last-resort key (7 days), a quiet account's bundle stopped verifying after a week and nobody new could reach it; the invite-link test found it by advancing the clock 8 days.
 - `PrekeyStore::prune(now, grace)` deletes signed and last-resort prekeys more than `grace` seconds past expiry. A one-time prekey secret is deleted when a handshake that used it succeeds.
 
 ### 2.5 Prekey selection

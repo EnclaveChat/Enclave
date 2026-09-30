@@ -256,6 +256,36 @@ impl Rpc {
         Err(CoreError::Server(Status::Pow))
     }
 
+    /// Write to a request inbox with invite capabilities instead of a proof
+    /// of work: try `caps[*next..]` in order (other people may have used
+    /// some), leaving `*next` after the one that worked.
+    pub async fn write_invited(
+        &mut self,
+        server: &ServerId,
+        inbox: [u8; 32],
+        env: &[u8],
+        caps: &[[u8; 32]],
+        next: &mut usize,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        while let Some(cap) = caps.get(*next) {
+            *next += 1;
+            let h = RequestHeader {
+                op: Op::WriteRequest,
+                flags: api::FLAG_INVITE,
+                mailbox: inbox,
+                token: *cap,
+            };
+            match self.call(server, h, env, now, rng).await?.status {
+                Status::Ok => return Ok(()),
+                Status::Denied => continue,
+                s => return Err(CoreError::Server(s)),
+            }
+        }
+        Err(crate::LinkError::InviteUsed.into())
+    }
+
     /// Fetch everything in `mailbox` after `cursor`. Returns the envelopes with
     /// the cursor after each one.
     pub async fn poll(

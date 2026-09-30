@@ -209,6 +209,7 @@ fn fixture() -> Snapshot {
         locked: false,
         unlock_error: String::new(),
         can_lock: true,
+        invites: 1,
     }
 }
 

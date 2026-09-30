@@ -81,6 +81,8 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/prekey/merkle` | HASH | 256 | `bundle.rs` `merkle_leaf`, `merkle_node`, `merkle_empty` | One-time-prekey Merkle tree. The label follows a type byte (0 leaf, 1 node, 2 empty leaf), so the three input sets are disjoint. |
 | `enclave/v1/bond/psk` | KMAC | 256 | `eqxdh.rs` `bond_psk` | In-person bond PSK |
 | `enclave/v1/bond/seal-words` | KMAC | 256 (48 bits used) | `eqxdh.rs` `seal_words` | Three Seal words after an in-person scan |
+| `enclave/v1/invite/psk` | KMAC | 256 | `eqxdh.rs` `invite_psk` | One-way PSK from an invite link's secret (03 §7.3) |
+| `enclave/v1/invite/cap` | KMAC | 256 | `eqxdh.rs` `invite_cap` | The i-th request-inbox capability of an invite link (03 §9.2) |
 
 ### 2.3 Sealed requests and server API (`enclave-rpc`)
 

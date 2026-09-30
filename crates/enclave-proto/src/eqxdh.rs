@@ -723,6 +723,22 @@ pub fn bond_psk(s_a: &[u8; 32], s_b: &[u8; 32], qr_a: &[u8], qr_b: &[u8]) -> Zer
     Zeroizing::new(enclave_crypto::kmac::kmac256(&key, &th, labels::BOND))
 }
 
+/// The one-way PSK an invite link's secret gives (`docs/03-identity.md`
+/// §7.3). Weaker than a bond: the link may have been copied on its way.
+pub fn invite_psk(secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(enclave_crypto::kmac::kmac256(
+        secret,
+        b"psk",
+        labels::INVITE_PSK,
+    ))
+}
+
+/// The `i`-th request-inbox capability of an invite link (§9.2): the
+/// server holds only its token hash and burns it on use.
+pub fn invite_cap(secret: &[u8; 32], i: u32) -> [u8; 32] {
+    enclave_crypto::kmac::kmac256(secret, &i.to_be_bytes(), labels::INVITE_CAP)
+}
+
 /// Three "Seal" words both phones show after an in-person scan, from the BIP-39
 /// list, so people can confirm they scanned each other and not a bystander.
 pub fn seal_words(psk: &[u8; 32]) -> Result<[String; 3]> {

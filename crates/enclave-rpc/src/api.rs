@@ -59,6 +59,14 @@ pub const FLAG_REQUEST_INBOX: u8 = 0x02;
 /// present the same token, and it is not burned.
 pub const FLAG_GROUP: u8 = 0x04;
 
+/// Request flag on `WriteRequest`: the token is an invite capability whose
+/// hash the inbox owner registered (`docs/03-identity.md` §9.2), burned on
+/// use, instead of a proof of work.
+pub const FLAG_INVITE: u8 = 0x08;
+/// Request flag on `RegisterTokens`: remove the listed hashes (cancelling
+/// invite capabilities) instead of adding them.
+pub const FLAG_REVOKE: u8 = 0x08;
+
 /// Maximum payload bytes in one envelope.
 pub const MAX_PAYLOAD: usize = ENVELOPE_LEN - 4;
 /// Data bytes per directory chunk.

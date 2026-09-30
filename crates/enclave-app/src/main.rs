@@ -82,12 +82,21 @@ fn main() -> Result<(), slint::PlatformError> {
                         let _ = w.upgrade_in_event_loop(move |ui| ui.set_file_note(note.into()));
                         continue;
                     }
+                    Out::Invite(link) => {
+                        copy_with_timeout(link);
+                        let _ = w.upgrade_in_event_loop(|ui| {
+                            ui.set_status_line(
+                                "Invite link copied. It works for one person, for 7 days, and is cleared from the clipboard after 60 seconds.".into(),
+                            )
+                        });
+                        continue;
+                    }
                     other => other,
                 };
                 let _ = w.upgrade_in_event_loop(move |ui| match o {
                     Out::Snapshot(s) => view::apply(&ui, &s),
                     Out::Effect(e) => view::apply_effect(&ui, e),
-                    Out::File(..) => {}
+                    Out::File(..) | Out::Invite(_) => {}
                 });
             }
         })
@@ -133,6 +142,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let t = tx.clone();
     ui.on_set_passphrase(move |p| {
         let _ = t.send(Cmd::SetPassphrase(p.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_new_invite(move || {
+        let _ = t.send(Cmd::NewInvite(1));
+    });
+    let t = tx.clone();
+    ui.on_cancel_invites(move || {
+        let _ = t.send(Cmd::CancelInvites);
     });
     let t = tx.clone();
     ui.on_select(move |id| {

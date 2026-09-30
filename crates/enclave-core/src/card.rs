@@ -14,6 +14,10 @@ pub const LINK_PREFIX: &str = "enclave:link#";
 /// Maximum display-name length in bytes.
 pub const MAX_NAME: usize = 64;
 const CARD_VERSION: u8 = 1;
+/// A card with an invite (§9.2): version 1 fields, then the invite.
+const CARD_VERSION_INVITE: u8 = 2;
+/// Most people one invite link can bring.
+pub const MAX_INVITE_USES: u8 = 20;
 
 /// Why a link could not be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +31,9 @@ pub enum LinkError {
     /// An in-person code used where an invite was expected.
     #[error("this is an in-person code; open Meet in person to use it")]
     MeetCode,
+    /// An invite link that was already used up, expired or cancelled.
+    #[error("this invite link was already used or has been cancelled")]
+    InviteUsed,
     /// The person scanned their own code.
     #[error("this is your own code")]
     OwnCode,
@@ -51,19 +58,39 @@ pub struct ContactCard {
     pub vault_key: [u8; 32],
     /// Display name the owner chose (unverified; shown as a suggestion).
     pub name: String,
+    /// Present in invite links, absent from the plain QR code.
+    pub invite: Option<Invite>,
+}
+
+/// The secret part of an invite link (`docs/03-identity.md` §7.3, §9.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invite {
+    /// 256-bit secret: the one-way PSK and the request-inbox capabilities
+    /// derive from it.
+    pub secret: [u8; 32],
+    /// How many people it can bring (1 to [`MAX_INVITE_USES`]).
+    pub uses: u8,
 }
 
 impl ContactCard {
     /// Binary form.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(CARD_VERSION)
+        let version = if self.invite.is_some() {
+            CARD_VERSION_INVITE
+        } else {
+            CARD_VERSION
+        };
+        w.u8(version)
             .fixed(&self.root)
             .fixed(&self.server)
             .fixed(&self.request_inbox)
             .fixed(&self.vault_locator)
             .fixed(&self.vault_key)
             .bytes(self.name.as_bytes());
+        if let Some(i) = &self.invite {
+            w.fixed(&i.secret).u8(i.uses);
+        }
         w.finish()
     }
 
@@ -71,10 +98,11 @@ impl ContactCard {
     pub fn decode(b: &[u8]) -> Result<Self, LinkError> {
         let mut r = Reader::new(b);
         let m = |_| LinkError::Malformed;
-        if r.u8().map_err(m)? != CARD_VERSION {
+        let version = r.u8().map_err(m)?;
+        if version != CARD_VERSION && version != CARD_VERSION_INVITE {
             return Err(LinkError::Malformed);
         }
-        let card = Self {
+        let mut card = Self {
             root: r.array().map_err(m)?,
             server: r.array().map_err(m)?,
             request_inbox: r.array().map_err(m)?,
@@ -82,7 +110,16 @@ impl ContactCard {
             vault_key: r.array().map_err(m)?,
             name: String::from_utf8(r.bytes(MAX_NAME).map_err(m)?.to_vec())
                 .map_err(|_| LinkError::Malformed)?,
+            invite: None,
         };
+        if version == CARD_VERSION_INVITE {
+            let secret = r.array().map_err(m)?;
+            let uses = r.u8().map_err(m)?;
+            if uses == 0 || uses > MAX_INVITE_USES {
+                return Err(LinkError::Malformed);
+            }
+            card.invite = Some(Invite { secret, uses });
+        }
         r.end().map_err(m)?;
         Ok(card)
     }
@@ -185,6 +222,7 @@ mod tests {
             vault_locator: [4; 32],
             vault_key: [5; 32],
             name: "Sam".into(),
+            invite: None,
         };
         let link = card.to_link();
         assert!(link.starts_with("enclave:add#"));
@@ -197,6 +235,21 @@ mod tests {
             ContactCard::from_link("https://example.com"),
             Err(LinkError::NotEnclave)
         );
+        let invited = ContactCard {
+            invite: Some(Invite {
+                secret: [6; 32],
+                uses: 3,
+            }),
+            ..card.clone()
+        };
+        let link2 = invited.to_link();
+        assert!(link2.len() > link.len());
+        assert_eq!(ContactCard::from_link(&link2).unwrap(), invited);
+        for uses in [0, MAX_INVITE_USES + 1] {
+            let mut b = invited.encode();
+            *b.last_mut().unwrap() = uses;
+            assert_eq!(ContactCard::decode(&b), Err(LinkError::Malformed));
+        }
         let mut bad = link.clone();
         bad.push('A');
         assert!(ContactCard::from_link(&bad).is_err());

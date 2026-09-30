@@ -100,6 +100,7 @@ mod devices;
 mod groups;
 mod guard;
 mod history;
+mod invites;
 mod link;
 mod meet;
 mod messages;
@@ -519,6 +520,7 @@ impl Client {
             vault_locator: self.profile.vault_locator,
             vault_key: self.profile.vault_key,
             name: self.profile.name.clone(),
+            invite: None,
         }
     }
 
@@ -617,6 +619,10 @@ impl Client {
         let now = self.now();
         let server = card.server;
         let (peer_manifest, vault) = self.fetch_peer(card, now).await?;
+        // An invite link's secret is a one-way PSK (weaker than meeting in
+        // person, so it doesn't mark them checked).
+        let invite_psk = card.invite.as_ref().map(|i| eqxdh::invite_psk(&i.secret));
+        let session_psk = psk.or(invite_psk.as_deref());
 
         let tokens = self.issue_tokens(&card.root, HELLO_TOKENS, now).await?;
         let hello_id: crate::content::MsgId = self.rng.array("core/msg-id")?;
@@ -646,7 +652,11 @@ impl Client {
             received_since_refill: 0,
             unread: 0,
             added_at: now,
-            card: Some(card.clone()),
+            // The invite is spent on this greeting; never keep it.
+            card: Some(ContactCard {
+                invite: None,
+                ..card.clone()
+            }),
             group_only: group.is_some(),
             timer: 0,
         };
@@ -656,10 +666,15 @@ impl Client {
             self.new_message(&card.root, hello_id, true, text, 0, now)?;
         }
 
-        self.initiate_to(card, &peer_manifest, &vault, &hello, None, now, psk)
-            .await?;
+        let r = self
+            .initiate_to(card, &peer_manifest, &vault, &hello, None, now, session_psk)
+            .await;
+        if let Err(CoreError::Link(LinkError::InviteUsed)) = r {
+            // Nothing reached them: forget the half-added contact.
+            self.remove_contact(&card.root)?;
+        }
         let _ = server;
-        Ok(())
+        r
     }
 
     /// Fetch and verify a contact's manifest and McEliece vault key.
@@ -717,6 +732,18 @@ impl Client {
         psk: Option<&[u8; 32]>,
     ) -> Result<()> {
         let server = card.server;
+        // Invite links carry request-inbox capabilities in place of a proof
+        // of work: one per device of the person joining, per use.
+        let caps: Vec<[u8; 32]> = card
+            .invite
+            .as_ref()
+            .map(|i| {
+                (0..u32::from(i.uses) * invites::CAPS_PER_USE)
+                    .map(|n| eqxdh::invite_cap(&i.secret, n))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut next_cap = 0;
         for dev in peer_manifest.devices.iter().take(MAX_DEVICES) {
             if Some(dev.id) == skip || self.sessions.contains_key(&(card.root, dev.id)) {
                 continue;
@@ -749,9 +776,23 @@ impl Client {
             // Persist before the envelope leaves.
             self.save_session(&card.root, &dev.id, &session)?;
             self.sessions.insert((card.root, dev.id), session);
-            self.rpc
-                .write_request(&server, card.request_inbox, &env, now, &mut self.rng)
-                .await?;
+            if caps.is_empty() {
+                self.rpc
+                    .write_request(&server, card.request_inbox, &env, now, &mut self.rng)
+                    .await?;
+            } else {
+                self.rpc
+                    .write_invited(
+                        &server,
+                        card.request_inbox,
+                        &env,
+                        &caps,
+                        &mut next_cap,
+                        now,
+                        &mut self.rng,
+                    )
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -948,6 +989,7 @@ impl Client {
         }
 
         self.purge_expired(now)?;
+        self.expire_invites(now).await?;
         let mut group_events = self.sync_groups(now).await?;
         events.append(&mut group_events);
 
@@ -969,19 +1011,31 @@ impl Client {
             return Ok(None);
         }
         let mut fetched: Option<Manifest> = None;
-        // A greeting from someone we met in person carries the bond PSK; we
-        // don't know who it is before opening it, so try each bond.
-        let candidates: Vec<Option<zeroize::Zeroizing<[u8; 32]>>> = if msg.psk {
-            self.bonds()?.into_iter().map(Some).collect()
+        // A greeting from someone we met in person carries the bond PSK,
+        // and one through an invite link carries that link's PSK; we don't
+        // know who it is before opening it, so try each.
+        #[derive(Clone, Copy)]
+        enum Via {
+            Plain,
+            Bond,
+            Invite([u8; 32]),
+        }
+        let candidates: Vec<(Via, Option<zeroize::Zeroizing<[u8; 32]>>)> = if msg.psk {
+            let bonds = self.bonds()?.into_iter().map(|p| (Via::Bond, Some(p)));
+            let invites = self
+                .invite_psks()?
+                .into_iter()
+                .map(|(k, p)| (Via::Invite(k), Some(p)));
+            bonds.chain(invites).collect()
         } else {
-            vec![None]
+            vec![(Via::Plain, None)]
         };
         if candidates.is_empty() {
             return Err(ProtoError::Crypto.into());
         }
         let mut candidate = 0;
         let resp = loop {
-            let psk = candidates[candidate].clone();
+            let psk = candidates[candidate].1.clone();
             let (result, wanted) = {
                 let local = Local {
                     account: &self.account,
@@ -1061,10 +1115,20 @@ impl Client {
                 (Err(e), _) => return Err(e.into()),
             }
         };
-        let bonded = msg.psk;
+        let via = candidates[candidate].0;
+        let bonded = matches!(via, Via::Bond);
         let mut session = resp.session;
         let content = Content::decode(&envelope::open_request(&mut session, env, &mut self.rng)?)?;
         let root = resp.identity.root;
+        if let Via::Invite(key) = via
+            && root != self.account.root_public.0
+            && !self.use_invite(&key, &root).await?
+        {
+            // The link already brought everyone it could.
+            self.store
+                .put(NS_REPLAY, &rid, &now.to_be_bytes(), &mut self.rng)?;
+            return Ok(None);
+        }
         if root == self.account.root_public.0 {
             // Another device of ours (it is in our root-signed manifest, or
             // `respond` would have failed): keep the session for self-copies.
@@ -1413,7 +1477,19 @@ impl Client {
             .map(|(_, exp)| *exp)
             .max()
             .unwrap_or(0);
-        if self.prekeys.one_time.len() >= OPK_LOW_WATER && latest > now + 2 * 86_400 {
+        // The last-resort key lives 7 days, the signed prekey 14: republish
+        // before either lapses, or nobody new can reach us.
+        let last_resort = self
+            .prekeys
+            .last_resort
+            .values()
+            .map(|(_, exp)| *exp)
+            .max()
+            .unwrap_or(0);
+        if self.prekeys.one_time.len() >= OPK_LOW_WATER
+            && latest > now + 2 * 86_400
+            && last_resort > now + 2 * 86_400
+        {
             return Ok(());
         }
         let publication = self.prekeys.publish(&self.device, now, &mut self.rng)?;

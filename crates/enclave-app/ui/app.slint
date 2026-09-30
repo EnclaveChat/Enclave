@@ -345,6 +345,9 @@ export component AppWindow inherits Window {
     callback unlock(string);
     callback lock-now();
     callback set-passphrase(string);
+    callback new-invite();
+    callback cancel-invites();
+    in property <int> invites;
     in property <string> unlock-error;
     in property <bool> can-lock;
     in-out property <string> passphrase-input;
@@ -942,7 +945,7 @@ export component AppWindow inherits Window {
     if root.sheet == Sheet.my-code: SheetFrame {
         title: "Your code";
         close => { root.sheet = Sheet.none; }
-        Secondary { text: "Let someone scan this, or send them your invite link. They can then send you a message request."; }
+        Secondary { text: "Let someone next to you scan this. For someone who isn't here, copy an invite link: each one works for one person, for 7 days. Either way, they can then send you a message request."; }
         HorizontalLayout {
             alignment: center;
             Rectangle {
@@ -956,16 +959,9 @@ export component AppWindow inherits Window {
                     source: root.my-qr;
                     image-rendering: pixelated;
                     accessible-role: image;
-                    accessible-label: "QR code of your invite link";
+                    accessible-label: "QR code of your contact code";
                 }
             }
-        }
-        Text {
-            text: root.my-link;
-            font-family: "Atkinson Hyperlegible Mono";
-            font-size: Tokens.type-caption;
-            color: Tokens.text-muted;
-            overflow: elide;
         }
         if root.my-username != "": HorizontalLayout {
             spacing: Tokens.space-s;
@@ -982,8 +978,17 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             alignment: start;
             spacing: Tokens.space-s;
-            PrimaryButton { text: "Copy invite link"; clicked => { root.copy-text(root.my-link); } }
+            PrimaryButton { text: "Copy invite link"; enabled: !root.busy; clicked => { root.new-invite(); } }
             if root.my-username != "": QuietButton { text: "Copy username"; clicked => { root.copy-text(root.my-username); } }
+        }
+        if root.invites > 0: HorizontalLayout {
+            spacing: Tokens.space-s;
+            Caption {
+                text: root.invites == 1 ? "1 invite link hasn't been used yet." : root.invites + " invite links haven't been used yet.";
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            QuietButton { text: "Cancel them"; horizontal-stretch: 0; clicked => { root.cancel-invites(); } }
         }
     }
 

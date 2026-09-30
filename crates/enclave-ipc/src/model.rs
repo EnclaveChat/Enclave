@@ -171,6 +171,8 @@ pub struct Snapshot {
     pub unlock_error: String,
     /// The profile has a passphrase, so it can be locked.
     pub can_lock: bool,
+    /// Invite links that still work.
+    pub invites: u32,
 }
 
 /// UI → vault.
@@ -251,6 +253,11 @@ pub enum Cmd {
     Lock,
     /// Set or change the passphrase (empty removes it).
     SetPassphrase(String),
+    /// Make an invite link for this many people; it comes back as
+    /// [`Out::Invite`].
+    NewInvite(u8),
+    /// Cancel every invite link.
+    CancelInvites,
 }
 
 /// One-off UI resets after a request succeeded.
@@ -281,6 +288,8 @@ pub enum Out {
     Effect(Effect),
     /// A downloaded attachment for the UI to save: name, bytes.
     File(String, Vec<u8>),
+    /// A new invite link, for the UI to copy.
+    Invite(String),
 }
 
 fn put_row(w: &mut Writer, r: &Row) {
@@ -412,7 +421,8 @@ impl Snapshot {
         }
         w.bool(self.locked)
             .str(&self.unlock_error)
-            .bool(self.can_lock);
+            .bool(self.can_lock)
+            .u32(self.invites);
         w.0
     }
 
@@ -524,6 +534,7 @@ impl Snapshot {
             locked: r.bool()?,
             unlock_error: r.str()?,
             can_lock: r.bool()?,
+            invites: r.u32()?,
         };
         r.end()?;
         Ok(s)
@@ -572,6 +583,8 @@ impl Cmd {
             Cmd::Unlock(p) => w.u8(35).str(p),
             Cmd::Lock => w.u8(36),
             Cmd::SetPassphrase(p) => w.u8(37).str(p),
+            Cmd::NewInvite(n) => w.u8(38).u8(*n),
+            Cmd::CancelInvites => w.u8(39),
         };
         w.0
     }
@@ -617,6 +630,8 @@ impl Cmd {
             35 => Cmd::Unlock(r.str()?),
             36 => Cmd::Lock,
             37 => Cmd::SetPassphrase(r.str()?),
+            38 => Cmd::NewInvite(r.u8()?),
+            39 => Cmd::CancelInvites,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -632,6 +647,11 @@ impl Out {
             Out::File(name, bytes) => {
                 let mut w = Writer::default();
                 w.u8(3).str(name).bytes(bytes);
+                w.0
+            }
+            Out::Invite(link) => {
+                let mut w = Writer::default();
+                w.u8(4).str(link);
                 w.0
             }
             Out::Effect(e) => vec![
@@ -666,6 +686,12 @@ impl Out {
             [3, ..] => {
                 let mut r = Reader(&b[1..]);
                 let o = Out::File(r.str()?, r.bytes()?);
+                r.end()?;
+                Ok(o)
+            }
+            [4, ..] => {
+                let mut r = Reader(&b[1..]);
+                let o = Out::Invite(r.str()?);
                 r.end()?;
                 Ok(o)
             }

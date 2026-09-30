@@ -47,6 +47,10 @@ pub const MERKLE: &str = "enclave/v1/prekey/merkle";
 pub const BOND: &str = "enclave/v1/bond/psk";
 /// Seal words shown after an in-person scan.
 pub const BOND_SEAL_WORDS: &str = "enclave/v1/bond/seal-words";
+/// One-way PSK from an invite link's secret.
+pub const INVITE_PSK: &str = "enclave/v1/invite/psk";
+/// Request-inbox capabilities from an invite link's secret.
+pub const INVITE_CAP: &str = "enclave/v1/invite/cap";
 
 /// All labels in this crate, for uniqueness checks.
 pub const ALL: &[&str] = &[
@@ -71,6 +75,8 @@ pub const ALL: &[&str] = &[
     MERKLE,
     BOND,
     BOND_SEAL_WORDS,
+    INVITE_PSK,
+    INVITE_CAP,
 ];
 
 /// Group: exporter key from a pairwise session.

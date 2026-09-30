@@ -37,6 +37,10 @@ fn samples() -> Vec<Vec<u8>> {
         vault_locator: [9; 32],
         vault_key: [10; 32],
         name: "Sam".into(),
+        invite: Some(enclave_core::Invite {
+            secret: [11; 32],
+            uses: 2,
+        }),
     };
     out.push(card.encode());
     out.push(card.to_link().into_bytes());

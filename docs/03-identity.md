@@ -210,6 +210,8 @@ Both screens show three Seal words from `psk_bond` (`02b-key-schedule.md` §4.2)
 
 Invite QR codes and invite links carry a 256-bit `invite_secret` in the fragment. It becomes a one-way PSK (`psk_flag = 0x02`). It is weaker than the bond PSK because the link may have been copied.
 
+**As implemented** (`client/invites.rs`): the PSK is `invite_psk = KMAC256(invite_secret, "psk", 256, "enclave/v1/invite/psk")`. The combiner's `psk_flag` is still 1 (the same flag as a bond); bond and invite PSKs are kept apart by their derivation labels rather than by the flag, and the initial message's PSK bit says only "some PSK". The responder tries its bonds, then every invite link that hasn't lapsed. An invite PSK never marks a contact checked, and such a greeting still lands in Message requests.
+
 ### 7.4 Meeting again
 
 A new mutual scan with an existing contact produces a new `psk_bond`. Each device pair session mixes it into its root key at the next DH ratchet step after both sides have processed the "re-root" control message: `RK = KMAC256(RK, psk_bond_new, 256, "enclave/v1/proto/bond-reroot")`. This heals the session through a physical channel even if every KEM has been broken.
@@ -220,7 +222,7 @@ A new mutual scan with an existing contact produces a new `psk_bond`. Each devic
 - After scanning, both phones compute `psk_bond = eqxdh::bond_psk(s_A, s_B, Q_A, Q_B)` (ordered by payload) and show `seal_words(psk_bond)`. Nothing is stored until the person taps **They match**; then the bond is kept per contact root and the contact is marked checked.
 - **Re-rooting differs from §7.4**: instead of mixing the PSK into the running ratchet, the side with the lower root key drops its sessions with the other account and starts new EQXDH sessions with `psk = psk_bond` to each of their devices (a greeting with fresh tokens), which the other side takes in place of the old ones. Strangers who meet become contacts this way; the receiving side accepts a bonded greeting without a message request.
 - A greeting with the PSK flag is tried against each stored bond (the responder can't know the sender before opening it). A failed try burns nothing: one-time prekeys are removed only after a handshake succeeds.
-- The header shows "Met in person" for bonded contacts. Not done: the invite-link one-way PSK (§7.3), the Seal animation and haptics, and camera scanning on desktop (the code is pasted).
+- The header shows "Met in person" for bonded contacts. Not done: the Seal animation and haptics, and camera scanning on desktop (the code is pasted).
 
 ### 7.5 Formal model and copy
 
@@ -310,6 +312,15 @@ URI scheme `enclave:` followed by `c/` and base32 of:
 - are limited-use (default 1 use for contacts) and expire (default 7 days);
 - can be revoked from Settings → Invite links, which deletes the `cap_hash` registration at the request inbox;
 - deliver the first message to the recipient's request inbox, authorized by `invite_cap`, where it waits as a message request.
+
+**As implemented** (`card.rs`, `client/invites.rs`, server `write_request`):
+
+- The link is the contact link (`enclave:add#`, §9.1 as implemented) with card version 2: the version-1 fields, then `invite_secret (32) ‖ uses (u8, 1–20)`. The plain QR code stays version 1 with no secret. The `https://<invite-host>/` wrapper is not built yet (Open question 1).
+- **Capabilities**: `invite_cap_i = KMAC256(invite_secret, u32(i), 256, "enclave/v1/invite/cap")` for `i < uses × 5` (one per device of each person joining; a greeting goes to each of the host's devices). The host registers `token_hash(invite_cap_i)` on its request inbox (`RegisterTokens`), and a writer sets `FLAG_INVITE` on `WriteRequest` with a capability as the token instead of a proof of work. The server burns it on use. The writer tries the capabilities in order, skipping ones others have spent; if none is left it gets `InviteUsed` ("This invite link was already used, has expired or was cancelled") and nothing is kept.
+- **Limits**: the host counts the distinct accounts each link opened; once it has brought `uses` people it cancels the remaining capabilities (`RegisterTokens` with `FLAG_REVOKE`), and later greetings with its PSK from anyone else are dropped. More devices of someone it already brought are fine. Links lapse after 7 days (cancelled at the next sync). "Cancel them" cancels every unused link.
+- A contact never keeps the invite: the card stored for them has it stripped, so later greetings (new devices, restores) use the proof of work as before.
+- **App**: "Copy invite link" makes a new single-use link each time and copies it (cleared from the clipboard after 60 s); the code sheet shows how many links are unused, with "Cancel them".
+- Not done: group invite links (07 §7), admin approval of joins, and choosing more than one use in the app.
 
 ### 9.3 Usernames
 
