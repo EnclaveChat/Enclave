@@ -44,3 +44,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  repro:
+    name: reproducible builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+      - name: Two clean builds of each binary must be byte-identical
+        run: |
+          cargo xtask repro enclave-relay
+          cargo xtask repro enclave-server

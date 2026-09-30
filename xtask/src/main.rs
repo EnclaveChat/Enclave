@@ -2,6 +2,10 @@
 //!
 //! * `labels`: every `enclave/v1/...` string literal in `crates/` is listed in
 //!   `docs/label-registry.md`, and no label is defined twice in code.
+//! * `repro [package] [bin]`: build a release binary twice, from scratch, in
+//!   two target directories, and check the two are byte-identical
+//!   (`docs/19-ops.md`, reproducible builds). Default: `enclave-relay`.
+//! * `dudect`: run the constant-time timing tests (slow; not in `cargo test`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -12,10 +16,98 @@ fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "labels" => labels(),
+        "repro" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let pkg = args.first().map_or("enclave-relay", String::as_str);
+            let bin = args.get(1).map_or(pkg, String::as_str);
+            repro(pkg, bin)
+        }
+        "dudect" => dudect(),
         _ => {
-            eprintln!("usage: cargo xtask labels");
+            eprintln!("usage: cargo xtask labels | repro [package] [bin] | dudect");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Build `bin` of `pkg` twice in separate target directories and compare.
+fn repro(pkg: &str, bin: &str) -> ExitCode {
+    let root = root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.cargo"))
+            .unwrap_or_default()
+    });
+    let mut hashes = Vec::new();
+    for side in ["a", "b"] {
+        let dir = root.join("target").join(format!("repro-{side}"));
+        let _ = fs::remove_dir_all(&dir);
+        // Every path the compiler might embed maps to the same name on both
+        // sides: the target directory first (it lies under the source root).
+        let flags = format!(
+            "--remap-path-prefix={}=/target --remap-path-prefix={}=/src --remap-path-prefix={}=/cargo",
+            dir.display(),
+            root.display(),
+            cargo_home
+        );
+        eprintln!("repro: building {pkg}/{bin} in {}", dir.display());
+        let status = std::process::Command::new(&cargo)
+            .current_dir(&root)
+            .args(["build", "--release", "--locked", "-p", pkg, "--bin", bin])
+            .env("CARGO_TARGET_DIR", &dir)
+            .env("RUSTFLAGS", &flags)
+            .env("CARGO_INCREMENTAL", "0")
+            .env("SOURCE_DATE_EPOCH", "1700000000")
+            .status();
+        if !status.is_ok_and(|s| s.success()) {
+            eprintln!("repro: build failed");
+            return ExitCode::FAILURE;
+        }
+        let exe = dir
+            .join("release")
+            .join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+        let Ok(bytes) = fs::read(&exe) else {
+            eprintln!("repro: {} missing", exe.display());
+            return ExitCode::FAILURE;
+        };
+        let h = enclave_crypto::hash::sha3_512(&bytes);
+        let hex: String = h[..16].iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("repro: {side}: {} bytes, sha3-512 {hex}…", bytes.len());
+        hashes.push(h);
+    }
+    if hashes[0] == hashes[1] {
+        eprintln!("repro ok: {bin} is byte-identical across two clean builds");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("repro FAILED: the two builds differ");
+        ExitCode::FAILURE
+    }
+}
+
+/// The timing tests live in `enclave-crypto/tests/dudect.rs` (ignored by
+/// default: they take minutes and need a quiet machine).
+fn dudect() -> ExitCode {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .current_dir(root())
+        .args([
+            "test",
+            "--release",
+            "-p",
+            "enclave-crypto",
+            "--test",
+            "dudect",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .status();
+    if status.is_ok_and(|s| s.success()) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

@@ -55,6 +55,20 @@ One test per red-team row (`redteam-matrix.md`), including: KT split view detect
 
 dudect and ctgrind on MAC compare, ML-KEM and McEliece decapsulation, token verification, and Ed448. The DIT bit is confirmed set during crypto calls on AArch64.
 
+**Implemented so far** (`crates/enclave-crypto/tests/dudect.rs`, run with `cargo xtask dudect`; ignored in `cargo test` because it is slow and noise-sensitive): a dudect-style harness (Welch's t on two input classes; data also cropped at the 90th and 50th percentiles). Both classes share one buffer, rewritten before each untimed step, so allocation and alignment can't differ between them (an earlier version used one buffer per class and produced false positives). Gate: the control must exceed |t| = 10, and each operation must stay below 10 on every crop.
+
+| Test | Classes | Result (x86-64 dev container, one run) |
+|---|---|---|
+| Control: early-exit `==` on 4 KiB | differ at the first byte vs the last | flagged: \|t\| 23 / 3085 / 4439 |
+| `seal::open` rejecting forgeries (1 KiB) | tag differs at its first vs last byte | clean: 0.07 / 0.39 / 0.62 |
+| ML-KEM-1024 decapsulation | valid vs corrupted ciphertext (implicit rejection) | clean: 0.19 / 0.51 / 1.04 |
+
+Findings and limits:
+
+- `std::time::Instant` can't resolve a 32-byte comparison: at that size even the leaky `==` looks constant. Tag comparisons are therefore only tested through `seal::open`, and comparisons in isolation only at 4 KiB.
+- At 4 KiB, `subtle`'s slice `ct_eq` (4.85 µs, because of its per-byte optimization barrier) showed a consistent median shift of 4–12 ns between the classes (0.1–0.25 %) with **identical 10th percentiles**. A plain XOR-fold of the same data showed none. The pattern (no change in the fast path) points to a microarchitectural effect of the barrier rather than an early exit. Enclave uses `subtle` only on 32-byte tags, where no leak shows at the operation level. It is recorded here to be re-examined with cycle counters and ctgrind.
+- Not yet: ctgrind (secret poisoning under Valgrind), cycle-accurate counters, McEliece decapsulation, token verification, Ed448, and the AArch64 DIT check.
+
 ### 1.8 Fuzzing
 
 Wire unit, envelope (all layouts), poll object, manifest, bundle, KT proof, Protobuf content, IPC messages, SFrame, the chunk container, and every media decoder inside the sandbox. Continuous fuzzing via OSS-Fuzz is applied for at M10. M1 exit: zero differential mismatches in 10⁷ fuzz iterations.
@@ -78,6 +92,8 @@ A relay and direct test matrix; SFrame vectors; MOS under netem loss of 1%, 5%, 
 ### 1.13 Supply chain
 
 Two independent rebuilders produce identical hashes; `cargo vet` covers 100% of crypto and parser crates.
+
+**Implemented so far:** `cargo xtask repro [package] [bin]` builds a release binary twice from scratch in two target directories (`--locked`, no incremental builds, `SOURCE_DATE_EPOCH` fixed, and the target directory, source root and cargo home remapped to fixed names so no build path is embedded) and fails unless the two are byte-identical. `enclave-relay` reproduces (870,976 bytes, identical SHA3-512, in the dev container); CI runs it for `enclave-relay` and `enclave-server`. This checks determinism on one machine; independent rebuilders on other machines and toolchain pinning via Nix are still to come.
 
 ## 2. Formal-methods plan
 
