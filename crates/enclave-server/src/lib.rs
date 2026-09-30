@@ -19,7 +19,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use enclave_crypto::hash::{sha3_512, shake256};
+use enclave_crypto::hash::sha3_512;
 use enclave_crypto::rng::HedgedRng;
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
@@ -120,17 +120,7 @@ pub struct Server {
     rng: HedgedRng,
 }
 
-/// Directory key for a root public key.
-pub fn manifest_key(root: &[u8; 64]) -> [u8; 32] {
-    shake256(&[b"enclave/v1/dir/manifest".as_slice(), root].concat())
-}
-
-/// Directory key for a device.
-pub fn device_key(device: &[u8; 16]) -> [u8; 32] {
-    let mut k = [0u8; 32];
-    k[..16].copy_from_slice(device);
-    k
-}
+pub use enclave_rpc::api::{device_key, manifest_key};
 
 impl Server {
     /// Create a server with today's request key.

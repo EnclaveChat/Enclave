@@ -251,6 +251,18 @@ pub fn credential_hash(secret: &[u8]) -> [u8; 32] {
     enclave_crypto::kmac::kmac256(secret, b"", "enclave/v1/rpc/credential-hash")
 }
 
+/// Directory key for a root public key.
+pub fn manifest_key(root: &[u8; 64]) -> [u8; 32] {
+    enclave_crypto::hash::shake256(&[b"enclave/v1/dir/manifest".as_slice(), root].concat())
+}
+
+/// Directory key for a device.
+pub fn device_key(device: &[u8; 16]) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    k[..16].copy_from_slice(device);
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

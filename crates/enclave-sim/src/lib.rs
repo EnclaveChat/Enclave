@@ -8,6 +8,9 @@
 #![deny(missing_docs)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod local;
+pub use local::LocalTransport;
+
 use enclave_crypto::hash::sha3_512;
 use enclave_crypto::kem::McEliecePublic;
 use enclave_crypto::rng::HedgedRng;

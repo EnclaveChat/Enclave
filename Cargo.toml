@@ -11,6 +11,7 @@ members = [
     "crates/enclave-sim",
     "crates/enclave-net",
     "crates/enclave-store",
+    "crates/enclave-core",
     "xtask",
 ]
 

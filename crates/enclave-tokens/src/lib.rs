@@ -53,6 +53,26 @@ impl TokenIssuer {
         })
     }
 
+    /// Serialize for sealed local storage.
+    pub fn to_bytes(&self) -> [u8; 40] {
+        let mut b = [0u8; 40];
+        b[..32].copy_from_slice(&self.k_contact);
+        b[32..].copy_from_slice(&self.next.to_be_bytes());
+        b
+    }
+
+    /// Inverse of [`TokenIssuer::to_bytes`].
+    pub fn from_bytes(b: &[u8; 40]) -> Self {
+        let mut k_contact = [0u8; 32];
+        k_contact.copy_from_slice(&b[..32]);
+        let mut n = [0u8; 8];
+        n.copy_from_slice(&b[32..]);
+        Self {
+            k_contact,
+            next: u64::from_be_bytes(n),
+        }
+    }
+
     /// Issue `n` tokens: returns the tokens (for the contact) and their hashes
     /// (for the server).
     pub fn issue(&mut self, n: usize) -> (Vec<Token>, Vec<[u8; 32]>) {

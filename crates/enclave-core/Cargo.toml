@@ -1,6 +1,6 @@
 [package]
-name = "enclave-sim"
-description = "In-process Enclave network simulator and client test harness."
+name = "enclave-core"
+description = "Enclave client engine: accounts, contacts, sessions, messaging and sync over the sealed store."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,12 @@ enclave-wire = { path = "../enclave-wire" }
 enclave-rpc = { path = "../enclave-rpc" }
 enclave-proto = { path = "../enclave-proto" }
 enclave-tokens = { path = "../enclave-tokens" }
-enclave-server = { path = "../enclave-server" }
 enclave-net = { path = "../enclave-net" }
-async-trait = "0.1"
+enclave-store = { path = "../enclave-store" }
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+enclave-sim = { path = "../enclave-sim" }
+enclave-server = { path = "../enclave-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

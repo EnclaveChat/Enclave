@@ -1,0 +1,88 @@
+//! The Enclave client engine (`docs/15-client.md`).
+//!
+//! `enclave-core` runs in the vault process. It owns every long-term secret,
+//! drives the protocol crates against servers through a [`Transport`], and
+//! keeps all state in the sealed [`enclave_store::Store`]. The UI talks to it
+//! through the command methods on [`Client`] and the [`Event`]s that
+//! [`Client::sync`] returns; it never sees key material.
+//!
+//! Invariants:
+//! * Ratchet state is persisted **before** the envelope it produced leaves the
+//!   device, and after every envelope that changed it, so a crash can lose a
+//!   message but never reuse a key.
+//! * Prekeys consumed by a handshake are persisted before the session is used.
+//! * Nothing from a stranger is shown until it has authenticated, and it lands
+//!   in message requests until the user accepts it.
+//!
+//! [`Transport`]: enclave_net::transport::Transport
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod card;
+pub mod client;
+pub mod content;
+mod persist;
+mod rpc;
+
+pub use card::{ContactCard, LinkError};
+pub use client::{Client, Contact, ContactState, Event, Message, Options};
+
+use enclave_rpc::api::Status;
+
+/// Errors from the client engine.
+#[derive(Debug, thiserror::Error)]
+pub enum CoreError {
+    /// Local storage failed.
+    #[error("storage: {0}")]
+    Store(#[from] enclave_store::StoreError),
+    /// Protocol failure (bad signature, decryption failure, ...).
+    #[error("protocol: {0}")]
+    Proto(#[from] enclave_proto::ProtoError),
+    /// Network failure.
+    #[error("network: {0}")]
+    Net(#[from] enclave_net::NetError),
+    /// A server refused a request.
+    #[error("server replied {0:?}")]
+    Server(Status),
+    /// A cryptographic operation failed.
+    #[error("cryptographic failure")]
+    Crypto,
+    /// Unknown contact or object.
+    #[error("not found")]
+    NotFound,
+    /// The contact has not accepted yet, or we have not accepted them.
+    #[error("contact has not accepted the conversation yet")]
+    NotAccepted,
+    /// No write tokens left for the contact's inbox.
+    #[error("no write tokens left for this contact")]
+    OutOfTokens,
+    /// Input too long.
+    #[error("too long")]
+    TooLong,
+    /// A link or QR code could not be used.
+    #[error("link: {0}")]
+    Link(#[from] LinkError),
+}
+
+impl From<enclave_crypto::Error> for CoreError {
+    fn from(_: enclave_crypto::Error) -> Self {
+        CoreError::Crypto
+    }
+}
+
+impl From<enclave_rpc::RpcError> for CoreError {
+    fn from(_: enclave_rpc::RpcError) -> Self {
+        CoreError::Crypto
+    }
+}
+
+/// Result alias.
+pub type Result<T> = core::result::Result<T, CoreError>;
+
+/// Current Unix time in seconds.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

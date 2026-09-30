@@ -462,3 +462,66 @@ fn signed_manifest_roundtrip_and_rollback() {
         Err(ProtoError::Expired)
     );
 }
+
+#[test]
+fn persistence_roundtrips_mid_conversation() {
+    let mut rng = HedgedRng::new().unwrap();
+    let alice = Party::new(1, &mut rng);
+    let mut bob = Party::new(1, &mut rng);
+    // Two-KEM start with a pending braid, so the export carries the McEliece key.
+    let (mut a, mut b) = handshake(
+        &alice,
+        &mut bob,
+        0,
+        None,
+        Mode::OffTheRecord,
+        None,
+        &mut rng,
+    );
+    a.schedule_braid(bob.account.vault_public.clone());
+    let e1 = send(&mut a, b"one", &mut rng);
+    let e2 = send(&mut a, b"two (arrives late)", &mut rng);
+    assert_eq!(
+        recv(&mut b, &e1, Some(&bob.account.vault), &mut rng).unwrap(),
+        b"one"
+    );
+
+    // Save and reload both sides (and Bob's device and prekeys).
+    let mut a = Session::import(&a.export()).unwrap();
+    let mut b = Session::import(&b.export()).unwrap();
+    let dev = DeviceKeys::import(&bob.devices[0].export()).unwrap();
+    assert_eq!(dev.id, bob.devices[0].id);
+    let pk = PrekeyStore::import(&bob.prekeys[0].export()).unwrap();
+    assert_eq!(pk.one_time.len(), bob.prekeys[0].one_time.len());
+    assert!(PrekeyStore::import(&[2]).is_err());
+
+    // Skipped keys survived: the late message still opens after reload.
+    for i in 0..4 {
+        let r = send(&mut b, format!("reply {i}").as_bytes(), &mut rng);
+        recv(&mut a, &r, Some(&alice.account.vault), &mut rng).unwrap();
+        let m = send(&mut a, b"more", &mut rng);
+        recv(&mut b, &m, Some(&bob.account.vault), &mut rng).unwrap();
+    }
+    assert_eq!(
+        recv(&mut b, &e2, Some(&bob.account.vault), &mut rng).unwrap(),
+        b"two (arrives late)"
+    );
+    assert!(
+        a.three_kem() && b.three_kem(),
+        "braid completed across the reload"
+    );
+
+    // Truncated or extended state is rejected.
+    let s = a.export();
+    assert!(Session::import(&s[..s.len() - 1]).is_err());
+    let mut longer = s.to_vec();
+    longer.push(0);
+    assert!(Session::import(&longer).is_err());
+
+    // Shared account keys: the recovery secret must match the root.
+    let shared = alice.account.export_shared();
+    let other = RecoverySecret::generate(&mut rng).unwrap();
+    assert!(AccountKeys::import_shared(&shared, Some(&other)).is_err());
+    let acct = AccountKeys::import_shared(&shared, None).unwrap();
+    assert_eq!(acct.root_public, alice.account.root_public);
+}

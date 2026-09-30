@@ -17,6 +17,7 @@ use enclave_crypto::kem::{MLKEM_PK_LEN, MlKemPublic, MlKemSecret, X448Public, X4
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::{COMPOSITE_SIG_LEN, CompositePublic};
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 /// Signed-prekey lifetime.
 pub const SPK_LIFETIME_SECS: u64 = 14 * 24 * 3600;
@@ -521,6 +522,85 @@ impl Publication {
             return Err(ProtoError::BadSignature);
         }
         Ok(())
+    }
+}
+
+fn put_prekey(w: &mut Writer, k: &PrekeySecret) {
+    match &k.x448 {
+        Some(x) => w.u8(1).fixed(&x.to_bytes()[..]),
+        None => w.u8(0),
+    };
+    w.bytes(k.pq.as_bytes());
+}
+
+fn get_prekey(r: &mut Reader<'_>) -> Result<PrekeySecret> {
+    let x448 = match r.u8()? {
+        0 => None,
+        1 => Some(X448Secret::from_bytes(r.array()?)),
+        _ => return Err(ProtoError::Decode),
+    };
+    Ok(PrekeySecret {
+        x448,
+        pq: MlKemSecret::from_slice(r.bytes(8192)?)?,
+    })
+}
+
+impl PrekeyStore {
+    /// Serialize all prekey secrets for sealed local storage.
+    pub fn export(&self) -> Zeroizing<Vec<u8>> {
+        let mut w = Writer::new();
+        w.u8(1).u32(self.next_id);
+        w.u32(self.signed.len() as u32);
+        for (id, (k, exp)) in &self.signed {
+            w.u32(*id).u64(*exp);
+            put_prekey(&mut w, k);
+        }
+        w.u32(self.one_time.len() as u32);
+        for (id, k) in &self.one_time {
+            w.u64(*id);
+            put_prekey(&mut w, k);
+        }
+        w.u32(self.last_resort.len() as u32);
+        for (id, (k, exp)) in &self.last_resort {
+            w.u32(*id).u64(*exp);
+            put_prekey(&mut w, k);
+        }
+        Zeroizing::new(w.finish())
+    }
+
+    /// Inverse of [`PrekeyStore::export`].
+    pub fn import(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let mut s = Self {
+            next_id: r.u32()?,
+            ..Default::default()
+        };
+        for _ in 0..r.u32()?.min(4096) {
+            let (id, exp) = (r.u32()?, r.u64()?);
+            s.signed.insert(id, (get_prekey(&mut r)?, exp));
+        }
+        for _ in 0..r.u32()?.min(1 << 16) {
+            let id = r.u64()?;
+            s.one_time.insert(id, get_prekey(&mut r)?);
+        }
+        for _ in 0..r.u32()?.min(4096) {
+            let (id, exp) = (r.u32()?, r.u64()?);
+            s.last_resort.insert(id, (get_prekey(&mut r)?, exp));
+        }
+        r.end()?;
+        Ok(s)
+    }
+
+    /// Drop signed and last-resort prekeys that expired more than `grace`
+    /// seconds ago (late initial messages may still use them until then).
+    pub fn expire(&mut self, now: u64, grace: u64) {
+        self.signed
+            .retain(|_, (_, exp)| exp.saturating_add(grace) > now);
+        self.last_resort
+            .retain(|_, (_, exp)| exp.saturating_add(grace) > now);
     }
 }
 

@@ -879,6 +879,242 @@ impl Session {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+/// Version byte of the exported session format.
+const STATE_VERSION: u8 = 1;
+/// Largest exported session accepted (a pending McEliece braid dominates).
+pub const MAX_STATE_LEN: usize = 2 * 1024 * 1024;
+
+fn put_opt_key(w: &mut Writer, k: &Option<Key>) {
+    match k {
+        Some(k) => w.u8(1).fixed(k),
+        None => w.u8(0),
+    };
+}
+
+fn get_opt_key(r: &mut Reader<'_>) -> Result<Option<Key>> {
+    Ok(match r.u8()? {
+        0 => None,
+        1 => Some(r.array()?),
+        _ => return Err(ProtoError::Decode),
+    })
+}
+
+fn put_hist(w: &mut Writer, h: &VecDeque<(u32, Key)>) {
+    w.u16(h.len() as u16);
+    for (e, k) in h {
+        w.u32(*e).fixed(k);
+    }
+}
+
+fn get_hist(r: &mut Reader<'_>) -> Result<VecDeque<(u32, Key)>> {
+    let n = r.u16()? as usize;
+    if n > PQ_HISTORY {
+        return Err(ProtoError::Decode);
+    }
+    let mut h = VecDeque::with_capacity(n);
+    for _ in 0..n {
+        h.push_back((r.u32()?, r.array()?));
+    }
+    Ok(h)
+}
+
+impl Session {
+    /// Serialize the full session state for sealed local storage. The output
+    /// holds secrets: callers must seal it and zeroize it after use.
+    pub fn export(&self) -> Zeroizing<Vec<u8>> {
+        let mut w = Writer::new();
+        w.u8(STATE_VERSION);
+        w.u8(match self.role {
+            Role::Initiator => 0,
+            Role::Responder => 1,
+        });
+        w.fixed(&self.rk).fixed(&self.dhs.to_bytes()[..]);
+        match &self.dhr {
+            Some(p) => w.u8(1).fixed(&p.0),
+            None => w.u8(0),
+        };
+        put_opt_key(&mut w, &self.cks);
+        put_opt_key(&mut w, &self.ckr);
+        w.u32(self.ns).u32(self.nr).u32(self.pn);
+        put_opt_key(&mut w, &self.hks);
+        put_opt_key(&mut w, &self.hkr);
+        w.fixed(&self.nhks).fixed(&self.nhkr);
+        w.u32(self.skipped.len() as u32);
+        for (tag, sk) in &self.skipped {
+            w.fixed(tag).fixed(&sk.hk).u32(sk.n).fixed(&sk.mk);
+        }
+        let pq = &self.pq;
+        w.fixed(&pq.out_root)
+            .fixed(&pq.in_root)
+            .u32(pq.e_out)
+            .u32(pq.e_in);
+        put_hist(&mut w, &pq.out_hist);
+        put_hist(&mut w, &pq.in_hist);
+        w.u32(pq.my.id)
+            .bytes(pq.my.sk.as_bytes())
+            .fixed(&pq.my.pk.0[..]);
+        match &pq.peer {
+            Some((id, pk)) => w.u8(1).u32(*id).fixed(&pk.0[..]),
+            None => w.u8(0),
+        };
+        w.u32(pq.highest_peer_id);
+        match &pq.outstanding {
+            Some(o) => {
+                w.u8(1).u32(o.for_id).fixed(&o.ct.0[..]).u32(o.e_out);
+                match &o.mce_ct {
+                    Some(c) => w.u8(1).fixed(&c.0),
+                    None => w.u8(0),
+                };
+            }
+            None => {
+                w.u8(0);
+            }
+        }
+        match &pq.braid_to {
+            Some(pk) => w.u8(1).fixed(&pk.0[..]),
+            None => w.u8(0),
+        };
+        w.u8(u8::from(self.pq_authenticated))
+            .u8(u8::from(self.three_kem));
+        Zeroizing::new(w.finish())
+    }
+
+    /// Inverse of [`Session::export`].
+    pub fn import(b: &[u8]) -> Result<Self> {
+        if b.len() > MAX_STATE_LEN {
+            return Err(ProtoError::Decode);
+        }
+        let mut r = Reader::new(b);
+        if r.u8()? != STATE_VERSION {
+            return Err(ProtoError::Decode);
+        }
+        let role = match r.u8()? {
+            0 => Role::Initiator,
+            1 => Role::Responder,
+            _ => return Err(ProtoError::Decode),
+        };
+        let rk = r.array()?;
+        let dhs = X448Secret::from_bytes(r.array()?);
+        let dhs_pub = dhs.public();
+        let dhr = match r.u8()? {
+            0 => None,
+            1 => Some(X448Public(r.array()?)),
+            _ => return Err(ProtoError::Decode),
+        };
+        let cks = get_opt_key(&mut r)?;
+        let ckr = get_opt_key(&mut r)?;
+        let (ns, nr, pn) = (r.u32()?, r.u32()?, r.u32()?);
+        let hks = get_opt_key(&mut r)?;
+        let hkr = get_opt_key(&mut r)?;
+        let nhks = r.array()?;
+        let nhkr = r.array()?;
+        let n_skipped = r.u32()?;
+        if n_skipped > 4 * MAX_SKIP {
+            return Err(ProtoError::Decode);
+        }
+        let mut skipped = BTreeMap::new();
+        for _ in 0..n_skipped {
+            let tag = r.array()?;
+            skipped.insert(
+                tag,
+                Skipped {
+                    hk: r.array()?,
+                    n: r.u32()?,
+                    mk: r.array()?,
+                },
+            );
+        }
+        let out_root = r.array()?;
+        let in_root = r.array()?;
+        let (e_out, e_in) = (r.u32()?, r.u32()?);
+        let out_hist = get_hist(&mut r)?;
+        let in_hist = get_hist(&mut r)?;
+        let my = MyPqKey {
+            id: r.u32()?,
+            sk: MlKemSecret::from_slice(r.bytes(8192)?)?,
+            pk: MlKemPublic::from_slice(r.fixed(MLKEM_PK_LEN)?)?,
+        };
+        let peer = match r.u8()? {
+            0 => None,
+            1 => Some((r.u32()?, MlKemPublic::from_slice(r.fixed(MLKEM_PK_LEN)?)?)),
+            _ => return Err(ProtoError::Decode),
+        };
+        let highest_peer_id = r.u32()?;
+        let outstanding = match r.u8()? {
+            0 => None,
+            1 => {
+                let for_id = r.u32()?;
+                let ct = MlKemCiphertext::from_slice(r.fixed(MLKEM_CT_LEN)?)?;
+                let e_out = r.u32()?;
+                let mce_ct = match r.u8()? {
+                    0 => None,
+                    1 => Some(McElieceCiphertext(r.array::<MCELIECE_CT_LEN>()?)),
+                    _ => return Err(ProtoError::Decode),
+                };
+                Some(Outstanding {
+                    for_id,
+                    ct,
+                    e_out,
+                    mce_ct,
+                })
+            }
+            _ => return Err(ProtoError::Decode),
+        };
+        let braid_to = match r.u8()? {
+            0 => None,
+            1 => Some(Box::new(McEliecePublic::from_slice(
+                r.fixed(enclave_crypto::kem::MCELIECE_PK_LEN)?,
+            )?)),
+            _ => return Err(ProtoError::Decode),
+        };
+        let flag = |v: u8| match v {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ProtoError::Decode),
+        };
+        let pq_authenticated = flag(r.u8()?)?;
+        let three_kem = flag(r.u8()?)?;
+        r.end()?;
+        Ok(Self {
+            role,
+            rk,
+            dhs,
+            dhs_pub,
+            dhr,
+            cks,
+            ckr,
+            ns,
+            nr,
+            pn,
+            hks,
+            hkr,
+            nhks,
+            nhkr,
+            skipped,
+            pq: PqState {
+                out_root,
+                in_root,
+                e_out,
+                e_in,
+                out_hist,
+                in_hist,
+                my,
+                peer,
+                highest_peer_id,
+                outstanding,
+                braid_to,
+            },
+            pq_authenticated,
+            three_kem,
+            tag_cache: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
