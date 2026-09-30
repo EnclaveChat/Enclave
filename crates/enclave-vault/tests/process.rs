@@ -57,7 +57,7 @@ async fn vault_process_serves_the_ui() {
     frame::check_token(&mut rd, &token).await.unwrap();
 
     let send = |c: Cmd| c.encode();
-    frame::write_frame(&mut wr, &send(Cmd::Create("Robin".into())))
+    frame::write_frame(&mut wr, &send(Cmd::Create("Robin".into(), String::new())))
         .await
         .unwrap();
     let s = next_snapshot(&mut rd, |s| s.my_name == "Robin" && !s.requests.is_empty()).await;
@@ -217,23 +217,25 @@ async fn dev_server() -> std::net::SocketAddr {
     addr
 }
 
-/// A profile on disk against a TCP server, with the vault confined to its
-/// profile directory: creating the account (database, keystore) still works.
-#[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_vault_keeps_its_profile() {
-    let addr = dev_server().await;
-    let dir = std::env::temp_dir().join(format!("enclave-vault-fs-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let sock = dir.join("v.sock");
-    let profile = dir.join("profile");
+/// Start the vault binary on `profile` against `addr` and connect to it.
+async fn start_vault(
+    dir: &std::path::Path,
+    addr: std::net::SocketAddr,
+    profile: &std::path::Path,
+    name: &str,
+) -> (
+    std::process::Child,
+    tokio::io::ReadHalf<tokio::net::UnixStream>,
+    tokio::io::WriteHalf<tokio::net::UnixStream>,
+) {
+    let sock = dir.join(name);
     let listener = UnixListener::bind(&sock).unwrap();
     let token = [0x33; TOKEN_LEN];
     let mut child = Command::new(BIN)
         .arg("--connect")
         .arg(&sock)
         .args(["--server", &addr.to_string(), "--profile"])
-        .arg(&profile)
+        .arg(profile)
         .arg("--report")
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -244,14 +246,45 @@ async fn sandboxed_vault_keeps_its_profile() {
         .await
         .unwrap()
         .unwrap();
-    let (mut rd, mut wr) = tokio::io::split(stream);
+    let (mut rd, wr) = tokio::io::split(stream);
     frame::check_token(&mut rd, &token).await.unwrap();
-    frame::write_frame(&mut wr, &Cmd::Create("Robin".into()).encode())
+    (child, rd, wr)
+}
+
+/// A profile on disk against a TCP server, with the vault confined to its
+/// profile directory: creating the account (database, keystore) still works,
+/// and a passphrase locks it: "Lock now", a wrong passphrase, the right one,
+/// and a restarted vault that starts locked.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_vault_keeps_its_profile() {
+    let addr = dev_server().await;
+    let dir = std::env::temp_dir().join(format!("enclave-vault-fs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let profile = dir.join("profile");
+    let (child, mut rd, mut wr) = start_vault(&dir, addr, &profile, "v1.sock").await;
+    let send = |c: Cmd| c.encode();
+    frame::write_frame(
+        &mut wr,
+        &send(Cmd::Create("Robin".into(), "correct horse".into())),
+    )
+    .await
+    .unwrap();
+    let s = next_snapshot(&mut rd, |s| s.my_name == "Robin").await;
+    assert!(s.my_link.starts_with("enclave:") && s.can_lock);
+    assert!(profile.join("profile.redb").exists());
+
+    frame::write_frame(&mut wr, &send(Cmd::Lock)).await.unwrap();
+    let s = next_snapshot(&mut rd, |s| s.locked).await;
+    assert!(s.my_name.is_empty(), "nothing shown while locked");
+    frame::write_frame(&mut wr, &send(Cmd::Unlock("wrong".into())))
         .await
         .unwrap();
-    let s = next_snapshot(&mut rd, |s| s.my_name == "Robin").await;
-    assert!(s.my_link.starts_with("enclave:"));
-    assert!(profile.join("profile.redb").exists());
+    next_snapshot(&mut rd, |s| s.locked && !s.unlock_error.is_empty()).await;
+    frame::write_frame(&mut wr, &send(Cmd::Unlock("correct horse".into())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| !s.locked && s.my_name == "Robin").await;
     drop(rd);
     drop(wr);
     let out = tokio::task::spawn_blocking(move || child.wait_with_output())
@@ -262,5 +295,19 @@ async fn sandboxed_vault_keeps_its_profile() {
     let report = String::from_utf8_lossy(&out.stderr);
     assert!(!report.contains("filesystem: \"error\""), "{report}");
     eprintln!("{report}");
+
+    // A new vault on the same profile starts locked.
+    let (child, mut rd, mut wr) = start_vault(&dir, addr, &profile, "v2.sock").await;
+    frame::write_frame(&mut wr, &send(Cmd::Select(String::new())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| s.locked).await;
+    frame::write_frame(&mut wr, &send(Cmd::Unlock("correct horse".into())))
+        .await
+        .unwrap();
+    next_snapshot(&mut rd, |s| !s.locked && s.my_name == "Robin").await;
+    drop(rd);
+    drop(wr);
+    let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -164,6 +164,8 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
     ui.set_username_problem(s.username_problem.clone().into());
+    ui.set_unlock_error(s.unlock_error.clone().into());
+    ui.set_can_lock(s.can_lock);
     ui.set_members(ModelRc::from(Rc::new(VecModel::from(
         s.members.iter().map(row).collect::<Vec<_>>(),
     ))));
@@ -185,7 +187,11 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_meet_name(s.meet_name.clone().into());
     ui.set_meet_error(s.meet_error.clone().into());
     ui.set_meet_done(s.meet_done.clone().into());
-    if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
+    if s.locked {
+        if ui.get_screen() != Screen::Locked {
+            ui.set_screen(Screen::Locked);
+        }
+    } else if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
     }
 }

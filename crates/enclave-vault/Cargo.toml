@@ -22,6 +22,7 @@ enclave-crypto = { path = "../enclave-crypto" }
 enclave-ipc = { path = "../enclave-ipc" }
 enclave-net = { path = "../enclave-net" }
 enclave-store = { path = "../enclave-store" }
+zeroize = "1"
 enclave-sim = { path = "../enclave-sim" }
 enclave-server = { path = "../enclave-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

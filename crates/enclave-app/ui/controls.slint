@@ -244,6 +244,8 @@ export component Field inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <bool> mono: false;
     in property <bool> multiline: false;
+    // Hide what is typed (passphrases).
+    in property <bool> secret: false;
     callback accepted();
     callback edited();
     min-height: Tokens.space-touch-target-min;
@@ -270,6 +272,7 @@ export component Field inherits Rectangle {
             single-line: !root.multiline;
             wrap: root.multiline ? word-wrap : no-wrap;
             vertical-alignment: center;
+            input-type: root.secret ? InputType.password : InputType.text;
             accepted => { root.accepted(); }
             edited => { root.edited(); }
         }

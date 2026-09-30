@@ -112,7 +112,23 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_screen(Screen::SettingUp);
             ui.set_status_line("This takes a few seconds.".into());
         }
-        let _ = t.send(Cmd::Create(name.to_string()));
+        let passphrase = w
+            .upgrade()
+            .map(|ui| {
+                let p = ui.get_new_passphrase().to_string();
+                ui.set_new_passphrase("".into());
+                p
+            })
+            .unwrap_or_default();
+        let _ = t.send(Cmd::Create(name.to_string(), passphrase));
+    });
+    let t = tx.clone();
+    ui.on_unlock(move |p| {
+        let _ = t.send(Cmd::Unlock(p.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_lock_now(move || {
+        let _ = t.send(Cmd::Lock);
     });
     let t = tx.clone();
     ui.on_select(move |id| {

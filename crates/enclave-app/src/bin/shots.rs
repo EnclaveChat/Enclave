@@ -206,6 +206,9 @@ fn fixture() -> Snapshot {
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
+        locked: false,
+        unlock_error: String::new(),
+        can_lock: true,
     }
 }
 
@@ -315,6 +318,10 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_status_line("Waiting for you to pick them there…".into());
         shot("18-join-words-phone", phone);
         view::apply(&ui, &Snapshot::default());
+        ui.set_screen(Screen::Locked);
+        ui.set_unlock_error("That passphrase doesn't open this profile.".into());
+        shot("25-locked-phone", phone);
+        ui.set_unlock_error("".into());
         ui.set_screen(Screen::Name);
         ui.set_name_input("Robin".into());
         shot("02-name", phone);

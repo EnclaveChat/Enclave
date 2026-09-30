@@ -61,7 +61,7 @@ export struct MessageRow {
     file: string,
 }
 
-export enum Screen { welcome, name, setting-up, join, main }
+export enum Screen { welcome, name, setting-up, join, locked, main }
 export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members }
 
 component DeliveryMark inherits Rectangle {
@@ -342,6 +342,12 @@ export component AppWindow inherits Window {
     callback meet-scan(string);
     callback search(string);
     callback add-members(string);
+    callback unlock(string);
+    callback lock-now();
+    in property <string> unlock-error;
+    in property <bool> can-lock;
+    in-out property <string> passphrase-input;
+    in-out property <string> new-passphrase;
     callback remove-member(string, string);
     callback leave-group(string);
     in property <[ContactRow]> members;
@@ -434,12 +440,57 @@ export component AppWindow inherits Window {
                     init => { self.focus(); }
                 }
                 Secondary { text: "Only people you talk to can see this."; }
+                if root.can-join: Field {
+                    placeholder: "Passphrase for this computer (optional)";
+                    secret: true;
+                    text <=> root.new-passphrase;
+                }
+                if root.can-join && root.new-passphrase != "": Secondary {
+                    text: "You'll type it each time Enclave starts. Nobody can reset it; if you forget it, your recovery words bring your account back.";
+                }
                 HorizontalLayout {
                     alignment: start;
                     PrimaryButton {
                         text: "Continue";
                         enabled: root.name-input != "";
                         clicked => { root.create-account(root.name-input); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- locked
+    if root.screen == Screen.locked: VerticalLayout {
+        alignment: center;
+        padding: Tokens.space-l;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: min(440px, root.width - 2 * Tokens.space-l);
+                spacing: Tokens.space-m;
+                HorizontalLayout { alignment: start; Seal { state: SealState.checked; size: 48px; } }
+                ScreenTitle { text: "Enclave is locked"; }
+                Secondary { text: "Type your passphrase to open your messages on this computer."; }
+                unlock-field := Field {
+                    placeholder: "Passphrase";
+                    secret: true;
+                    text <=> root.passphrase-input;
+                    accepted => { if root.passphrase-input != "" { root.unlock(root.passphrase-input); root.passphrase-input = ""; } }
+                    init => { self.focus(); }
+                }
+                if root.unlock-error != "": Text {
+                    text: root.unlock-error;
+                    color: Tokens.danger;
+                    font-size: Tokens.type-secondary;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    PrimaryButton {
+                        text: root.busy ? "Opening…" : "Unlock";
+                        enabled: root.passphrase-input != "" && !root.busy;
+                        clicked => { root.unlock(root.passphrase-input); root.passphrase-input = ""; }
                     }
                 }
             }
@@ -1233,6 +1284,10 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 clicked => { root.open-sheet(Sheet.devices); }
             }
+        }
+        if root.can-lock: HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Lock now"; outlined: true; clicked => { root.sheet = Sheet.none; root.lock-now(); } }
         }
     }
 

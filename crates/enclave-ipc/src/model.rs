@@ -165,13 +165,19 @@ pub struct Snapshot {
     pub group_admin: bool,
     /// Contacts that could be added to the open group.
     pub addable: Vec<Pick>,
+    /// The profile needs its passphrase.
+    pub locked: bool,
+    /// Why unlocking failed.
+    pub unlock_error: String,
+    /// The profile has a passphrase, so it can be locked.
+    pub can_lock: bool,
 }
 
 /// UI → vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cmd {
-    /// Create the account with this name.
-    Create(String),
+    /// Create the account: name, passphrase (empty for none).
+    Create(String, String),
     /// Open a conversation (empty id closes it).
     Select(String),
     /// Send text to a conversation.
@@ -239,6 +245,10 @@ pub enum Cmd {
     RemoveMember(String, String),
     /// Leave a group.
     LeaveGroup(String),
+    /// Open a locked profile with its passphrase.
+    Unlock(String),
+    /// Lock now: drop the open profile from memory.
+    Lock,
 }
 
 /// One-off UI resets after a request succeeded.
@@ -396,6 +406,9 @@ impl Snapshot {
                 .u8((p.tint % TINT_COUNT) as u8)
                 .bool(p.selected);
         }
+        w.bool(self.locked)
+            .str(&self.unlock_error)
+            .bool(self.can_lock);
         w.0
     }
 
@@ -504,6 +517,9 @@ impl Snapshot {
                     })
                     .collect::<Result<_>>()?
             },
+            locked: r.bool()?,
+            unlock_error: r.str()?,
+            can_lock: r.bool()?,
         };
         r.end()?;
         Ok(s)
@@ -515,7 +531,7 @@ impl Cmd {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::default();
         match self {
-            Cmd::Create(s) => w.u8(1).str(s),
+            Cmd::Create(s, p) => w.u8(1).str(s).str(p),
             Cmd::Select(s) => w.u8(2).str(s),
             Cmd::Send(a, b) => w.u8(3).str(a).str(b),
             Cmd::Accept(s) => w.u8(4).str(s),
@@ -549,6 +565,8 @@ impl Cmd {
             Cmd::AddMembers(g) => w.u8(32).str(g),
             Cmd::RemoveMember(g, m) => w.u8(33).str(g).str(m),
             Cmd::LeaveGroup(g) => w.u8(34).str(g),
+            Cmd::Unlock(p) => w.u8(35).str(p),
+            Cmd::Lock => w.u8(36),
         };
         w.0
     }
@@ -557,7 +575,7 @@ impl Cmd {
     pub fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader(b);
         let c = match r.u8()? {
-            1 => Cmd::Create(r.str()?),
+            1 => Cmd::Create(r.str()?, r.str()?),
             2 => Cmd::Select(r.str()?),
             3 => Cmd::Send(r.str()?, r.str()?),
             4 => Cmd::Accept(r.str()?),
@@ -591,6 +609,8 @@ impl Cmd {
             32 => Cmd::AddMembers(r.str()?),
             33 => Cmd::RemoveMember(r.str()?, r.str()?),
             34 => Cmd::LeaveGroup(r.str()?),
+            35 => Cmd::Unlock(r.str()?),
+            36 => Cmd::Lock,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

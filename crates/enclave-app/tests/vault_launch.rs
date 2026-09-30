@@ -21,7 +21,7 @@ async fn launcher_talks_to_a_real_vault() {
         return;
     }
     let (tx, mut rx) = enclave_app::vault::spawn_process(&bin, &enclave_vault::Mode::Demo).unwrap();
-    tx.send(Cmd::Create("Robin".into())).unwrap();
+    tx.send(Cmd::Create("Robin".into(), String::new())).unwrap();
     let found = tokio::time::timeout(Duration::from_secs(300), async {
         while let Some(o) = rx.recv().await {
             if let Out::Snapshot(s) = o

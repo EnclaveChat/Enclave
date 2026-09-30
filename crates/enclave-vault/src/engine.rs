@@ -122,6 +122,11 @@ struct Engine {
     busy: bool,
     /// The recovery sheet is open: only then do the words leave the vault.
     reveal_words: bool,
+    /// The profile on disk needs its passphrase to open.
+    locked: bool,
+    unlock_error: String,
+    /// The open profile has a passphrase (so "Lock now" makes sense).
+    passphrase_set: bool,
     search: String,
     username_problem: String,
     meet_code: String,
@@ -338,6 +343,9 @@ pub async fn run(
         join_words: String::new(),
         busy: false,
         reveal_words: false,
+        locked: false,
+        unlock_error: String::new(),
+        passphrase_set: false,
         search: String::new(),
         username_problem: String::new(),
         meet_code: String::new(),
@@ -351,13 +359,15 @@ pub async fn run(
     if let Mode::Server { profile, .. } = &e.mode
         && profile.join("profile.redb").exists()
     {
-        match Client::open(e.options(), Arc::clone(&e.transport)) {
+        match Client::open(e.options(None), Arc::clone(&e.transport)) {
             Ok(mut c) => {
                 if let Some(p) = e.kt.clone() {
                     c.set_kt_policy(p);
                 }
                 e.client = Some(c);
             }
+            // Protected by a passphrase: ask for it.
+            Err(CoreError::Store(enclave_store::StoreError::Crypto)) => e.locked = true,
             Err(err) => e.status = format!("Couldn't open your profile: {err}"),
         }
         e.push();
@@ -384,7 +394,12 @@ pub async fn run(
 }
 
 impl Engine {
-    fn options(&self) -> Options {
+    /// Storage options; `passphrase` applies to profiles on disk (the demo
+    /// lives in memory).
+    fn options(&self, passphrase: Option<&str>) -> Options {
+        let passphrase = passphrase
+            .filter(|p| !p.is_empty())
+            .map(|p| zeroize::Zeroizing::new(p.as_bytes().to_vec()));
         match &self.mode {
             Mode::Demo => Options {
                 path: None,
@@ -402,8 +417,10 @@ impl Engine {
                 Options {
                     path: Some(profile.join("profile.redb")),
                     keystore,
-                    passphrase: None,
-                    pw_params: PwParams::FLOOR,
+                    passphrase,
+                    // Argon2id, 1 GiB and 4 passes: seconds to unlock, slow
+                    // to guess.
+                    pw_params: PwParams::DESKTOP_DEFAULT,
                 }
             }
         }
@@ -429,10 +446,11 @@ impl Engine {
 
     async fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Create(name) => {
+            Cmd::Create(name, passphrase) => {
                 let name = name.trim().to_string();
+                let protect = !passphrase.is_empty() && matches!(self.mode, Mode::Server { .. });
                 match Client::create(
-                    self.options(),
+                    self.options(Some(&passphrase)),
                     Arc::clone(&self.transport),
                     self.server,
                     &name,
@@ -444,6 +462,7 @@ impl Engine {
                             c.set_kt_policy(p);
                         }
                         self.client = Some(c);
+                        self.passphrase_set = protect;
                         if matches!(self.mode, Mode::Demo) {
                             self.start_demo().await;
                         }
@@ -685,7 +704,7 @@ impl Engine {
             Cmd::StartJoin => {
                 self.status.clear();
                 match enclave_core::LinkingDevice::start(
-                    self.options(),
+                    self.options(None),
                     Arc::clone(&self.transport),
                     self.server,
                 )
@@ -705,6 +724,36 @@ impl Engine {
                 }
             }
             Cmd::RevealWords(on) => self.reveal_words = on,
+            Cmd::Unlock(passphrase) => {
+                self.unlock_error.clear();
+                self.busy = true;
+                self.push();
+                match Client::open(self.options(Some(&passphrase)), Arc::clone(&self.transport)) {
+                    Ok(mut c) => {
+                        if let Some(p) = self.kt.clone() {
+                            c.set_kt_policy(p);
+                        }
+                        self.client = Some(c);
+                        self.locked = false;
+                        self.passphrase_set = true;
+                    }
+                    Err(CoreError::Store(enclave_store::StoreError::Crypto)) => {
+                        self.unlock_error = "That passphrase doesn't open this profile.".into();
+                    }
+                    Err(err) => self.unlock_error = format!("Couldn't open your profile: {err}"),
+                }
+                self.busy = false;
+            }
+            Cmd::Lock if self.passphrase_set => {
+                // Dropping the client drops its keys and the open database.
+                self.client = None;
+                self.locked = true;
+                self.selected = None;
+                self.selected_group = None;
+                self.reveal_words = false;
+                self.search.clear();
+            }
+            Cmd::Lock => {}
             Cmd::Search(q) => self.search = q,
             Cmd::AddMembers(id) => {
                 let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();
@@ -1004,6 +1053,9 @@ impl Engine {
 
     fn snapshot(&self) -> Snapshot {
         let mut s = Snapshot {
+            locked: self.locked,
+            unlock_error: self.unlock_error.clone(),
+            can_lock: self.passphrase_set && self.client.is_some(),
             status: self.status.clone(),
             add_error: self.add_error.clone(),
             username_error: self.username_error.clone(),

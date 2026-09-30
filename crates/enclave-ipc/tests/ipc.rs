@@ -75,12 +75,17 @@ fn snapshot() -> Snapshot {
         members: vec![Row::default(); 2],
         group_admin: true,
         addable: vec![Pick::default()],
+        locked: true,
+        unlock_error: "no".into(),
+        can_lock: true,
     }
 }
 
 fn cmds() -> Vec<Cmd> {
     vec![
-        Cmd::Create("Robin".into()),
+        Cmd::Create("Robin".into(), "correct horse".into()),
+        Cmd::Unlock("correct horse".into()),
+        Cmd::Lock,
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),
