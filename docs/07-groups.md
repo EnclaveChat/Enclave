@@ -180,6 +180,14 @@ A poll close carries `tally_hash = H512(E("enclave/v1/proto/poll-tally-hash") �
 - The joiner then establishes pairwise sessions with every member device, starting with `kem_count = 2` (group-only peers, `04-eqxdh.md` §8), using each member's group-scoped request capability so these first contacts are not shown as message requests. Joining costs about 99 × 60 KB ≈ 6 MB of manifests and bundles in bulk mode, with a progress bar.
 - **New members cannot read history from before they joined.** They receive no chain seeds from earlier epochs.
 
+**As implemented** (`client/invites.rs`):
+
+- A group invite link is the admin's contact invite link (`03-identity.md` §9.2 as implemented: one-way PSK, request-inbox capabilities in place of proof of work, limited uses, 7 days, cancellable) bound to the group: `enclave:join#` + base64url(`u8(1) ‖ bytes(card v2) ‖ group_id (32) ‖ bytes(name)`). The admin's stored invite records the group and whether joins need approval; there is no separate `grp_invite_cap` and no `JoinRequest` message: the greeting through that invite *is* the join request. Only admins make links (`create_group_invite`).
+- The admin's client turns such a greeting into `Event::JoinRequest { root, group, name }` instead of a message request. With approval (the default, and the only choice in the app) it waits: **Accept** (`approve_join`) accepts the conversation and adds them with `add_group_members`, which starts a new epoch first, so they read nothing from before; **Decline** (`decline_join`) drops them silently. Without approval, the same happens on arrival.
+- The joiner (`join_group`) greets the admin through the link and shows "Waiting to join <name>" until the group's welcome arrives. Someone who already talks to the admin can't use a link (an existing conversation carries no invite) and is told to ask to be added.
+- The app: admins get **Copy invite link** in the members sheet; join requests appear among message requests as "Asks to join <group>"; the Add field takes `enclave:join#` links. Test `group_invite_links` covers approval, no history before joining, non-admins refused, joining without approval, and declining.
+- Not done: links from non-creating admins surviving the creator leaving, choosing uses or approval in the app, and the group-scoped request capabilities for member-to-member first contact (introductions still go through the existing group-introduction path).
+
 ## 10. Errors
 
 | Condition | Action |

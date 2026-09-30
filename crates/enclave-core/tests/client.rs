@@ -1169,3 +1169,81 @@ async fn rt04_split_view_detected_by_gossip() {
     cy.sync().await.unwrap();
     assert!(cy.kt_alert().is_none());
 }
+
+/// Group invite links (07 §9): a join waits for an admin by default, the
+/// newcomer reads nothing from before, only admins make links, and a link
+/// without approval lets people straight in.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_invite_links() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [
+        ("Ada", S1),
+        ("Mo", S2),
+        ("Jo", S1),
+        ("Kit", S2),
+        ("Nia", S1),
+    ] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo, mut kit, mut nia] = <[Client; 5]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    let gid = ada.create_group("Book club", &[mo.root()]).await.unwrap();
+    settle(&mut [&mut ada, &mut mo], 2).await;
+    ada.send_group_text(&gid, "before Jo").await.unwrap();
+    settle(&mut [&mut ada, &mut mo], 2).await;
+
+    // Only admins make links.
+    assert!(mo.create_group_invite(&gid, 1, true).await.is_err());
+    let link = ada.create_group_invite(&gid, 1, true).await.unwrap();
+    assert!(link.starts_with("enclave:join#"));
+    assert_eq!(jo.join_group(&link).await.unwrap(), "Book club");
+    assert_eq!(jo.joining().len(), 1);
+
+    let ev = ada.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::JoinRequest { root, group, .. } if *root == jo.root() && *group == gid)),
+        "{ev:?}"
+    );
+    assert_eq!(ada.join_request(&jo.root()), Some(gid));
+    ada.approve_join(&jo.root()).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    assert!(jo.groups().iter().any(|g| g.id == gid));
+    assert!(jo.joining().is_empty());
+    assert!(ada.join_request(&jo.root()).is_none());
+    // Nothing from before Jo joined.
+    assert!(
+        jo.group_messages(&gid)
+            .unwrap()
+            .iter()
+            .all(|m| m.text != "before Jo")
+    );
+    jo.send_group_text(&gid, "hi all").await.unwrap();
+    let ev = settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    assert!(
+        group_texts(&ev[1]).contains(&"hi all".to_string()),
+        "{:?}",
+        ev[1]
+    );
+
+    // Without approval: straight in.
+    let open = ada.create_group_invite(&gid, 1, false).await.unwrap();
+    kit.join_group(&open).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo, &mut kit], 3).await;
+    assert!(kit.groups().iter().any(|g| g.id == gid));
+
+    // A declined request goes away.
+    let link = ada.create_group_invite(&gid, 1, true).await.unwrap();
+    nia.join_group(&link).await.unwrap();
+    ada.sync().await.unwrap();
+    assert_eq!(ada.join_request(&nia.root()), Some(gid));
+    ada.decline_join(&nia.root()).unwrap();
+    assert!(ada.contact(&nia.root()).is_none());
+    assert!(ada.join_request(&nia.root()).is_none());
+}

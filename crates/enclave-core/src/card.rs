@@ -34,6 +34,9 @@ pub enum LinkError {
     /// An invite link that was already used up, expired or cancelled.
     #[error("this invite link was already used or has been cancelled")]
     InviteUsed,
+    /// A group link from someone we already talk to.
+    #[error("you already talk to this person; ask them to add you to the group")]
+    AlreadyContact,
     /// The person scanned their own code.
     #[error("this is your own code")]
     OwnCode,

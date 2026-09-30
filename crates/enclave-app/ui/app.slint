@@ -364,6 +364,8 @@ export component AppWindow inherits Window {
     in property <string> recovery-alert;
     in property <string> username-problem;
     in property <string> kt-split;
+    in property <string> joining;
+    callback new-group-invite(string);
     callback stop-recovery();
     callback meet-scan(string);
     callback search(string);
@@ -633,6 +635,11 @@ export component AppWindow inherits Window {
                         }
                         QuietButton { text: "It's me"; clicked => { root.approve-recovery(); } }
                     }
+                }
+                if root.joining != "": Notice {
+                    title: "Waiting to join " + root.joining;
+                    text: "An admin needs to let you in. You'll see the group here when they do.";
+                    kind: 0;
                 }
                 if root.kt-split != "": Notice {
                     title: "A username server showed people different lists";
@@ -1421,6 +1428,19 @@ export component AppWindow inherits Window {
                     clicked => { root.remove-member(root.current-id, m.id); }
                 }
             }
+        }
+        if root.group-admin: HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-s;
+            QuietButton {
+                text: "Copy invite link";
+                accessible-label: "Copy a group invite link";
+                clicked => { root.new-group-invite(root.current-id); }
+            }
+        }
+        if root.group-admin: Caption {
+            text: "Each link works for one person, for 7 days. You approve them before they join, and they see only new messages.";
+            wrap: word-wrap;
         }
         if root.group-admin && root.addable.length > 0: Body { text: "Add people"; font-weight: 600; }
         if root.group-admin && root.addable.length > 0: Secondary { text: "They'll see new messages from now on, not what was said before they joined."; }

@@ -149,6 +149,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::NewInvite(1));
     });
     let t = tx.clone();
+    ui.on_new_group_invite(move |id| {
+        let _ = t.send(Cmd::NewGroupInvite(id.to_string()));
+    });
+    let t = tx.clone();
     ui.on_cancel_invites(move || {
         let _ = t.send(Cmd::CancelInvites);
     });

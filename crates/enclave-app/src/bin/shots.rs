@@ -204,6 +204,7 @@ fn fixture() -> Snapshot {
         search: Vec::new(),
         username_problem: String::new(),
         kt_split: String::new(),
+        joining: Vec::new(),
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
@@ -474,6 +475,13 @@ fn main() -> Result<(), slint::PlatformError> {
         view::apply(&ui, &members);
         ui.set_sheet(Sheet::Members);
         shot("24-members-phone", phone);
+        let mut waiting = data.clone();
+        waiting.joining = vec!["Book club".into()];
+        waiting.current = None;
+        view::apply(&ui, &waiting);
+        ui.set_sheet(Sheet::None);
+        ui.set_current_id("".into());
+        shot("29-joining-phone", phone);
         ui.set_sheet(Sheet::None);
         view::apply(&ui, &data);
         ui.set_group_name("Book club".into());

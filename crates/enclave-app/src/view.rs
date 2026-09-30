@@ -216,6 +216,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_recovery_alert(s.recovery_alert.clone().into());
     ui.set_username_problem(s.username_problem.clone().into());
     ui.set_kt_split(s.kt_split.clone().into());
+    ui.set_joining(s.joining.join(", ").into());
     ui.set_unlock_error(s.unlock_error.clone().into());
     ui.set_can_lock(s.can_lock);
     ui.set_invites(s.invites as i32);

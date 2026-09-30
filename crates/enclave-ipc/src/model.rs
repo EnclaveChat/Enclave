@@ -164,6 +164,8 @@ pub struct Snapshot {
     /// The domain of a username server proven to show people different
     /// versions of its log (RT-04), or empty.
     pub kt_split: String,
+    /// Names of groups we asked to join that haven't let us in yet.
+    pub joining: Vec<String>,
     /// Members of the open group (other than us).
     pub members: Vec<Row>,
     /// We are an admin of the open group.
@@ -263,6 +265,9 @@ pub enum Cmd {
     NewInvite(u8),
     /// Cancel every invite link.
     CancelInvites,
+    /// Make a group invite link (admins; joins wait for approval); it comes
+    /// back as [`Out::Invite`].
+    NewGroupInvite(String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -432,7 +437,9 @@ impl Snapshot {
             .str(&self.meet_done)
             .u32(self.timer);
         put_rows(&mut w, &self.search);
-        w.str(&self.username_problem).str(&self.kt_split);
+        w.str(&self.username_problem)
+            .str(&self.kt_split)
+            .strs(&self.joining);
         put_rows(&mut w, &self.members);
         w.bool(self.group_admin);
         w.len(self.addable.len());
@@ -541,6 +548,7 @@ impl Snapshot {
             search: get_rows(&mut r)?,
             username_problem: r.str()?,
             kt_split: r.str()?,
+            joining: r.strs()?,
             members: get_rows(&mut r)?,
             group_admin: r.bool()?,
             addable: {
@@ -610,6 +618,7 @@ impl Cmd {
             Cmd::SetPassphrase(p) => w.u8(37).str(p),
             Cmd::NewInvite(n) => w.u8(38).u8(*n),
             Cmd::CancelInvites => w.u8(39),
+            Cmd::NewGroupInvite(g) => w.u8(40).str(g),
         };
         w.0
     }
@@ -657,6 +666,7 @@ impl Cmd {
             37 => Cmd::SetPassphrase(r.str()?),
             38 => Cmd::NewInvite(r.u8()?),
             39 => Cmd::CancelInvites,
+            40 => Cmd::NewGroupInvite(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

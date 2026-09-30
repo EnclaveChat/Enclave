@@ -111,6 +111,7 @@ mod usernames;
 pub use gossip::{GossipItem, KtAlert};
 pub use groups::{GroupInfo, GroupMessage};
 pub use guard::RecoveryAlert;
+pub use invites::{InviteInfo, JOIN_PREFIX, JoinLink};
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
@@ -159,6 +160,16 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// Someone asked to join a group through our group invite link; they
+    /// wait for approval ([`Client::approve_join`]).
+    JoinRequest {
+        /// Who.
+        root: [u8; 64],
+        /// The group.
+        group: [u8; 32],
+        /// The name they gave (unverified).
+        name: String,
+    },
     /// Gossip with a contact proved that a key-transparency server signed
     /// two different versions of its log for the same epoch (RT-04): it
     /// shows different people different keys.
@@ -1149,6 +1160,11 @@ impl Client {
                 .put(NS_REPLAY, &rid, &now.to_be_bytes(), &mut self.rng)?;
             return Ok(None);
         }
+        // Through a group invite link: a join request.
+        let join = match via {
+            Via::Invite(key) if root != self.account.root_public.0 => self.invite_group(&key),
+            _ => None,
+        };
         if root == self.account.root_public.0 {
             // Another device of ours (it is in our root-signed manifest, or
             // `respond` would have failed): keep the session for self-copies.
@@ -1252,6 +1268,8 @@ impl Client {
                 };
                 let ev = if introduced_by.is_some() || bonded {
                     None
+                } else if let Some((group, _)) = join {
+                    Some(Event::JoinRequest { root, group, name })
                 } else {
                     Some(Event::Request {
                         root,
@@ -1280,6 +1298,15 @@ impl Client {
         if auto_accept {
             self.accept_with(&root, introduced_by).await?;
             return Ok(None);
+        }
+        if let Some((gid, approve)) = join
+            && contact.state == ContactState::Request
+        {
+            self.note_join_request(&root, &gid)?;
+            if !approve {
+                self.approve_join(&root).await?;
+                return Ok(None);
+            }
         }
         if grant_tokens {
             let tokens = self.issue_tokens(&root, HELLO_TOKENS, now).await?;

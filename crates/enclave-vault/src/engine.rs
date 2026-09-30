@@ -303,6 +303,7 @@ fn link_error(e: &CoreError) -> String {
         CoreError::Link(LinkError::NotEnclave) => "That isn't an Enclave invite link.".into(),
         CoreError::Link(LinkError::Malformed) => "This link is damaged. Ask them to send it again.".into(),
         CoreError::Link(LinkError::OwnCode) => "That's your own invite link.".into(),
+        CoreError::Link(LinkError::AlreadyContact) => "You already talk to the person who sent this group link. Ask them to add you to the group.".into(),
         CoreError::Link(LinkError::InviteUsed) => "This invite link was already used, has expired or was cancelled. Ask them for a new one.".into(),
         CoreError::Net(_) => "Couldn't reach their server. Check your connection and try again.".into(),
         _ => "Couldn't add them with this link. Ask them to send a new one.".into(),
@@ -604,17 +605,61 @@ impl Engine {
                 }
             }
             Cmd::Accept(id) => {
-                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
-                    && c.accept(&root).await.is_err()
-                {
-                    self.status = "Couldn't accept yet. Check your connection.".into();
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
+                    // A join request: accepting lets them into the group.
+                    let r = if c.join_request(&root).is_some() {
+                        c.approve_join(&root).await
+                    } else {
+                        c.accept(&root).await
+                    };
+                    if r.is_err() {
+                        self.status = "Couldn't accept yet. Check your connection.".into();
+                    }
                 }
             }
             Cmd::Decline(id) => {
                 if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
-                    let _ = c.remove_contact(&root);
+                    let _ = if c.join_request(&root).is_some() {
+                        c.decline_join(&root)
+                    } else {
+                        c.remove_contact(&root)
+                    };
                     self.selected = None;
                 }
+            }
+            Cmd::NewGroupInvite(id) => {
+                self.busy = true;
+                self.push();
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut()) {
+                    match c.create_group_invite(&gid, 1, true).await {
+                        Ok(link) => {
+                            let _ = self.out.send(Out::Invite(link));
+                        }
+                        Err(_) => {
+                            self.status =
+                                "Couldn't make an invite link. Check your connection and try again."
+                                    .into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::Add(link, _) if link.trim().starts_with(enclave_core::client::JOIN_PREFIX) => {
+                self.add_error.clear();
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    match c.join_group(link.trim()).await {
+                        Ok(name) => {
+                            self.status = format!(
+                                "You asked to join {name}. You'll be in once an admin lets you in."
+                            );
+                            self.effect(Effect::ContactAdded);
+                        }
+                        Err(err) => self.add_error = link_error(&err),
+                    }
+                }
+                self.busy = false;
             }
             Cmd::Add(link, text) => {
                 self.add_error.clear();
@@ -1271,6 +1316,7 @@ impl Engine {
         s.my_link = c.card().to_link();
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
+        s.joining = c.joining().into_iter().map(|(_, n)| n).collect();
         s.kt_split = c
             .kt_alert()
             .map(|a| {
@@ -1297,15 +1343,21 @@ impl Engine {
         for ct in c.contacts() {
             let msgs = c.messages(&ct.root).unwrap_or_default();
             let last = msgs.last();
+            let join = (ct.state == ContactState::Request)
+                .then(|| c.join_request(&ct.root))
+                .flatten()
+                .and_then(|g| c.groups().into_iter().find(|x| x.id == g))
+                .map(|g| format!("Asks to join {}", g.name));
             let row = Row {
                 id: hex_id(&ct.root),
                 name: ct.name.clone(),
-                preview: last
-                    .map(|m| {
+                preview: join.unwrap_or_else(|| {
+                    last.map(|m| {
                         let t = display(m, now).text;
                         if m.outgoing { format!("You: {t}") } else { t }
                     })
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                }),
                 time: last.map(|m| clock(m.at)).unwrap_or_default(),
                 unread: ct.unread as i32,
                 state: match ct.state {
