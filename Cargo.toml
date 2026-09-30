@@ -63,5 +63,12 @@ overflow-checks = true
 [profile.test]
 opt-level = 2
 
+# Our own crates optimized in development builds too: unoptimized, the
+# vault's account setup (key generation, proofs of work) takes minutes, so
+# `cargo run -p enclave-app` looked frozen and the launcher test timed out
+# whenever it picked up a plain `cargo build` of the vault.
+[profile.dev]
+opt-level = 2
+
 [profile.dev.package."*"]
 opt-level = 2
