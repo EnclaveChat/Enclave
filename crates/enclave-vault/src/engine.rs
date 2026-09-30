@@ -219,6 +219,16 @@ fn mime_for(name: &str) -> &'static str {
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
 
+/// The list flags of a conversation.
+fn prefs_row(p: enclave_core::ConvPrefs) -> Row {
+    Row {
+        pinned: p.pinned,
+        muted: p.muted,
+        archived: p.archived,
+        ..Default::default()
+    }
+}
+
 /// Longest pinned-message line, in characters.
 const PIN_CHARS: usize = 80;
 
@@ -865,6 +875,27 @@ impl Engine {
                     }
                 }
                 self.busy = false;
+            }
+            Cmd::ConvPrefs(id, archived, pinned, muted) => {
+                let place = match (self.root_of(&id), self.group_of(&id)) {
+                    (Some(r), _) => Place::Contact(r),
+                    (None, Some(g)) => Place::Group(g),
+                    (None, None) => return,
+                };
+                let prefs = enclave_core::ConvPrefs {
+                    archived,
+                    // An archived conversation isn't pinned to the top.
+                    pinned: pinned && !archived,
+                    muted,
+                };
+                if let Some(c) = self.client.as_mut()
+                    && c.set_conv_prefs(&place, prefs).is_err()
+                {
+                    self.status = format!(
+                        "You can pin {} conversations. Unpin one first.",
+                        enclave_core::MAX_PINNED_CONVERSATIONS
+                    );
+                }
             }
             Cmd::Pin(id, seq, on) => {
                 let (root, gid) = (self.root_of(&id), self.group_of(&id));
@@ -1577,6 +1608,7 @@ impl Engine {
                 tint: tint_for(&ct.root),
                 kind: 0,
                 members: 0,
+                ..prefs_row(c.conv_prefs(&Place::Contact(ct.root)))
             };
             if self.selected == Some(ct.root) {
                 s.current = Some(row.clone());
@@ -1630,6 +1662,7 @@ impl Engine {
                 tint: tint_for(&g.id),
                 kind: 1,
                 members: g.members.len() as i32 + 1,
+                ..prefs_row(c.conv_prefs(&Place::Group(g.id)))
             };
             if self.selected_group == Some(g.id) {
                 s.current = Some(row.clone());
@@ -1706,10 +1739,13 @@ impl Engine {
             }
             rows.push((last.map(|m| m.at).unwrap_or(0), row));
         }
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        // Pinned first, then newest first.
+        rows.sort_by(|a, b| b.1.pinned.cmp(&a.1.pinned).then(b.0.cmp(&a.0)));
         for (_, r) in rows {
             if r.state == 1 {
                 s.requests.push(r)
+            } else if r.archived {
+                s.archived.push(r)
             } else {
                 s.contacts.push(r)
             }

@@ -381,6 +381,7 @@ impl Client {
                 if let Some(e) = self.groups.get_mut(gid) {
                     e.unread = e.unread.saturating_add(1);
                 }
+                self.unarchive_on_message(&Place::Group(*gid))?;
                 Ok(Some(Event::GroupMessage {
                     group_id: *gid,
                     message: m,

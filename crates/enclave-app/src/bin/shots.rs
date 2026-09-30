@@ -41,6 +41,7 @@ fn fixture() -> Snapshot {
         tint,
         kind: 0,
         members: 0,
+        ..Default::default()
     };
     let seq = std::cell::Cell::new(0u64);
     let msg = |text: &str, outgoing: bool, time: &str, status: i32| {
@@ -105,6 +106,7 @@ fn fixture() -> Snapshot {
             false,
             3,
         )],
+        archived: Vec::new(),
         current: Some(row(
             "a1",
             "Sam Okafor",
@@ -236,6 +238,7 @@ fn group_fixture(base: &Snapshot) -> Snapshot {
         tint: 5,
         kind: 1,
         members: 4,
+        ..Default::default()
     };
     g.contacts.insert(0, row.clone());
     g.current = Some(row);
@@ -503,6 +506,30 @@ fn main() -> Result<(), slint::PlatformError> {
         view::apply(&ui, &pinned);
         shot("36-pinned", desktop);
         shot("36-pinned-phone", phone);
+        // Conversation settings, and a list with pinned, muted and archived.
+        let mut listed = data.clone();
+        if let Some(r) = listed.contacts.get_mut(1) {
+            r.pinned = true;
+        }
+        if let Some(r) = listed.contacts.get_mut(2) {
+            r.muted = true;
+            r.unread = 3;
+        }
+        if let Some(mut r) = listed.contacts.pop() {
+            r.archived = true;
+            listed.archived.push(r);
+        }
+        if let Some(i) = listed.contacts.iter().position(|r| r.pinned) {
+            let r = listed.contacts.remove(i);
+            listed.contacts.insert(0, r);
+        }
+        view::apply(&ui, &listed);
+        ui.set_show_archived(true);
+        shot("37-list-prefs", desktop);
+        ui.set_show_archived(false);
+        ui.set_sheet(Sheet::Conversation);
+        shot("38-conversation-sheet-phone", phone);
+        ui.set_sheet(Sheet::None);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

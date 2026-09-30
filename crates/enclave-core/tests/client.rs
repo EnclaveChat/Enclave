@@ -1402,6 +1402,63 @@ async fn pinned_messages() {
     }
 }
 
+/// Archive, pin to the top and mute: local to this device. A new message
+/// brings an archived conversation back unless it is muted; at most four
+/// conversations are pinned.
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_prefs() {
+    use enclave_core::{ConvPrefs, MAX_PINNED_CONVERSATIONS, Place};
+    let net = network();
+    let (mut ada, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut mo, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Mo")
+        .await
+        .unwrap();
+    connect(&mut ada, &mut mo).await;
+    let here = Place::Contact(mo.root());
+    let archived = ConvPrefs {
+        archived: true,
+        ..Default::default()
+    };
+    ada.set_conv_prefs(&here, archived).unwrap();
+    assert!(ada.conv_prefs(&here).archived);
+    mo.send_text(&ada.root(), "still there?").await.unwrap();
+    ada.sync().await.unwrap();
+    assert!(
+        !ada.conv_prefs(&here).archived,
+        "a new message brings it back"
+    );
+
+    let quiet = ConvPrefs {
+        archived: true,
+        muted: true,
+        ..Default::default()
+    };
+    ada.set_conv_prefs(&here, quiet).unwrap();
+    mo.send_text(&ada.root(), "hello?").await.unwrap();
+    ada.sync().await.unwrap();
+    assert_eq!(ada.conv_prefs(&here), quiet, "muted stays archived");
+    assert_eq!(
+        mo.conv_prefs(&Place::Contact(ada.root())),
+        ConvPrefs::default(),
+        "the other side never learns"
+    );
+
+    let pin = ConvPrefs {
+        pinned: true,
+        ..Default::default()
+    };
+    for i in 0..MAX_PINNED_CONVERSATIONS as u8 {
+        ada.set_conv_prefs(&Place::Group([i; 32]), pin).unwrap();
+    }
+    assert!(ada.set_conv_prefs(&here, pin).is_err(), "four at most");
+    ada.set_conv_prefs(&Place::Group([0; 32]), ConvPrefs::default())
+        .unwrap();
+    ada.set_conv_prefs(&here, pin).unwrap();
+    ada.set_conv_prefs(&here, pin).unwrap(); // unchanged: still allowed
+}
+
 /// Push (10-push.md): a message to Bob's inbox makes his server schedule
 /// one wake per window for his sealed token, released in the next window;
 /// the relay opens it to Bob's UnifiedPush endpoint. The server never sees

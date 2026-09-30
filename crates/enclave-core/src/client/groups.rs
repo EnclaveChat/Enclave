@@ -9,6 +9,7 @@
 //! rotates before its first send, whenever its chain is due, and whenever a
 //! member it has not yet keyed becomes reachable.
 
+use super::search::Place;
 use super::{Client, ContactState, Event, sanitize_name};
 use crate::card::ContactCard;
 use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_TEXT};
@@ -951,6 +952,7 @@ impl Client {
         if let Some(e) = self.groups.get_mut(gid) {
             e.unread = e.unread.saturating_add(1);
         }
+        self.unarchive_on_message(&Place::Group(*gid))?;
         Ok(Some(Event::GroupMessage {
             group_id: *gid,
             message: m,

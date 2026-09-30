@@ -88,6 +88,9 @@ fn row(r: &Row) -> ContactRow {
         met: r.met,
         kind: r.kind,
         members: r.members,
+        pinned: r.pinned,
+        muted: r.muted,
+        archived: r.archived,
     }
 }
 
@@ -143,6 +146,9 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ))));
     ui.set_requests(ModelRc::from(Rc::new(VecModel::from(
         s.requests.iter().map(row).collect::<Vec<_>>(),
+    ))));
+    ui.set_archived(ModelRc::from(Rc::new(VecModel::from(
+        s.archived.iter().map(row).collect::<Vec<_>>(),
     ))));
     match &s.current {
         Some(c) => {

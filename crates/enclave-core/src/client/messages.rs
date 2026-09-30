@@ -727,7 +727,8 @@ impl Client {
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         c.unread = c.unread.saturating_add(1);
         let c = c.clone();
-        self.save_contact(&c)
+        self.save_contact(&c)?;
+        self.unarchive_on_message(&Place::Contact(*root))
     }
 }
 

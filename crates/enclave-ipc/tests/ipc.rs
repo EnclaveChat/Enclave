@@ -17,12 +17,19 @@ fn snapshot() -> Snapshot {
         tint: 5,
         kind: 0,
         members: 0,
+        pinned: true,
+        muted: true,
+        archived: false,
     };
     Snapshot {
         my_name: "Robin".into(),
         my_link: "enclave:add#xyz".into(),
         contacts: vec![row.clone(), Row::default()],
         requests: vec![row.clone()],
+        archived: vec![Row {
+            archived: true,
+            ..Row::default()
+        }],
         current: Some(row),
         messages: vec![Msg {
             text: "hello".into(),
@@ -124,6 +131,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::GiveShares(vec!["ab".into(), "cd".into()], 2),
         Cmd::RevealShare(String::new()),
         Cmd::Pin("id".into(), 3, true),
+        Cmd::ConvPrefs("id".into(), true, false, true),
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),

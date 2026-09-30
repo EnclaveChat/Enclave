@@ -36,6 +36,12 @@ pub struct Row {
     pub kind: i32,
     /// Members (groups).
     pub members: i32,
+    /// Pinned to the top of the list.
+    pub pinned: bool,
+    /// Muted.
+    pub muted: bool,
+    /// Archived.
+    pub archived: bool,
 }
 
 /// A contact that can be picked for a new group.
@@ -115,6 +121,8 @@ pub struct Snapshot {
     pub contacts: Vec<Row>,
     /// Message requests.
     pub requests: Vec<Row>,
+    /// Archived conversations.
+    pub archived: Vec<Row>,
     /// Selected conversation.
     pub current: Option<Row>,
     /// Its messages.
@@ -313,6 +321,8 @@ pub enum Cmd {
     RevealShare(String),
     /// Pin (true) or unpin a message: conversation, position.
     Pin(String, u64, bool),
+    /// How to list a conversation: id, archived, pinned to the top, muted.
+    ConvPrefs(String, bool, bool, bool),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -377,7 +387,10 @@ fn put_row(w: &mut Writer, r: &Row) {
         .bool(r.met)
         .u8((r.tint % TINT_COUNT) as u8)
         .i32(r.kind)
-        .i32(r.members);
+        .i32(r.members)
+        .bool(r.pinned)
+        .bool(r.muted)
+        .bool(r.archived);
 }
 
 fn get_row(r: &mut Reader<'_>) -> Result<Row> {
@@ -393,6 +406,9 @@ fn get_row(r: &mut Reader<'_>) -> Result<Row> {
         tint: tint(r.u8()?)?,
         kind: r.i32()?,
         members: r.i32()?,
+        pinned: r.bool()?,
+        muted: r.bool()?,
+        archived: r.bool()?,
     })
 }
 
@@ -424,6 +440,7 @@ impl Snapshot {
         w.str(&self.my_name).str(&self.my_link);
         put_rows(&mut w, &self.contacts);
         put_rows(&mut w, &self.requests);
+        put_rows(&mut w, &self.archived);
         match &self.current {
             Some(c) => {
                 w.u8(1);
@@ -532,6 +549,7 @@ impl Snapshot {
         let my_link = r.str()?;
         let contacts = get_rows(&mut r)?;
         let requests = get_rows(&mut r)?;
+        let archived = get_rows(&mut r)?;
         let current = match r.u8()? {
             0 => None,
             1 => Some(get_row(&mut r)?),
@@ -597,6 +615,7 @@ impl Snapshot {
             my_link,
             contacts,
             requests,
+            archived,
             current,
             messages,
             code_groups,
@@ -724,6 +743,7 @@ impl Cmd {
             Cmd::GiveShares(ids, t) => w.u8(46).strs(ids).u32(*t),
             Cmd::RevealShare(id) => w.u8(47).str(id),
             Cmd::Pin(c, s, on) => w.u8(48).str(c).u64(*s).bool(*on),
+            Cmd::ConvPrefs(c, a, p, m) => w.u8(49).str(c).bool(*a).bool(*p).bool(*m),
         };
         w.0
     }
@@ -780,6 +800,7 @@ impl Cmd {
             46 => Cmd::GiveShares(r.strs()?, r.u32()?),
             47 => Cmd::RevealShare(r.str()?),
             48 => Cmd::Pin(r.str()?, r.u64()?, r.bool()?),
+            49 => Cmd::ConvPrefs(r.str()?, r.bool()?, r.bool()?, r.bool()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

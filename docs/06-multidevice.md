@@ -69,6 +69,8 @@ PLAN D5: each message is exactly 2 envelopes, one to the recipient's account inb
 
 Every pair of the account's own devices has a Lockstep session, established by EQXDH when a device is linked. Own-device sync carries sent messages, read state, contact and group changes, settings, verification states and fetch positions, but never ratchet state.
 
+**Conversation list settings, as implemented** (`enclave-core/src/client/prefs.rs`): archive, pin to the top and mute are kept per conversation, 1:1 or group, in the sealed store. They are local: nothing about them is sent to anyone, including our other devices, which keep their own until this sync exists. At most four conversations are pinned to the top (they list first, newest first). A message from someone else brings an archived conversation back unless it is muted; a muted conversation still counts unread messages but shows the count without the Pine fill. The app has a conversation sheet with the three switches (on a phone it also holds the disappearing-messages timer) and an "Archived (n)" section at the end of the list. Test `conversation_prefs`.
+
 ## 6. Deletion watermark
 
 Implemented at the server (`12-servers.md` §1.2):
