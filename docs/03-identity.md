@@ -133,6 +133,16 @@ The rendezvous mailbox accepts writes and reads authorized by `link_cap` (`02b-k
 - A linked device that has not sent any intra-account sync message for 30 days is treated as inactive: the account's other devices stop wrapping keys for it immediately, and the primary publishes a manifest without it the next time the root is unlocked. The UI asks for the PIN at the next app open when such a removal is pending.
 - The device cap is 5 (1 primary plus 4 linked). Linking a sixth device MUST be refused with "You can link up to 4 devices. Remove one first."
 
+### 4.x Implementation status (M5 follow-up)
+
+`crates/enclave-core/src/client/link.rs`, test `link_a_second_device`. Where this differs from §4.1–4.3 above, the code is normative:
+
+- **Code.** `enclave:link#` + base64url of `version ‖ server 16 ‖ mailbox 32 ‖ owner 32 ‖ X448 56 ‖ link_secret 32 ‖ commit 32` (201 B), not base32 with the ML-KEM key inline. The new device writes its ML-KEM ek and device keys (composite signing key, ML-KEM auth key) to the rendezvous mailbox first; `commit` is the first 32 bytes of SHA3-512 of that record, so the QR code stays small and the primary can check it read the right record. The general scanner refuses the code (`ContactCard::from_link` → `DeviceLinkCode`).
+- **Key.** `EnclaveCombine(TwoKem, [X448, ML-KEM-1024], [X_new, ek, X_primary, ct, transcript], psk = link_secret)` with transcript `"enclave/v1/proto/link-transcript" ‖ commit ‖ mailbox`. Both screens derive three BIP-39 words (`link-phrase`); the primary shows four choices and links only on the right one.
+- **Handover.** The primary signs and publishes manifest `version + 1` (with `prev_hash`), then uploads the account as a sealed blob: profile, shared account keys, the signed manifest, and every accepted contact's card, name, checked state, timer, inbox and **half of its write tokens** (tokens are single use, so each device needs its own). The blob reference travels sealed under `link-keys`.
+- **After linking.** The new device publishes its prekeys and opens sessions with every contact's devices (contacts accept them silently: the device is in the root-signed manifest) and with the account's other devices. Every message sent from one device is copied to the others (`Content::SelfCopy`) through the shared account inbox.
+- **Not implemented:** the 24 h history-transfer delay and history transfer itself, the 7-day "new device" banner, automatic removal of inactive devices, revocation, the 72 h pending-root veto, group membership for the new device, and contacts without a card (from before cards were exchanged) are not handed over.
+
 ## 5. Revocation and "Secure my account"
 
 ### 5.1 Revocation

@@ -115,6 +115,13 @@ pub enum Content {
     Read(Vec<MsgId>),
     /// The conversation's disappearing timer changed.
     Timer(u32),
+    /// A copy, for our other devices, of content we sent to `to`.
+    SelfCopy {
+        /// The conversation it belongs to.
+        to: [u8; 64],
+        /// The content we sent (encoded).
+        content: Vec<u8>,
+    },
 }
 
 const K_HELLO: u8 = 1;
@@ -128,6 +135,9 @@ const K_EDIT: u8 = 8;
 const K_DELETE: u8 = 9;
 const K_READ: u8 = 10;
 const K_TIMER: u8 = 11;
+const K_SELF_COPY: u8 = 12;
+/// Largest content a self-copy can wrap.
+pub const MAX_SELF_COPY: usize = 9_000;
 
 fn put_tokens(w: &mut Writer, t: &[Token]) {
     w.u8(t.len() as u8);
@@ -271,6 +281,12 @@ impl Content {
                 }
                 w.u8(K_TIMER).u32(*secs);
             }
+            Content::SelfCopy { to, content } => {
+                if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
+                    return too_large;
+                }
+                w.u8(K_SELF_COPY).fixed(to).bytes(content);
+            }
         }
         Ok(w.finish())
     }
@@ -335,6 +351,14 @@ impl Content {
                 Content::Read((0..n).map(|_| r.array()).collect::<Result<_>>()?)
             }
             K_TIMER => Content::Timer(timer(r.u32()?)?),
+            K_SELF_COPY => {
+                let to = r.array()?;
+                let content = r.bytes(MAX_SELF_COPY)?.to_vec();
+                if content.first() == Some(&K_SELF_COPY) {
+                    return Err(ProtoError::Decode);
+                }
+                Content::SelfCopy { to, content }
+            }
             _ => return Err(ProtoError::Decode),
         };
         r.end()?;
@@ -389,6 +413,10 @@ mod tests {
             Content::Delete { target: [4; 16] },
             Content::Read(vec![[5; 16]; 10]),
             Content::Timer(86_400),
+            Content::SelfCopy {
+                to: [9; 64],
+                content: vec![K_TEXT, 0, 0, 0, 0, 0],
+            },
         ];
         for c in all {
             let e = c.encode().unwrap();

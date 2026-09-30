@@ -27,7 +27,8 @@ mod rpc;
 
 pub use card::{ContactCard, LinkError};
 pub use client::{
-    Client, Contact, ContactState, Event, GroupInfo, GroupMessage, Message, Options, Reaction,
+    Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
+    LinkProgress, LinkingDevice, Message, Options, Reaction,
 };
 
 use enclave_rpc::api::Status;

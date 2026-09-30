@@ -165,7 +165,7 @@ pub struct Xorshift(pub u64);
 
 impl Xorshift {
     /// Next value.
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -176,7 +176,7 @@ impl Xorshift {
 
     /// Uniform in `0..n` (n > 0).
     pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n.max(1) as u64) as usize
+        (self.next_u64() % n.max(1) as u64) as usize
     }
 }
 
@@ -200,7 +200,7 @@ pub fn mutate(input: &[u8], rng: &mut Xorshift) -> Vec<u8> {
             }
             3 => {
                 for _ in 0..rng.below(64) {
-                    v.push(rng.next() as u8);
+                    v.push(rng.next_u64() as u8);
                 }
             }
             4 if v.len() > 4 => {
@@ -213,11 +213,11 @@ pub fn mutate(input: &[u8], rng: &mut Xorshift) -> Vec<u8> {
             5 if v.len() >= 4 => {
                 // A length field set to something huge.
                 let i = rng.below(v.len() - 3);
-                v[i..i + 4].copy_from_slice(&[0xff, 0xff, 0xff, (rng.next() as u8) | 0xf0]);
+                v[i..i + 4].copy_from_slice(&[0xff, 0xff, 0xff, (rng.next_u64() as u8) | 0xf0]);
             }
             _ => {
                 let i = rng.below(v.len() + 1);
-                v.insert(i, rng.next() as u8);
+                v.insert(i, rng.next_u64() as u8);
             }
         }
     }

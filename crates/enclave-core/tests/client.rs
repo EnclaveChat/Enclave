@@ -417,3 +417,87 @@ async fn attachments_reactions_edits_deletes_receipts_and_timers() {
         .unwrap();
     assert!(theirs.expires_at.is_some());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_a_second_device() {
+    let net = network();
+    let (mut a, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    b.send_text(&a.root(), "before the link").await.unwrap();
+    a.sync().await.unwrap();
+
+    // The new device shows a code; the general scanner refuses it.
+    let mut n = enclave_core::LinkingDevice::start(memory(), Arc::new(net.clone()), S1)
+        .await
+        .unwrap();
+    let code = n.code();
+    assert_eq!(
+        ContactCard::from_link(&code).unwrap_err(),
+        enclave_core::LinkError::DeviceLinkCode
+    );
+    assert_eq!(n.poll().await.unwrap(), enclave_core::LinkProgress::Waiting);
+
+    // A wrong pick links nothing.
+    let offer = a.link_prepare(&code).await.unwrap();
+    let enclave_core::LinkProgress::Words(words) = n.poll().await.unwrap() else {
+        panic!("words")
+    };
+    let right = offer
+        .choices
+        .iter()
+        .position(|c| *c == words)
+        .expect("one choice matches");
+    let wrong = (right + 1) % 4;
+    assert!(a.link_confirm(offer, wrong).await.is_err());
+    assert_eq!(a.devices().len(), 1);
+
+    // Start again and pick the right words.
+    let mut n = enclave_core::LinkingDevice::start(memory(), Arc::new(net.clone()), S1)
+        .await
+        .unwrap();
+    let offer = a.link_prepare(&n.code()).await.unwrap();
+    let enclave_core::LinkProgress::Words(words) = n.poll().await.unwrap() else {
+        panic!("words")
+    };
+    let right = offer.choices.iter().position(|c| *c == words).unwrap();
+    a.link_confirm(offer, right).await.unwrap();
+    assert_eq!(n.poll().await.unwrap(), enclave_core::LinkProgress::Ready);
+    let mut a2 = n.finish().await.unwrap();
+    assert_eq!(a2.root(), a.root());
+    assert!(!a2.can_link(), "linked devices hold no root");
+    assert_eq!(a.devices().len(), 2);
+    assert_eq!(a2.contacts().len(), 1);
+
+    // Ben and Ada's first device learn the new device without any request.
+    let ev = b.sync().await.unwrap();
+    assert!(ev.iter().all(|e| !matches!(e, Event::Request { .. })));
+    let ev = a.sync().await.unwrap();
+    assert!(ev.contains(&Event::DevicesChanged));
+
+    // Ben's next message reaches both of Ada's devices.
+    b.send_text(&a.root(), "to both of you").await.unwrap();
+    for dev in [&mut a, &mut a2] {
+        let ev = dev.sync().await.unwrap();
+        assert!(ev.iter().any(
+            |e| matches!(e, Event::Message { message, .. } if message.text == "to both of you")
+        ));
+    }
+    // What one device sends shows up on the other as sent.
+    a2.send_text(&b.root(), "from the new device")
+        .await
+        .unwrap();
+    let ev = b.sync().await.unwrap();
+    assert!(ev.iter().any(
+        |e| matches!(e, Event::Message { message, .. } if message.text == "from the new device")
+    ));
+    let ev = a.sync().await.unwrap();
+    assert!(ev.iter().any(|e| matches!(e, Event::Message { message, .. } if message.outgoing && message.text == "from the new device")));
+    a.send_text(&b.root(), "and from the first").await.unwrap();
+    let ev = a2.sync().await.unwrap();
+    assert!(ev.iter().any(|e| matches!(e, Event::Message { message, .. } if message.outgoing && message.text == "and from the first")));
+}

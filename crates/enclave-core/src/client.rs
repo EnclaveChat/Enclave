@@ -96,8 +96,10 @@ impl Contact {
 }
 
 mod groups;
+mod link;
 mod messages;
 pub use groups::{GroupInfo, GroupMessage};
+pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
 
 /// Something the UI should show.
@@ -138,6 +140,8 @@ pub enum Event {
         /// New timer in seconds (0 = off).
         secs: u32,
     },
+    /// A device was linked to (or is now talking with) this account.
+    DevicesChanged,
     /// We were added to a group.
     GroupJoined {
         /// Group.
@@ -330,6 +334,7 @@ impl Client {
         store.put(NS_SECRETS, b"prekeys", &prekeys.export(), &mut rng)?;
         store.put(NS_PROFILE, b"profile", &profile.encode(), &mut rng)?;
         store.put(NS_PROFILE, b"manifest", &manifest.encode()?, &mut rng)?;
+        store.put(NS_PROFILE, b"signed-manifest", &signed.to_bytes(), &mut rng)?;
 
         let client = Self {
             store,
@@ -359,14 +364,16 @@ impl Client {
         let get = |ns: &str, k: &[u8]| -> Result<Vec<u8>> {
             store.get(ns, k)?.ok_or(CoreError::NotFound)
         };
-        let recovery_bytes: [u8; 32] = get(NS_SECRETS, b"recovery")?
-            .as_slice()
-            .try_into()
-            .map_err(|_| CoreError::NotFound)?;
-        let recovery = RecoverySecret::from_bytes(recovery_bytes);
+        // Linked devices have no recovery secret and so no root.
+        let recovery = match store.get(NS_SECRETS, b"recovery")? {
+            Some(b) => Some(RecoverySecret::from_bytes(
+                b.as_slice().try_into().map_err(|_| CoreError::NotFound)?,
+            )),
+            None => None,
+        };
         let account = AccountKeys::import_shared(
             &Zeroizing::new(get(NS_SECRETS, b"account")?),
-            Some(&recovery),
+            recovery.as_ref(),
         )?;
         let device = DeviceKeys::import(&Zeroizing::new(get(NS_SECRETS, b"device")?))?;
         let prekeys = PrekeyStore::import(&Zeroizing::new(get(NS_SECRETS, b"prekeys")?))?;
@@ -535,38 +542,7 @@ impl Client {
         }
         let now = unix_now();
         let server = card.server;
-        let mb = self
-            .rpc
-            .dir_get(
-                &server,
-                DirKind::Manifest,
-                DirAction::Get,
-                manifest_key(&card.root),
-                [0; 32],
-                now,
-                &mut self.rng,
-            )
-            .await?;
-        let peer_manifest = SignedManifest::from_bytes(&mb)?.verify(&RootPublic(card.root), now)?;
-        let vb = self
-            .rpc
-            .dir_get(
-                &server,
-                DirKind::Vault,
-                DirAction::Get,
-                card.vault_locator,
-                [0; 32],
-                now,
-                &mut self.rng,
-            )
-            .await?;
-        let vault = McEliecePublic::from_slice(&persist::open_large(
-            &SealKey::from_bytes(card.vault_key),
-            &vb,
-        )?)?;
-        if sha3_512(&vault.0[..]) != peer_manifest.vault_hash {
-            return Err(ProtoError::BadSignature.into());
-        }
+        let (peer_manifest, vault) = self.fetch_peer(card, now).await?;
 
         let tokens = self.issue_tokens(&card.root, HELLO_TOKENS, now).await?;
         let hello_id: crate::content::MsgId = self.rng.array("core/msg-id")?;
@@ -606,7 +582,70 @@ impl Client {
             self.new_message(&card.root, hello_id, true, text, 0, now)?;
         }
 
+        self.initiate_to(card, &peer_manifest, &vault, &hello, None, now)
+            .await?;
+        let _ = server;
+        Ok(())
+    }
+
+    /// Fetch and verify a contact's manifest and McEliece vault key.
+    pub(crate) async fn fetch_peer(
+        &mut self,
+        card: &ContactCard,
+        now: u64,
+    ) -> Result<(Manifest, McEliecePublic)> {
+        let server = card.server;
+        let mb = self
+            .rpc
+            .dir_get(
+                &server,
+                DirKind::Manifest,
+                DirAction::Get,
+                manifest_key(&card.root),
+                [0; 32],
+                now,
+                &mut self.rng,
+            )
+            .await?;
+        let peer_manifest = SignedManifest::from_bytes(&mb)?.verify(&RootPublic(card.root), now)?;
+        let vb = self
+            .rpc
+            .dir_get(
+                &server,
+                DirKind::Vault,
+                DirAction::Get,
+                card.vault_locator,
+                [0; 32],
+                now,
+                &mut self.rng,
+            )
+            .await?;
+        let vault = McEliecePublic::from_slice(&persist::open_large(
+            &SealKey::from_bytes(card.vault_key),
+            &vb,
+        )?)?;
+        if sha3_512(&vault.0[..]) != peer_manifest.vault_hash {
+            return Err(ProtoError::BadSignature.into());
+        }
+        Ok((peer_manifest, vault))
+    }
+
+    /// Start a session with every device of `card`'s account (except `skip`)
+    /// and send `hello` as the first message of each.
+    pub(crate) async fn initiate_to(
+        &mut self,
+        card: &ContactCard,
+        peer_manifest: &Manifest,
+        vault: &McEliecePublic,
+        hello: &[u8],
+        skip: Option<[u8; 16]>,
+        now: u64,
+    ) -> Result<()> {
+        let server = card.server;
         for dev in peer_manifest.devices.iter().take(MAX_DEVICES) {
+            if Some(dev.id) == skip || self.sessions.contains_key(&(card.root, dev.id)) {
+                continue;
+            }
             let bb = self
                 .rpc
                 .claim_bundle(&server, device_key(&dev.id), now, &mut self.rng)
@@ -621,15 +660,15 @@ impl Client {
                     locator: &self.profile.server,
                 };
                 let peer = Peer {
-                    manifest: &peer_manifest,
+                    manifest: peer_manifest,
                     device: dev,
                     bundle: &bundle,
-                    vault: Some(&vault),
+                    vault: Some(vault),
                 };
                 let init = eqxdh::initiate(&local, &peer, Mode::OffTheRecord, None, &mut self.rng)?;
                 let mut session = init.session;
                 let env =
-                    envelope::seal_request(&init.message, &mut session, &hello, &mut self.rng)?;
+                    envelope::seal_request(&init.message, &mut session, hello, &mut self.rng)?;
                 (session, env)
             };
             // Persist before the envelope leaves.
@@ -724,6 +763,13 @@ impl Client {
             now,
         )
         .await?;
+        let copy = Content::Text {
+            tokens: Vec::new(),
+            text: text.to_string(),
+            id: msg.id,
+            expires: msg.expires_secs,
+        };
+        self.send_self_copy(root, &copy, now).await?;
         if refilled && let Some(c) = self.contacts.get_mut(root) {
             c.received_since_refill = 0;
             let c = c.clone();
@@ -898,6 +944,26 @@ impl Client {
         };
         let mut session = resp.session;
         let content = Content::decode(&envelope::open_request(&mut session, env, &mut self.rng)?)?;
+        let root = resp.identity.root;
+        if root == self.account.root_public.0 {
+            // Another device of ours (it is in our root-signed manifest, or
+            // `respond` would have failed): keep the session for self-copies.
+            self.store
+                .put(NS_REPLAY, &rid, &now.to_be_bytes(), &mut self.rng)?;
+            self.save_prekeys()?;
+            self.save_session(&root, &resp.identity.device, &session)?;
+            self.sessions.insert((root, resp.identity.device), session);
+            if resp.manifest.version > self.manifest.version {
+                self.manifest = resp.manifest.clone();
+                self.store.put(
+                    NS_PROFILE,
+                    b"manifest",
+                    &self.manifest.encode()?,
+                    &mut self.rng,
+                )?;
+            }
+            return Ok(Some(Event::DevicesChanged));
+        }
         let Content::Hello {
             server,
             inbox,
@@ -916,9 +982,6 @@ impl Client {
         // A group introduction is accepted automatically, but only from a
         // current member of a group we are in.
         let introduced_by = group.filter(|g| self.is_group_member(g, &root));
-        if root == self.account.root_public.0 {
-            return Ok(None);
-        }
         // Commit: replay marker, consumed prekey, session. If both sides
         // started a session with each other at once, both keep the one the
         // lower root initiated, so they end up with the same pair.
@@ -1024,6 +1087,13 @@ impl Client {
         if let Some(s) = self.sessions.get(&key) {
             let s = s.clone();
             self.save_session(&root, &dev, &s)?;
+        }
+        if root == self.account.root_public.0 {
+            // From another device of ours: only self-copies are meaningful.
+            return match Content::decode(&content)? {
+                Content::SelfCopy { to, content } => self.on_self_copy(&to, &content, now),
+                _ => Ok(Vec::new()),
+            };
         }
         let mut c = self
             .contacts

@@ -101,7 +101,9 @@ fn every_target_survives_mutated_and_random_input() {
         for i in 0..n {
             let base = &samples[rng.below(samples.len())];
             let input = if rng.below(8) == 0 {
-                (0..rng.below(20_000)).map(|_| rng.next() as u8).collect()
+                (0..rng.below(20_000))
+                    .map(|_| rng.next_u64() as u8)
+                    .collect()
             } else {
                 mutate(base, &mut rng)
             };

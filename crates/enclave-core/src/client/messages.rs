@@ -367,6 +367,8 @@ impl Client {
         }
         let now = unix_now();
         self.send_content(root, &Content::Timer(secs), now).await?;
+        self.send_self_copy(root, &Content::Timer(secs), now)
+            .await?;
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         c.timer = secs;
         let c = c.clone();
@@ -376,15 +378,12 @@ impl Client {
     /// React to a message (empty `emoji` removes our reaction).
     pub async fn react(&mut self, root: &[u8; 64], seq: u64, emoji: &str) -> Result<()> {
         let mut m = self.get_message(root, seq)?;
-        self.send_content(
-            root,
-            &Content::React {
-                target: m.id,
-                emoji: emoji.to_string(),
-            },
-            unix_now(),
-        )
-        .await?;
+        let content = Content::React {
+            target: m.id,
+            emoji: emoji.to_string(),
+        };
+        self.send_content(root, &content, unix_now()).await?;
+        self.send_self_copy(root, &content, unix_now()).await?;
         m.reactions.retain(|r| !r.from_us);
         if !emoji.is_empty() {
             m.reactions.push(Reaction {
@@ -406,15 +405,12 @@ impl Client {
         {
             return Err(CoreError::NotAccepted);
         }
-        self.send_content(
-            root,
-            &Content::Edit {
-                target: m.id,
-                text: text.to_string(),
-            },
-            now,
-        )
-        .await?;
+        let content = Content::Edit {
+            target: m.id,
+            text: text.to_string(),
+        };
+        self.send_content(root, &content, now).await?;
+        self.send_self_copy(root, &content, now).await?;
         m.text = text.to_string();
         m.edited = true;
         self.put_message(root, &m)
@@ -426,8 +422,9 @@ impl Client {
         if !m.outgoing {
             return Err(CoreError::NotAccepted);
         }
-        self.send_content(root, &Content::Delete { target: m.id }, unix_now())
-            .await?;
+        let content = Content::Delete { target: m.id };
+        self.send_content(root, &content, unix_now()).await?;
+        self.send_self_copy(root, &content, unix_now()).await?;
         wipe(&mut m);
         self.put_message(root, &m)
     }
@@ -472,6 +469,7 @@ impl Client {
             expires: timer,
         };
         self.send_content(root, &content, now).await?;
+        self.send_self_copy(root, &content, now).await?;
         m.delivered = true;
         self.put_message(root, &m)?;
         Ok(m)
@@ -613,6 +611,101 @@ impl Client {
                 events.push(Event::TimerChanged { root: *root, secs });
             }
             _ => return Err(ProtoError::Decode.into()),
+        }
+        Ok(events)
+    }
+
+    /// Apply a copy of something another of our devices sent to `to`.
+    pub(crate) fn on_self_copy(
+        &mut self,
+        to: &[u8; 64],
+        inner: &[u8],
+        now: u64,
+    ) -> Result<Vec<Event>> {
+        if !self.contacts.contains_key(to) {
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        match Content::decode(inner)? {
+            Content::Text {
+                text, id, expires, ..
+            } => {
+                if self.find(to, &id).is_err() {
+                    let mut m = self.new_message(to, id, true, &text, expires, now)?;
+                    m.delivered = true;
+                    self.put_message(to, &m)?;
+                    events.push(Event::Message {
+                        root: *to,
+                        message: m,
+                    });
+                }
+            }
+            Content::Attachment {
+                id,
+                attachment,
+                caption,
+                expires,
+            } => {
+                if self.find(to, &id).is_err() {
+                    let mut m = self.new_message(to, id, true, &caption, expires, now)?;
+                    m.attachment = Some(Attachment::decode(&attachment)?);
+                    m.delivered = true;
+                    self.put_message(to, &m)?;
+                    events.push(Event::Message {
+                        root: *to,
+                        message: m,
+                    });
+                }
+            }
+            Content::React { target, emoji } => {
+                if let Ok(mut m) = self.find(to, &target) {
+                    m.reactions.retain(|r| !r.from_us);
+                    if !emoji.is_empty() {
+                        m.reactions.push(Reaction {
+                            from_us: true,
+                            emoji,
+                        });
+                    }
+                    self.put_message(to, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *to,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Edit { target, text } => {
+                if let Ok(mut m) = self.find(to, &target)
+                    && m.outgoing
+                {
+                    m.text = text;
+                    m.edited = true;
+                    self.put_message(to, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *to,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Delete { target } => {
+                if let Ok(mut m) = self.find(to, &target)
+                    && m.outgoing
+                {
+                    wipe(&mut m);
+                    self.put_message(to, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *to,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Timer(secs) => {
+                let c = self.contacts.get_mut(to).ok_or(CoreError::NotFound)?;
+                c.timer = secs;
+                let c = c.clone();
+                self.save_contact(&c)?;
+                events.push(Event::TimerChanged { root: *to, secs });
+            }
+            _ => {}
         }
         Ok(events)
     }

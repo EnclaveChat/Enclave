@@ -51,6 +51,11 @@ impl RecoverySecret {
     }
 }
 
+/// The BIP-39 English word list (for short check phrases elsewhere).
+pub fn english_words() -> &'static [&'static str; 2048] {
+    bip39::Language::English.word_list()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
