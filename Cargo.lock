@@ -2310,6 +2310,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-netd"
+version = "0.1.0"
+dependencies = [
+ "enclave-ipc",
+ "enclave-net",
+ "enclave-sandbox",
+ "tokio",
+]
+
+[[package]]
 name = "enclave-proto"
 version = "0.1.0"
 dependencies = [
@@ -2339,6 +2349,14 @@ dependencies = [
  "enclave-wire",
  "thiserror 2.0.21",
  "zeroize",
+]
+
+[[package]]
+name = "enclave-sandbox"
+version = "0.1.0"
+dependencies = [
+ "landlock",
+ "rustix 1.1.5",
 ]
 
 [[package]]
@@ -2393,16 +2411,17 @@ dependencies = [
 name = "enclave-vault"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "enclave-core",
  "enclave-crypto",
  "enclave-ipc",
  "enclave-net",
+ "enclave-rpc",
+ "enclave-sandbox",
  "enclave-server",
  "enclave-sim",
  "enclave-store",
- "landlock",
- "rustix 1.1.5",
  "tokio",
  "zeroize",
 ]

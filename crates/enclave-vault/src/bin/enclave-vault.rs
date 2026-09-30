@@ -3,9 +3,10 @@
 //!
 //! Started by the Enclave UI, never by hand. Hardens itself (no core dumps,
 //! not dumpable, `no_new_privs`), reads the connection token (hex) from
-//! stdin, connects to the UI's socket, proves itself with the token, confines
-//! itself to its profile directory (Landlock) and runs the engine until the
-//! UI disconnects. `--report` prints what hardening took effect.
+//! stdin, connects to the UI's socket, proves itself with the token, starts
+//! `enclave-netd` for the network (server mode), confines itself to its
+//! profile directory with no TCP at all (Landlock) and runs the engine until
+//! the UI disconnects. `--report` prints what hardening took effect.
 
 use std::io::BufRead;
 use std::process::ExitCode;
@@ -64,10 +65,18 @@ fn run(
     rt.block_on(async {
         match tokio::net::UnixStream::connect(socket).await {
             Ok(s) => {
-                // Connected: from here on only the profile is reachable.
+                // The network lives in netd; start it while we still may.
+                let net = start_netd(&mode);
+                if net.is_some() {
+                    report.network = "netd";
+                }
+                // From here on only the profile is reachable, and (with
+                // netd) no TCP connection can be opened.
                 let (rw, ro) = enclave_vault::harden::paths_for(&mode);
-                report.filesystem = enclave_vault::harden::filesystem(&rw, &ro);
-                enclave_vault::serve(mode, s, &token).await.is_ok()
+                report.filesystem = enclave_vault::harden::filesystem(&rw, &ro, net.is_some());
+                enclave_vault::serve_with(mode, net, s, &token)
+                    .await
+                    .is_ok()
             }
             Err(e) => {
                 eprintln!("enclave-vault: can't reach the app: {e}");
@@ -75,6 +84,24 @@ fn run(
             }
         }
     })
+}
+
+#[cfg(unix)]
+fn start_netd(
+    mode: &enclave_vault::Mode,
+) -> Option<std::sync::Arc<dyn enclave_net::transport::Transport>> {
+    let enclave_vault::Mode::Server { addr, .. } = mode else {
+        return None;
+    };
+    let bin = enclave_vault::netd::netd_binary()?;
+    let id = enclave_server::Config::default().id;
+    match enclave_vault::netd::PipeTransport::spawn(&bin, id, &addr.to_string()) {
+        Ok(t) => Some(std::sync::Arc::new(t)),
+        Err(e) => {
+            eprintln!("enclave-vault: netd didn't start ({e}); using the network directly");
+            None
+        }
+    }
 }
 
 #[cfg(not(unix))]

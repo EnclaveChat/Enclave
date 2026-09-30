@@ -149,6 +149,8 @@ fn ipc(d: &[u8]) {
     let _ = enclave_ipc::Cmd::decode(d);
     let _ = enclave_ipc::Out::decode(d);
     let _ = enclave_ipc::Snapshot::decode(d);
+    let _ = enclave_ipc::net::NetRequest::decode(d);
+    let _ = enclave_ipc::net::NetReply::decode(d);
 }
 
 /// Every target.

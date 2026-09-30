@@ -291,8 +291,15 @@ fn username_error(e: &CoreError) -> String {
 }
 
 /// Run the engine until the command channel closes.
-pub async fn run(
+pub async fn run(mode: Mode, rx: mpsc::UnboundedReceiver<Cmd>, out: mpsc::UnboundedSender<Out>) {
+    run_with(mode, None, rx, out).await;
+}
+
+/// [`run`], reaching the server in server mode through `net` (netd) instead
+/// of opening connections from this process.
+pub async fn run_with(
     mode: Mode,
+    net: Option<Arc<dyn Transport>>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     out: mpsc::UnboundedSender<Out>,
 ) {
@@ -316,11 +323,11 @@ pub async fn run(
                 .as_ref()
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|b| enclave_core::KtPolicy::decode(&b).ok());
-            (
-                Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
-                id,
-                kt,
-            )
+            let t: Arc<dyn Transport> = match net {
+                Some(t) => t,
+                None => Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
+            };
+            (t, id, kt)
         }
     };
     let mut e = Engine {

@@ -294,6 +294,13 @@ async fn sandboxed_vault_keeps_its_profile() {
     assert!(out.status.success(), "{:?}", out.status);
     let report = String::from_utf8_lossy(&out.stderr);
     assert!(!report.contains("filesystem: \"error\""), "{report}");
+    // The account was created against the server, through netd (when it
+    // was built: `cargo test --workspace` builds it, `-p enclave-vault`
+    // alone doesn't).
+    let netd = std::path::Path::new(BIN).with_file_name("enclave-netd");
+    if cfg!(target_os = "linux") && netd.exists() {
+        assert!(report.contains("network: \"netd\""), "{report}");
+    }
     eprintln!("{report}");
 
     // A new vault on the same profile starts locked.

@@ -13,6 +13,7 @@
 
 pub mod engine;
 pub mod harden;
+pub mod netd;
 
 pub use engine::{Mode, spawn};
 
@@ -26,6 +27,19 @@ use tokio::sync::mpsc;
 /// decode ends the connection (the UI is trusted to be well-formed; anything
 /// else is not our UI).
 pub async fn serve<S>(mode: Mode, stream: S, token: &[u8; TOKEN_LEN]) -> enclave_ipc::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    serve_with(mode, None, stream, token).await
+}
+
+/// [`serve`], with the network reached through `net` (see [`netd`]).
+pub async fn serve_with<S>(
+    mode: Mode,
+    net: Option<std::sync::Arc<dyn enclave_net::transport::Transport>>,
+    stream: S,
+    token: &[u8; TOKEN_LEN],
+) -> enclave_ipc::Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -48,7 +62,7 @@ where
             }
         }
     });
-    engine::run(mode, cmd_rx, out_tx).await;
+    engine::run_with(mode, net, cmd_rx, out_tx).await;
     reader.abort();
     let _ = writer.await;
     Ok(())

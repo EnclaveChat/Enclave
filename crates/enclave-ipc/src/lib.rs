@@ -21,6 +21,7 @@
 mod codec;
 pub mod frame;
 mod model;
+pub mod net;
 
 pub use model::*;
 

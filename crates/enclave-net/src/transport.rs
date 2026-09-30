@@ -35,6 +35,15 @@ pub trait Transport: Send + Sync {
     }
 }
 
+/// Encode `key_id ‖ x448 ‖ mlkem` (inverse of [`decode_server_key`]).
+pub fn encode_server_key(k: &ServerKey) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + 56 + 1568);
+    v.extend_from_slice(&k.key_id.to_be_bytes());
+    v.extend_from_slice(&k.x448.0);
+    v.extend_from_slice(&k.mlkem.0[..]);
+    v
+}
+
 /// Decode `key_id ‖ x448 ‖ mlkem` as served by the dev transport.
 pub fn decode_server_key(b: &[u8]) -> Result<ServerKey> {
     if b.len() != 4 + 56 + 1568 {

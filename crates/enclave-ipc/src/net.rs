@@ -1,0 +1,106 @@
+//! Messages between the vault and `netd` (`docs/15-client.md` §1.1a).
+//!
+//! `netd` holds no keys: it only carries sealed requests to servers and
+//! their sealed replies back, and fetches servers' public request keys. The
+//! vault numbers requests so several can be in flight.
+
+use crate::codec::{MAX_BYTES, Reader, Writer};
+use crate::{IpcError, Result};
+
+/// Vault → netd.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetRequest {
+    /// Send a sealed request to a server and return its sealed reply.
+    Exchange {
+        /// Request number.
+        id: u32,
+        /// Server.
+        server: [u8; 16],
+        /// Sealed request.
+        bytes: Vec<u8>,
+    },
+    /// Fetch a server's current request key (`key_id ‖ x448 ‖ mlkem`).
+    ServerKey {
+        /// Request number.
+        id: u32,
+        /// Server.
+        server: [u8; 16],
+    },
+}
+
+/// netd → vault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetReply {
+    /// The request it answers.
+    pub id: u32,
+    /// Reply bytes, or why there are none.
+    pub result: core::result::Result<Vec<u8>, String>,
+}
+
+impl NetRequest {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        match self {
+            NetRequest::Exchange { id, server, bytes } => {
+                w.u8(1).u32(*id).bytes(server).bytes(bytes);
+            }
+            NetRequest::ServerKey { id, server } => {
+                w.u8(2).u32(*id).bytes(server);
+            }
+        }
+        w.0
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Reader(b);
+        let server = |r: &mut Reader<'_>| -> Result<[u8; 16]> {
+            r.bytes()?.try_into().map_err(|_| IpcError::Malformed)
+        };
+        let v = match r.u8()? {
+            1 => NetRequest::Exchange {
+                id: r.u32()?,
+                server: server(&mut r)?,
+                bytes: r.bytes()?,
+            },
+            2 => NetRequest::ServerKey {
+                id: r.u32()?,
+                server: server(&mut r)?,
+            },
+            _ => return Err(IpcError::Malformed),
+        };
+        r.end()?;
+        Ok(v)
+    }
+}
+
+impl NetReply {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.u32(self.id);
+        match &self.result {
+            Ok(b) => {
+                w.u8(0).bytes(&b[..b.len().min(MAX_BYTES)]);
+            }
+            Err(e) => {
+                w.u8(1).str(e);
+            }
+        }
+        w.0
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Reader(b);
+        let id = r.u32()?;
+        let result = match r.u8()? {
+            0 => Ok(r.bytes()?),
+            1 => Err(r.str()?),
+            _ => return Err(IpcError::Malformed),
+        };
+        r.end()?;
+        Ok(Self { id, result })
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "enclave-netd"
+description = "The Enclave network process: carries sealed requests between the vault and servers, and holds no keys."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-netd"
+path = "src/main.rs"
+
+[dependencies]
+enclave-ipc = { path = "../enclave-ipc" }
+enclave-net = { path = "../enclave-net" }
+enclave-sandbox = { path = "../enclave-sandbox" }
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "process", "time"] }

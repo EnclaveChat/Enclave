@@ -206,3 +206,38 @@ async fn framing_and_token() {
     a.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
     assert!(frame::read_frame(&mut b).await.is_err());
 }
+
+#[test]
+fn net_messages_round_trip_and_refuse_garbage() {
+    use enclave_ipc::net::{NetReply, NetRequest};
+    for r in [
+        NetRequest::Exchange {
+            id: 7,
+            server: [3; 16],
+            bytes: vec![9; 16_384],
+        },
+        NetRequest::ServerKey {
+            id: u32::MAX,
+            server: [4; 16],
+        },
+    ] {
+        let e = r.encode();
+        assert_eq!(NetRequest::decode(&e).unwrap(), r);
+        for n in 0..e.len().min(64) {
+            assert!(NetRequest::decode(&e[..n]).is_err());
+        }
+    }
+    for r in [
+        NetReply {
+            id: 1,
+            result: Ok(vec![1; 100]),
+        },
+        NetReply {
+            id: 2,
+            result: Err("unreachable".into()),
+        },
+    ] {
+        assert_eq!(NetReply::decode(&r.encode()).unwrap(), r);
+    }
+    assert!(NetReply::decode(&[0, 0, 0, 1, 9]).is_err());
+}
