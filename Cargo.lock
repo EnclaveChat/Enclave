@@ -2177,20 +2177,15 @@ name = "enclave-app"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "chrono",
- "enclave-core",
  "enclave-crypto",
  "enclave-design",
- "enclave-net",
- "enclave-server",
- "enclave-sim",
- "enclave-store",
+ "enclave-ipc",
+ "enclave-vault",
  "png 0.17.16",
  "qrcodegen",
  "slint",
  "slint-build",
  "tokio",
- "zeroize",
 ]
 
 [[package]]
@@ -2270,12 +2265,21 @@ dependencies = [
  "enclave-calls",
  "enclave-core",
  "enclave-crypto",
+ "enclave-ipc",
  "enclave-kt",
  "enclave-proto",
  "enclave-relay",
  "enclave-rpc",
  "enclave-server",
  "enclave-wire",
+]
+
+[[package]]
+name = "enclave-ipc"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -2383,6 +2387,21 @@ dependencies = [
  "enclave-crypto",
  "equix",
  "subtle",
+]
+
+[[package]]
+name = "enclave-vault"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "enclave-core",
+ "enclave-crypto",
+ "enclave-ipc",
+ "enclave-net",
+ "enclave-server",
+ "enclave-sim",
+ "enclave-store",
+ "tokio",
 ]
 
 [[package]]

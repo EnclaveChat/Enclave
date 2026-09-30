@@ -69,10 +69,15 @@ a vulnerability.
 ## Try the desktop app
 
 ```sh
-cargo run --release -p enclave-app --bin enclave            # offline demo: local server and a demo contact
+cargo build --release -p enclave-app -p enclave-vault      # the UI and the vault process that holds the keys
+target/release/enclave                                     # offline demo: local server and a demo contact
 cargo run --release -p enclave-server -- 127.0.0.1:7443 --kt-pins /tmp/kt-pins   # or a dev server…
-cargo run --release -p enclave-app --bin enclave -- --server 127.0.0.1:7443 --profile ~/.enclave-dev --kt-pins /tmp/kt-pins
+target/release/enclave --server 127.0.0.1:7443 --profile ~/.enclave-dev --kt-pins /tmp/kt-pins
 ```
+
+The app starts `enclave-vault` from next to its own binary and keeps every
+key there; the window only receives what it displays. Without the vault
+binary (or with `--single-process`) the same engine runs inside the app.
 
 In the demo, the demo contact has the username `@sam@demo.enclave`; choose
 your own under Settings. `--kt-pins` is the file where the dev server writes

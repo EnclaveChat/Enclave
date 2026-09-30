@@ -313,6 +313,8 @@ export component AppWindow inherits Window {
     callback claim-username(string);
     callback remove-device(string);
     callback start-join();
+    callback sheet-changed(Sheet);
+    changed sheet => { root.sheet-changed(root.sheet); }
     callback cancel-join();
     in property <bool> can-join;
     in property <string> join-code;

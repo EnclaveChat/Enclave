@@ -1,0 +1,20 @@
+[package]
+name = "enclave-ipc"
+description = "Typed messages between the Enclave UI process and the vault process, and their framing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["io-util"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt", "net"] }

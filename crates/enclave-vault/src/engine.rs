@@ -1,10 +1,10 @@
-//! The engine thread: owns the `Client`, runs the foreground tick and turns
-//! UI commands into protocol actions. Nothing secret crosses to the UI.
+//! The engine: owns the `Client`, runs the foreground tick and turns UI
+//! commands into protocol actions. Its only outputs are display snapshots and
+//! UI resets ([`Out`]); nothing secret crosses to the UI.
 
-use crate::AppWindow;
-use crate::view::{Msg, Row, Snapshot};
 use enclave_core::{Client, ContactCard, ContactState, CoreError, Event, LinkError, Options};
 use enclave_crypto::pwhash::PwParams;
+use enclave_ipc::{Cmd, Device, Effect, Msg, Out, Pick, Row, Snapshot, tint_for};
 use enclave_net::transport::{ServerId, TcpTransport, Transport};
 use enclave_sim::LocalTransport;
 use enclave_store::{FileKeystore, MemoryKeystore};
@@ -18,46 +18,8 @@ use tokio::sync::mpsc;
 /// Foreground tick (docs/09-transport.md §9.4).
 const TICK: Duration = Duration::from_secs(3);
 
-/// UI → engine.
-#[derive(Debug)]
-pub enum Cmd {
-    /// Create the account with this name.
-    Create(String),
-    /// Open a conversation (empty id closes it).
-    Select(String),
-    /// Send text to a contact.
-    Send(String, String),
-    /// Accept a message request.
-    Accept(String),
-    /// Delete a request or contact.
-    Decline(String),
-    /// Add from an invite link, with an optional first message.
-    Add(String, String),
-    /// "They match".
-    Check(String),
-    /// Privacy profile: 0 standard, 1 maximum.
-    Privacy(i32),
-    /// Recovery words written down.
-    WordsSaved,
-    /// Toggle a contact in the new-group picker.
-    TogglePick(String),
-    /// Create a group from the picked contacts.
-    CreateGroup(String),
-    /// A link code was pasted on the devices screen.
-    LinkScan(String),
-    /// The person picked link words (index).
-    LinkPick(i32),
-    /// Claim a username.
-    ClaimUsername(String),
-    /// Remove a linked device (hex id).
-    RemoveDevice(String),
-    /// Link this device to an existing account ("I already have Enclave").
-    StartJoin,
-    /// Stop linking this device.
-    CancelJoin,
-}
-
 /// Where the account lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Everything in memory with a local server and a demo contact.
     Demo,
@@ -70,6 +32,54 @@ pub enum Mode {
         /// Key-transparency pins for usernames (written by the dev server).
         kt_pins: Option<PathBuf>,
     },
+}
+
+impl Mode {
+    /// Parse `--server HOST:PORT --profile DIR [--kt-pins FILE]`; anything
+    /// else is the demo.
+    pub fn from_args(args: &[String]) -> Self {
+        let arg = |k: &str| {
+            args.iter()
+                .position(|a| a == k)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        match (
+            arg("--server").and_then(|s| s.parse().ok()),
+            arg("--profile"),
+        ) {
+            (Some(addr), Some(p)) => Mode::Server {
+                profile: p.into(),
+                addr,
+                kt_pins: arg("--kt-pins").map(Into::into),
+            },
+            _ => Mode::Demo,
+        }
+    }
+
+    /// Inverse of [`Mode::from_args`].
+    pub fn to_args(&self) -> Vec<String> {
+        match self {
+            Mode::Demo => vec!["--demo".into()],
+            Mode::Server {
+                profile,
+                addr,
+                kt_pins,
+            } => {
+                let mut v = vec![
+                    "--server".into(),
+                    addr.to_string(),
+                    "--profile".into(),
+                    profile.display().to_string(),
+                ];
+                if let Some(k) = kt_pins {
+                    v.push("--kt-pins".into());
+                    v.push(k.display().to_string());
+                }
+                v
+            }
+        }
+    }
 }
 
 const DEMO_SERVER: ServerId = [0x5e; 16];
@@ -110,11 +120,16 @@ struct Engine {
     join_code: String,
     join_words: String,
     busy: bool,
+    /// The recovery sheet is open: only then do the words leave the vault.
+    reveal_words: bool,
+    out: mpsc::UnboundedSender<Out>,
 }
 
-/// Start the engine thread.
-pub fn spawn(ui: slint::Weak<AppWindow>, mode: Mode) -> mpsc::UnboundedSender<Cmd> {
+/// Run the engine on a thread of this process (where a separate vault
+/// process is not available). Returns the command sender and output receiver.
+pub fn spawn(mode: Mode) -> (mpsc::UnboundedSender<Cmd>, mpsc::UnboundedReceiver<Out>) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (out_tx, out_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("enclave-engine".into())
         .stack_size(64 * 1024 * 1024)
@@ -125,10 +140,10 @@ pub fn spawn(ui: slint::Weak<AppWindow>, mode: Mode) -> mpsc::UnboundedSender<Cm
             else {
                 return;
             };
-            rt.block_on(run(ui, mode, rx));
+            rt.block_on(run(mode, rx, out_tx));
         })
         .ok();
-    tx
+    (tx, out_rx)
 }
 
 fn hex_id(root: &[u8; 64]) -> String {
@@ -229,7 +244,12 @@ fn username_error(e: &CoreError) -> String {
     }
 }
 
-async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+/// Run the engine until the command channel closes.
+pub async fn run(
+    mode: Mode,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    out: mpsc::UnboundedSender<Out>,
+) {
     let (transport, server, kt): (Arc<dyn Transport>, ServerId, _) = match &mode {
         Mode::Demo => {
             let t = LocalTransport::new();
@@ -276,6 +296,8 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
         join_code: String::new(),
         join_words: String::new(),
         busy: false,
+        reveal_words: false,
+        out,
     };
     // Reopen an existing profile.
     if let Mode::Server { profile, .. } = &e.mode
@@ -290,23 +312,23 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
             }
             Err(err) => e.status = format!("Couldn't open your profile: {err}"),
         }
-        e.push(&ui);
+        e.push();
     }
     let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return };
-                e.handle(cmd, &ui).await;
-                e.push(&ui);
+                e.handle(cmd).await;
+                e.push();
             }
             _ = tick.tick() => {
                 if e.client.is_some() {
                     e.sync().await;
-                    e.push(&ui);
+                    e.push();
                 } else if e.joining.is_some() {
                     e.poll_join().await;
-                    e.push(&ui);
+                    e.push();
                 }
             }
         }
@@ -357,7 +379,7 @@ impl Engine {
             .find(|r| hex_id(r) == id)
     }
 
-    async fn handle(&mut self, cmd: Cmd, ui: &slint::Weak<AppWindow>) {
+    async fn handle(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Create(name) => {
                 let name = name.trim().to_string();
@@ -395,7 +417,7 @@ impl Engine {
                 let Some(gid) = self.group_of(&id) else {
                     return;
                 };
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut()
                     && c.send_group_text(&gid, &text).await.is_err()
                 {
@@ -407,7 +429,7 @@ impl Engine {
                     return;
                 };
                 // Show it as "sending privately" right away.
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut()
                     && let Err(err) = c.send_text(&root, &text).await
                 {
@@ -436,7 +458,7 @@ impl Engine {
                 self.add_error.clear();
                 let link = link.trim();
                 self.busy = true;
-                self.push(ui);
+                self.push();
                 // An invite link, or a username to look up.
                 let card = if link.starts_with("enclave:") || link.contains('#') {
                     ContactCard::from_link(link).map_err(CoreError::Link)
@@ -457,12 +479,7 @@ impl Engine {
                     match c.add_contact(&card, text.trim()).await {
                         Ok(()) => {
                             self.selected = Some(card.root);
-                            ui.upgrade_in_event_loop(|ui| {
-                                ui.set_sheet(crate::Sheet::None);
-                                ui.set_add_link("".into());
-                                ui.set_add_text("".into());
-                            })
-                            .ok();
+                            self.effect(Effect::ContactAdded);
                         }
                         Err(err) => self.add_error = link_error(&err),
                     }
@@ -472,12 +489,11 @@ impl Engine {
             Cmd::ClaimUsername(name) => {
                 self.username_error.clear();
                 self.busy = true;
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut() {
                     match c.claim_username(name.trim()).await {
                         Ok(_) => {
-                            ui.upgrade_in_event_loop(|ui| ui.set_username_input("".into()))
-                                .ok();
+                            self.effect(Effect::UsernameClaimed);
                         }
                         Err(err) => self.username_error = username_error(&err),
                     }
@@ -486,7 +502,7 @@ impl Engine {
             }
             Cmd::RemoveDevice(hex) => {
                 self.busy = true;
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut() {
                     let id =
                         c.devices().into_iter().map(|d| d.id).find(|d| {
@@ -503,8 +519,7 @@ impl Engine {
                         None => String::new(),
                     };
                 }
-                ui.upgrade_in_event_loop(|ui| ui.set_confirm_remove("".into()))
-                    .ok();
+                self.effect(Effect::RemovalDone);
                 self.busy = false;
             }
             Cmd::StartJoin => {
@@ -529,6 +544,7 @@ impl Engine {
                     Err(_) => self.status = "Couldn't start linking. Try again.".into(),
                 }
             }
+            Cmd::RevealWords(on) => self.reveal_words = on,
             Cmd::CancelJoin => {
                 self.joining = None;
                 self.join_code.clear();
@@ -560,18 +576,14 @@ impl Engine {
             Cmd::CreateGroup(name) => {
                 let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();
                 self.busy = true;
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut() {
                     match c.create_group(name.trim(), &members).await {
                         Ok(gid) => {
                             self.picked.clear();
                             self.selected = None;
                             self.selected_group = Some(gid);
-                            ui.upgrade_in_event_loop(|ui| {
-                                ui.set_sheet(crate::Sheet::None);
-                                ui.set_group_name("".into());
-                            })
-                            .ok();
+                            self.effect(Effect::GroupCreated);
                         }
                         Err(_) => {
                             self.status = "Couldn't create the group. Check your connection.".into()
@@ -583,7 +595,7 @@ impl Engine {
             Cmd::LinkScan(code) => {
                 self.link_status.clear();
                 self.busy = true;
-                self.push(ui);
+                self.push();
                 if let Some(c) = self.client.as_mut() {
                     match c.link_prepare(code.trim()).await {
                         Ok(offer) => self.link_offer = Some(offer),
@@ -719,10 +731,12 @@ impl Engine {
         }
     }
 
-    fn push(&self, ui: &slint::Weak<AppWindow>) {
-        let snap = self.snapshot();
-        ui.upgrade_in_event_loop(move |ui| crate::view::apply(&ui, &snap))
-            .ok();
+    fn push(&self) {
+        let _ = self.out.send(Out::Snapshot(Box::new(self.snapshot())));
+    }
+
+    fn effect(&self, e: Effect) {
+        let _ = self.out.send(Out::Effect(e));
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -743,7 +757,9 @@ impl Engine {
         s.my_name = c.name().to_string();
         s.my_link = c.card().to_link();
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
-        s.recovery_words = c.recovery_words().unwrap_or_default();
+        if self.reveal_words {
+            s.recovery_words = c.recovery_words().unwrap_or_default();
+        }
         s.recovery_saved = matches!(c.setting("recovery-saved"), Ok(Some(v)) if v == [1]);
         let mut rows: Vec<(u64, Row)> = Vec::new();
         for ct in c.contacts() {
@@ -766,7 +782,7 @@ impl Engine {
                     ContactState::Accepted => 2,
                 },
                 verified: ct.verified,
-                tint: crate::view::tint_for(&ct.root),
+                tint: tint_for(&ct.root),
                 kind: 0,
                 members: 0,
             };
@@ -805,7 +821,7 @@ impl Engine {
                 unread: g.unread as i32,
                 state: 2,
                 verified: false,
-                tint: crate::view::tint_for(&g.id),
+                tint: tint_for(&g.id),
                 kind: 1,
                 members: g.members.len() as i32 + 1,
             };
@@ -836,10 +852,10 @@ impl Engine {
             .contacts()
             .into_iter()
             .filter(|ct| ct.state == ContactState::Accepted)
-            .map(|ct| crate::view::Pick {
+            .map(|ct| Pick {
                 id: hex_id(&ct.root),
                 name: ct.name.clone(),
-                tint: crate::view::tint_for(&ct.root),
+                tint: tint_for(&ct.root),
                 selected: self.picked.contains(&ct.root),
             })
             .collect();
@@ -858,7 +874,7 @@ impl Engine {
                 let day = chrono::DateTime::from_timestamp(d.added_at as i64, 0)
                     .map(|t| t.format("%-d %b %Y").to_string())
                     .unwrap_or_default();
-                crate::view::Device {
+                Device {
                     id: d.id.iter().map(|b| format!("{b:02x}")).collect(),
                     label: label.to_string(),
                     detail: format!("Added {day}"),

@@ -1,0 +1,28 @@
+[package]
+name = "enclave-vault"
+description = "The Enclave vault: the client engine that holds every key, run as its own process (or a thread where processes are unavailable)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-vault"
+path = "src/bin/enclave-vault.rs"
+
+[dependencies]
+enclave-core = { path = "../enclave-core" }
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-ipc = { path = "../enclave-ipc" }
+enclave-net = { path = "../enclave-net" }
+enclave-store = { path = "../enclave-store" }
+enclave-sim = { path = "../enclave-sim" }
+enclave-server = { path = "../enclave-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

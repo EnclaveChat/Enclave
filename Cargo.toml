@@ -13,6 +13,8 @@ members = [
     "crates/enclave-net",
     "crates/enclave-store",
     "crates/enclave-core",
+    "crates/enclave-ipc",
+    "crates/enclave-vault",
     "crates/enclave-design",
     "crates/enclave-app",
     "crates/enclave-calls",

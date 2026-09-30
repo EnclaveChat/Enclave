@@ -142,6 +142,13 @@ fn group_open(d: &[u8]) {
     });
 }
 
+/// Messages between the UI and vault processes, in both directions.
+fn ipc(d: &[u8]) {
+    let _ = enclave_ipc::Cmd::decode(d);
+    let _ = enclave_ipc::Out::decode(d);
+    let _ = enclave_ipc::Snapshot::decode(d);
+}
+
 /// Every target.
 pub const TARGETS: &[Target] = &[
     ("wire", wire),
@@ -152,6 +159,7 @@ pub const TARGETS: &[Target] = &[
     ("server", server),
     ("relay", relay),
     ("group_open", group_open),
+    ("ipc", ipc),
 ];
 
 /// Run one target by name (for reproducers).

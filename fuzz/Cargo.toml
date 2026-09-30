@@ -64,3 +64,9 @@ name = "group_open"
 path = "fuzz_targets/group_open.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "ipc"
+path = "fuzz_targets/ipc.rs"
+test = false
+doc = false

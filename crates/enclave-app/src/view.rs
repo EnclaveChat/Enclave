@@ -1,12 +1,13 @@
-//! Display data: plain `Send` structs built by the engine and turned into
-//! Slint models on the UI thread.
+//! Turns display data from the vault ([`enclave_ipc`]) into Slint models on
+//! the UI thread.
 
-use crate::{AppWindow, ContactRow, DeviceRow, MessageRow, PickRow, Screen};
+use crate::{AppWindow, ContactRow, DeviceRow, MessageRow, PickRow, Screen, Sheet};
+pub use enclave_ipc::{Device, Effect, Msg, Pick, Row, Snapshot};
 use slint::{Color, Image, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::rc::Rc;
 
 /// Contact art tints: muted, each at least 7:1 against the Paper initials.
-const TINTS: [(u8, u8, u8); 6] = [
+const TINTS: [(u8, u8, u8); enclave_ipc::TINT_COUNT] = [
     (0x3F, 0x5A, 0x7A),
     (0x6B, 0x4E, 0x2E),
     (0x7A, 0x3F, 0x5A),
@@ -14,123 +15,6 @@ const TINTS: [(u8, u8, u8); 6] = [
     (0x2E, 0x5F, 0x6B),
     (0x6B, 0x2E, 0x2E),
 ];
-
-/// A contact for display.
-#[derive(Clone, Debug, Default)]
-pub struct Row {
-    /// Hex id (root prefix).
-    pub id: String,
-    /// Name.
-    pub name: String,
-    /// Last message.
-    pub preview: String,
-    /// Time of the last message.
-    pub time: String,
-    /// Unread count.
-    pub unread: i32,
-    /// 0 waiting, 1 request, 2 talking.
-    pub state: i32,
-    /// Checked.
-    pub verified: bool,
-    /// Tint index from the key.
-    pub tint: usize,
-    /// 0 person, 1 group.
-    pub kind: i32,
-    /// Members (groups).
-    pub members: i32,
-}
-
-/// A contact that can be picked for a new group.
-#[derive(Clone, Debug, Default)]
-pub struct Pick {
-    /// Id.
-    pub id: String,
-    /// Name.
-    pub name: String,
-    /// Tint.
-    pub tint: usize,
-    /// Picked.
-    pub selected: bool,
-}
-
-/// A device of the account for display.
-#[derive(Clone, Debug, Default)]
-pub struct Device {
-    /// Hex id.
-    pub id: String,
-    /// "This device", "First device", "Linked device".
-    pub label: String,
-    /// When it was added.
-    pub detail: String,
-    /// This device may remove it.
-    pub removable: bool,
-}
-
-/// A message for display.
-#[derive(Clone, Debug, Default)]
-pub struct Msg {
-    /// Text.
-    pub text: String,
-    /// Ours.
-    pub outgoing: bool,
-    /// "14:02".
-    pub time: String,
-    /// 0 sending, 1 on its way, 2 delivered.
-    pub status: i32,
-    /// Sender name (incoming group messages).
-    pub sender: String,
-}
-
-/// Everything the window shows.
-#[derive(Clone, Debug, Default)]
-pub struct Snapshot {
-    /// Our name.
-    pub my_name: String,
-    /// Invite link.
-    pub my_link: String,
-    /// Conversations.
-    pub contacts: Vec<Row>,
-    /// Message requests.
-    pub requests: Vec<Row>,
-    /// Selected contact.
-    pub current: Option<Row>,
-    /// Its messages.
-    pub messages: Vec<Msg>,
-    /// Security code in groups of five digits.
-    pub code_groups: Vec<String>,
-    /// Status line under the list.
-    pub status: String,
-    /// Recovery words.
-    pub recovery_words: Vec<String>,
-    /// Recovery words saved.
-    pub recovery_saved: bool,
-    /// Error for the add sheet.
-    pub add_error: String,
-    /// A request is in flight.
-    pub busy: bool,
-    /// Contacts to pick for a new group.
-    pub pick: Vec<Pick>,
-    /// Devices.
-    pub devices: Vec<Device>,
-    /// Link word choices (when a link code was scanned).
-    pub link_choices: Vec<String>,
-    /// Link status line.
-    pub link_status: String,
-    /// This device can link others.
-    pub can_link: bool,
-    /// Our username as `@name@domain`, or empty.
-    pub my_username: String,
-    /// Usernames work on this server.
-    pub usernames: bool,
-    /// Error for the username field.
-    pub username_error: String,
-    /// This device can be linked to an existing account (server mode).
-    pub can_join: bool,
-    /// Link code this device shows while it is being linked.
-    pub join_code: String,
-    /// Words to pick on the other device.
-    pub join_words: String,
-}
 
 /// Initials for contact art: first letters of up to two words.
 pub fn initials(name: &str) -> String {
@@ -144,11 +28,6 @@ pub fn initials(name: &str) -> String {
     } else {
         s.to_uppercase()
     }
-}
-
-/// Tint index derived from key bytes.
-pub fn tint_for(key: &[u8]) -> usize {
-    key.first().map(|b| *b as usize % TINTS.len()).unwrap_or(0)
 }
 
 fn tint(i: usize) -> Color {
@@ -279,5 +158,22 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_join_words(s.join_words.clone().into());
     if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
+    }
+}
+
+/// Apply a one-off reset from the vault.
+pub fn apply_effect(ui: &AppWindow, e: Effect) {
+    match e {
+        Effect::ContactAdded => {
+            ui.set_sheet(Sheet::None);
+            ui.set_add_link("".into());
+            ui.set_add_text("".into());
+        }
+        Effect::GroupCreated => {
+            ui.set_sheet(Sheet::None);
+            ui.set_group_name("".into());
+        }
+        Effect::UsernameClaimed => ui.set_username_input("".into()),
+        Effect::RemovalDone => ui.set_confirm_remove("".into()),
     }
 }

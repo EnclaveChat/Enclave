@@ -17,6 +17,17 @@ Source: PLAN.md §14, §22, RT-14. Crates: `enclave-core`, `enclave-ipc`, `encla
 
 IPC is typed `postcard` messages over a Unix domain socket (Linux, macOS) or a named pipe (Windows), defined in `enclave-ipc`. Each message type has a fixed maximum size; parsing is fuzzed. The `vault` process authenticates its peers by OS credentials (peer UID/PID checks) and by a per-launch random 32 B secret passed through inherited handles.
 
+### 1.1a Implemented: UI and vault
+
+Today the desktop app runs as **two** processes: the Slint UI (`enclave`) and the vault (`enclave-vault`, crate `enclave-vault`), which runs the client engine and holds every key, the sealed store and the network. `netd` and `mediad` are not split out yet (the vault still talks to the network itself).
+
+- **Messages** (`enclave-ipc`) are exactly three kinds: `Cmd` (UI → vault: what the person did), `Snapshot` (vault → UI: display data only — names, message text, previews, security-code digits) and `Effect` (vault → UI: a few one-off UI resets). They use a strict hand-written codec rather than `postcard` (no serde in the workspace): every field is length-bounded, counts are checked against the bytes left before allocating, trailing bytes are an error, and a hostile-input test flips bytes and truncates at every offset.
+- **Recovery words** are the one secret the UI must display. They are in snapshots only while the recovery sheet is open (`Cmd::RevealWords`), so the UI process holds them only then.
+- **Framing**: `u32 BE length ‖ body`, at most 16 MiB.
+- **Launch and authentication** (Unix): the UI creates a directory with mode 0700 under the temp dir, listens on `vault.sock` inside it, and starts `enclave-vault --connect <socket> <mode args>` from next to its own executable with a fresh 32-byte token (from the hedged RNG) written to the child's **stdin**. The vault connects and sends the token first; the UI compares it in constant time, then unlinks the socket and the directory, so no other process can connect. A command that does not decode ends the connection. When the UI goes away the vault's engine loop ends and it exits; when the vault dies the UI says so ("Enclave's vault stopped… Restart Enclave.").
+- **Fallback**: where the vault binary is missing, on non-Unix platforms (Windows named pipes are not implemented yet), and with `--single-process`, the same engine runs on a thread in the UI process.
+- **Not yet**: peer-credential checks (`SO_PEERCRED`), sandboxing the vault (seccomp, Landlock, App Sandbox), disabling core dumps in the vault, and the `netd`/`mediad` splits.
+
 ### 1.2 Android
 
 - The network service runs in its own `android:process` (the netd role).

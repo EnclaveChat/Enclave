@@ -1,40 +1,40 @@
 //! Desktop entry point.
 //!
 //! `enclave` runs a self-contained demo (local server, demo contact, nothing
-//! leaves the computer). `enclave --server HOST:PORT --profile DIR` talks to
+//! leaves the computer). Keys live in a separate `enclave-vault` process when
+//! it is installed next to this binary (`--single-process` keeps them in a
+//! thread instead). `enclave --server HOST:PORT --profile DIR` talks to
 //! a dev server (`enclave-server`) over TCP (add `--kt-pins FILE`, written by
 //! the server, to use usernames); the Tor and Nym transports are
 //! wired in by M4's gate.
 #![deny(unsafe_code)]
 
-use enclave_app::engine::{self, Cmd, Mode};
-use enclave_app::{AppWindow, Screen, Sheet};
+use enclave_app::{AppWindow, Screen, Sheet, vault, view};
+use enclave_ipc::{Cmd, Out};
+use enclave_vault::Mode;
 use slint::ComponentHandle;
 use std::time::Duration;
 
 fn main() -> Result<(), slint::PlatformError> {
     let args: Vec<String> = std::env::args().collect();
-    let arg = |k: &str| {
-        args.iter()
-            .position(|a| a == k)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
-    let mode = match (
-        arg("--server").and_then(|s| s.parse().ok()),
-        arg("--profile"),
-    ) {
-        (Some(addr), Some(p)) => Mode::Server {
-            profile: p.into(),
-            addr,
-            kt_pins: arg("--kt-pins").map(Into::into),
-        },
-        _ => Mode::Demo,
-    };
+    let mode = Mode::from_args(&args);
+    let single_process = args.iter().any(|a| a == "--single-process");
 
     let ui = AppWindow::new()?;
-    let tx = engine::spawn(ui.as_weak(), mode);
-
+    let ((tx, mut out), _separate) = vault::start(mode, single_process);
+    // Outputs from the vault, applied on the UI thread.
+    let w = ui.as_weak();
+    std::thread::Builder::new()
+        .name("enclave-ui-feed".into())
+        .spawn(move || {
+            while let Some(o) = out.blocking_recv() {
+                let _ = w.upgrade_in_event_loop(move |ui| match o {
+                    Out::Snapshot(s) => view::apply(&ui, &s),
+                    Out::Effect(e) => view::apply_effect(&ui, e),
+                });
+            }
+        })
+        .map_err(|e| slint::PlatformError::Other(e.to_string()))?;
     let t = tx.clone();
     ui.on_get_started({
         let w = ui.as_weak();
@@ -120,6 +120,10 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(ui) = w.upgrade() {
             ui.set_sheet(s);
         }
+    });
+    let t = tx.clone();
+    ui.on_sheet_changed(move |s| {
+        let _ = t.send(Cmd::RevealWords(s == Sheet::Recovery));
     });
     let w = ui.as_weak();
     ui.on_copy_text(move |text| {

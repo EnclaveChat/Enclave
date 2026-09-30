@@ -1,8 +1,9 @@
 //! The Enclave app. The UI (Slint) never touches key material: it sends
-//! commands to the engine thread, which owns `enclave_core::Client`, and
-//! receives plain display data back.
+//! commands to the vault ([`enclave_vault`]), which owns `enclave_core::Client`,
+//! and receives plain display data back. On Unix desktops the vault is a
+//! separate process ([`vault`]); elsewhere it is a thread.
 
-pub mod engine;
+pub mod vault;
 pub mod view;
 
 /// Code generated from `ui/*.slint`. The only place `unsafe` is allowed.

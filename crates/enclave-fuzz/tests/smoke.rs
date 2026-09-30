@@ -86,6 +86,17 @@ fn samples() -> Vec<Vec<u8>> {
             .encode(),
         );
     }
+    // UI ↔ vault messages.
+    out.push(enclave_ipc::Cmd::Send("ab".into(), "hello".into()).encode());
+    out.push(
+        enclave_ipc::Out::Snapshot(Box::new(enclave_ipc::Snapshot {
+            my_name: "Robin".into(),
+            contacts: vec![enclave_ipc::Row::default(); 3],
+            messages: vec![enclave_ipc::Msg::default(); 2],
+            ..Default::default()
+        }))
+        .encode(),
+    );
     // Calls.
     let p = enclave_calls::signal::offer(
         enclave_calls::signal::Media::Audio,

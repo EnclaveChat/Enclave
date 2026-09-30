@@ -30,18 +30,13 @@ name = "enclave-shots"
 path = "src/bin/shots.rs"
 
 [dependencies]
-enclave-core = { path = "../enclave-core" }
+enclave-ipc = { path = "../enclave-ipc" }
+enclave-vault = { path = "../enclave-vault" }
 enclave-crypto = { path = "../enclave-crypto" }
-enclave-net = { path = "../enclave-net" }
-enclave-store = { path = "../enclave-store" }
-enclave-sim = { path = "../enclave-sim" }
-enclave-server = { path = "../enclave-server" }
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
 qrcodegen = "1.8"
 png = "0.17"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-zeroize = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "io-util", "macros"] }
 arboard = { version = "3", default-features = false }
 
 [build-dependencies]
