@@ -301,6 +301,44 @@ async fn group_of_three_where_two_are_strangers() {
         group_texts(&ev[2]).is_empty(),
         "removed member reads nothing"
     );
+
+    // A adds Dee, whom B has never met. Dee reads nothing from before she
+    // joined, and after that everyone talks.
+    let (mut d, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Dee")
+        .await
+        .unwrap();
+    connect(&mut a, &mut d).await;
+    a.add_group_members(&gid, &[d.root()]).await.unwrap();
+    let ev = settle(&mut [&mut b, &mut d], 3).await;
+    assert!(
+        ev[0].contains(&Event::GroupChanged { group_id: gid }),
+        "{:?}",
+        ev[0]
+    );
+    assert!(
+        ev[1]
+            .iter()
+            .any(|e| matches!(e, Event::GroupJoined { group_id, .. } if *group_id == gid)),
+        "{:?}",
+        ev[1]
+    );
+    assert!(
+        d.group_messages(&gid).unwrap().is_empty(),
+        "no history before joining"
+    );
+    assert_eq!(b.groups()[0].members.len(), 2);
+    settle(&mut [&mut a, &mut b, &mut d], 2).await;
+    b.send_group_text(&gid, "Welcome, Dee").await.unwrap();
+    let ev = settle(&mut [&mut a, &mut b, &mut d], 3).await;
+    assert_eq!(group_texts(&ev[2]), vec!["Welcome, Dee"]);
+    d.send_group_text(&gid, "Thanks!").await.unwrap();
+    let ev = settle(&mut [&mut a, &mut b, &mut d, &mut c], 3).await;
+    assert_eq!(group_texts(&ev[0]), vec!["Thanks!"]);
+    assert_eq!(group_texts(&ev[1]), vec!["Thanks!"]);
+    assert!(
+        group_texts(&ev[3]).is_empty(),
+        "the removed member still reads nothing"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

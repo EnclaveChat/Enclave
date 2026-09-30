@@ -706,6 +706,48 @@ impl Engine {
             }
             Cmd::RevealWords(on) => self.reveal_words = on,
             Cmd::Search(q) => self.search = q,
+            Cmd::AddMembers(id) => {
+                let members: Vec<[u8; 64]> = self.picked.iter().copied().collect();
+                self.busy = true;
+                self.push();
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut()) {
+                    match c.add_group_members(&gid, &members).await {
+                        Ok(()) => self.picked.clear(),
+                        Err(_) => {
+                            self.status = "Couldn't add them. Check your connection.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::RemoveMember(id, member) => {
+                self.busy = true;
+                self.push();
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut()) {
+                    let root = c
+                        .groups()
+                        .into_iter()
+                        .find(|g| g.id == gid)
+                        .and_then(|g| g.members.into_iter().find(|(r, _)| hex_id(r) == member))
+                        .map(|(r, _)| r);
+                    if let Some(root) = root
+                        && c.remove_group_member(&gid, &root).await.is_err()
+                    {
+                        self.status = "Couldn't remove them. Check your connection.".into();
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::LeaveGroup(id) => {
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut()) {
+                    if c.leave_group(&gid).await.is_ok() {
+                        self.selected_group = None;
+                        self.effect(Effect::LeftGroup);
+                    } else {
+                        self.status = "Couldn't leave the group. Check your connection.".into();
+                    }
+                }
+            }
             Cmd::Meet(open) => {
                 self.meet_words.clear();
                 self.meet_name.clear();
@@ -1096,6 +1138,36 @@ impl Engine {
             };
             if self.selected_group == Some(g.id) {
                 s.current = Some(row.clone());
+                s.group_admin = g.admin;
+                s.members = g
+                    .members
+                    .iter()
+                    .map(|(r, name)| Row {
+                        id: hex_id(r),
+                        name: name.clone(),
+                        state: 2,
+                        verified: c.contact(r).is_some_and(|ct| ct.verified),
+                        met: c.met_in_person(r),
+                        tint: tint_for(r),
+                        ..Default::default()
+                    })
+                    .collect();
+                if g.admin {
+                    s.addable = c
+                        .contacts()
+                        .into_iter()
+                        .filter(|ct| {
+                            ct.state == ContactState::Accepted
+                                && !g.members.iter().any(|(r, _)| *r == ct.root)
+                        })
+                        .map(|ct| Pick {
+                            id: hex_id(&ct.root),
+                            name: ct.name.clone(),
+                            tint: tint_for(&ct.root),
+                            selected: self.picked.contains(&ct.root),
+                        })
+                        .collect();
+                }
                 s.messages = msgs
                     .iter()
                     .map(|m| Msg {

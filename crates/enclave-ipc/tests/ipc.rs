@@ -72,6 +72,9 @@ fn snapshot() -> Snapshot {
         timer: 3600,
         search: vec![Row::default()],
         username_problem: "@robin@enclave.example".into(),
+        members: vec![Row::default(); 2],
+        group_admin: true,
+        addable: vec![Pick::default()],
     }
 }
 
@@ -108,6 +111,9 @@ fn cmds() -> Vec<Cmd> {
         Cmd::SendFile("ab".into(), "a.txt".into(), vec![7; 1000], "look".into()),
         Cmd::SaveFile("ab".into(), 6),
         Cmd::Search("café".into()),
+        Cmd::AddMembers("g1".into()),
+        Cmd::RemoveMember("g1".into(), "ab".into()),
+        Cmd::LeaveGroup("g1".into()),
     ]
 }
 
@@ -129,6 +135,7 @@ fn round_trips() {
         Out::Effect(Effect::UsernameClaimed),
         Out::Effect(Effect::RemovalDone),
         Out::Effect(Effect::FileSent),
+        Out::Effect(Effect::LeftGroup),
         Out::File("a.txt".into(), vec![1, 2, 3]),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);

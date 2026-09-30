@@ -52,6 +52,16 @@ fn row(r: &Row) -> ContactRow {
     }
 }
 
+fn pick_row(p: &Pick) -> PickRow {
+    PickRow {
+        id: p.id.clone().into(),
+        name: p.name.clone().into(),
+        initials: initials(&p.name).into(),
+        tint: tint(p.tint),
+        selected: p.selected,
+    }
+}
+
 fn strings(v: &[String]) -> ModelRc<SharedString> {
     ModelRc::from(Rc::new(VecModel::from(
         v.iter().map(SharedString::from).collect::<Vec<_>>(),
@@ -127,17 +137,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_usernames(s.usernames);
     ui.set_username_error(s.username_error.clone().into());
     ui.set_busy(s.busy);
-    let pick: Vec<PickRow> = s
-        .pick
-        .iter()
-        .map(|p| PickRow {
-            id: p.id.clone().into(),
-            name: p.name.clone().into(),
-            initials: initials(&p.name).into(),
-            tint: tint(p.tint),
-            selected: p.selected,
-        })
-        .collect();
+    let pick: Vec<PickRow> = s.pick.iter().map(pick_row).collect();
     ui.set_pick(ModelRc::from(Rc::new(VecModel::from(pick))));
     let devices: Vec<DeviceRow> = s
         .devices
@@ -164,6 +164,13 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
     ui.set_username_problem(s.username_problem.clone().into());
+    ui.set_members(ModelRc::from(Rc::new(VecModel::from(
+        s.members.iter().map(row).collect::<Vec<_>>(),
+    ))));
+    ui.set_group_admin(s.group_admin);
+    ui.set_addable(ModelRc::from(Rc::new(VecModel::from(
+        s.addable.iter().map(pick_row).collect::<Vec<_>>(),
+    ))));
     ui.set_timer(s.timer as i32);
     ui.set_search_results(ModelRc::from(Rc::new(VecModel::from(
         s.search.iter().map(row).collect::<Vec<_>>(),
@@ -197,6 +204,10 @@ pub fn apply_effect(ui: &AppWindow, e: Effect) {
         }
         Effect::UsernameClaimed => ui.set_username_input("".into()),
         Effect::RemovalDone => ui.set_confirm_remove("".into()),
+        Effect::LeftGroup => {
+            ui.set_sheet(Sheet::None);
+            ui.set_current_id("".into());
+        }
         Effect::FileSent => {
             ui.set_sheet(Sheet::None);
             ui.set_attach_path("".into());

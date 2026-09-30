@@ -159,6 +159,12 @@ pub struct Snapshot {
     /// Our username (`@name@domain`) if the server's log no longer leads to
     /// us, or empty.
     pub username_problem: String,
+    /// Members of the open group (other than us).
+    pub members: Vec<Row>,
+    /// We are an admin of the open group.
+    pub group_admin: bool,
+    /// Contacts that could be added to the open group.
+    pub addable: Vec<Pick>,
 }
 
 /// UI → vault.
@@ -227,6 +233,12 @@ pub enum Cmd {
     SaveFile(String, u64),
     /// Search messages (empty stops searching).
     Search(String),
+    /// Add the picked contacts to a group.
+    AddMembers(String),
+    /// Remove a member from a group: group, member.
+    RemoveMember(String, String),
+    /// Leave a group.
+    LeaveGroup(String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -240,6 +252,8 @@ pub enum Effect {
     UsernameClaimed,
     /// Close the attach sheet and clear it.
     FileSent,
+    /// Close the members sheet and the conversation.
+    LeftGroup,
     /// Close the device-removal confirmation.
     RemovalDone,
 }
@@ -373,6 +387,15 @@ impl Snapshot {
             .u32(self.timer);
         put_rows(&mut w, &self.search);
         w.str(&self.username_problem);
+        put_rows(&mut w, &self.members);
+        w.bool(self.group_admin);
+        w.len(self.addable.len());
+        for p in &self.addable {
+            w.str(&p.id)
+                .str(&p.name)
+                .u8((p.tint % TINT_COUNT) as u8)
+                .bool(p.selected);
+        }
         w.0
     }
 
@@ -466,6 +489,21 @@ impl Snapshot {
             timer: r.u32()?,
             search: get_rows(&mut r)?,
             username_problem: r.str()?,
+            members: get_rows(&mut r)?,
+            group_admin: r.bool()?,
+            addable: {
+                let n = r.len()?;
+                (0..n)
+                    .map(|_| {
+                        Ok(Pick {
+                            id: r.str()?,
+                            name: r.str()?,
+                            tint: tint(r.u8()?)?,
+                            selected: r.bool()?,
+                        })
+                    })
+                    .collect::<Result<_>>()?
+            },
         };
         r.end()?;
         Ok(s)
@@ -508,6 +546,9 @@ impl Cmd {
             Cmd::SendFile(c, n, b, cap) => w.u8(29).str(c).str(n).bytes(b).str(cap),
             Cmd::SaveFile(c, s) => w.u8(30).str(c).u64(*s),
             Cmd::Search(q) => w.u8(31).str(q),
+            Cmd::AddMembers(g) => w.u8(32).str(g),
+            Cmd::RemoveMember(g, m) => w.u8(33).str(g).str(m),
+            Cmd::LeaveGroup(g) => w.u8(34).str(g),
         };
         w.0
     }
@@ -547,6 +588,9 @@ impl Cmd {
             29 => Cmd::SendFile(r.str()?, r.str()?, r.bytes()?, r.str()?),
             30 => Cmd::SaveFile(r.str()?, r.u64()?),
             31 => Cmd::Search(r.str()?),
+            32 => Cmd::AddMembers(r.str()?),
+            33 => Cmd::RemoveMember(r.str()?, r.str()?),
+            34 => Cmd::LeaveGroup(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -572,6 +616,7 @@ impl Out {
                     Effect::UsernameClaimed => 3,
                     Effect::RemovalDone => 4,
                     Effect::FileSent => 5,
+                    Effect::LeftGroup => 6,
                 },
             ],
         }
@@ -587,6 +632,7 @@ impl Out {
                 3 => Effect::UsernameClaimed,
                 4 => Effect::RemovalDone,
                 5 => Effect::FileSent,
+                6 => Effect::LeftGroup,
                 _ => return Err(IpcError::Malformed),
             })),
             [3, ..] => {

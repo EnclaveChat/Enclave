@@ -62,7 +62,7 @@ export struct MessageRow {
 }
 
 export enum Screen { welcome, name, setting-up, join, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -341,6 +341,13 @@ export component AppWindow inherits Window {
     callback stop-recovery();
     callback meet-scan(string);
     callback search(string);
+    callback add-members(string);
+    callback remove-member(string, string);
+    callback leave-group(string);
+    in property <[ContactRow]> members;
+    in property <[PickRow]> addable;
+    in property <bool> group-admin;
+    in-out property <string> confirm-leave;
     in property <[ContactRow]> search-results;
     in-out property <string> search-query;
     callback react(string, string, string);
@@ -677,6 +684,13 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                     horizontal-stretch: 1;
                                 }
+                            }
+                        }
+                        if root.current.kind == 1: VerticalLayout {
+                            alignment: center;
+                            QuietButton {
+                                text: "Members";
+                                clicked => { root.open-sheet(Sheet.members); }
                             }
                         }
                         if root.current.state == 2 && root.current.kind == 0: VerticalLayout {
@@ -1270,6 +1284,96 @@ export component AppWindow inherits Window {
                 text: root.busy ? "Creating…" : "Create group";
                 enabled: root.group-name != "" && !root.busy;
                 clicked => { root.create-group(root.group-name); }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.members: SheetFrame {
+        title: root.current.name;
+        close => { root.sheet = Sheet.none; root.confirm-leave = ""; }
+        Secondary { text: root.current.members + " people, you included. Everyone in the group can see who else is in it."; }
+        for m in root.members: HorizontalLayout {
+            spacing: Tokens.space-sm;
+            height: 56px;
+            VerticalLayout { alignment: center; Avatar { initials: m.initials; tint: m.tint; size: 36px; } }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Body { text: m.name; overflow: elide; }
+                if m.met || m.verified: Caption { text: m.met ? "Met in person" : "Checked"; }
+            }
+            if root.group-admin: VerticalLayout {
+                alignment: center;
+                QuietButton {
+                    text: "Remove";
+                    danger: true;
+                    accessible-label: "Remove " + m.name;
+                    clicked => { root.remove-member(root.current-id, m.id); }
+                }
+            }
+        }
+        if root.group-admin && root.addable.length > 0: Body { text: "Add people"; font-weight: 600; }
+        if root.group-admin && root.addable.length > 0: Secondary { text: "They'll see new messages from now on, not what was said before they joined."; }
+        if root.group-admin: VerticalLayout {
+        for p in root.addable: Rectangle {
+            height: 56px;
+            border-radius: Tokens.radius-control;
+            background: p.selected ? Tokens.bubble-in : transparent;
+            accessible-role: checkbox;
+            accessible-checked: p.selected;
+            accessible-label: p.name;
+            accessible-action-default => { root.toggle-pick(p.id); }
+            TouchArea { clicked => { root.toggle-pick(p.id); } }
+            HorizontalLayout {
+                padding-left: Tokens.space-s;
+                padding-right: Tokens.space-s;
+                spacing: Tokens.space-sm;
+                VerticalLayout { alignment: center; Avatar { initials: p.initials; tint: p.tint; size: 36px; } }
+                Body { text: p.name; vertical-alignment: center; horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 4px;
+                        border-width: 2px;
+                        border-color: p.selected ? Tokens.pine : Tokens.text-muted;
+                        background: p.selected ? Tokens.pine : transparent;
+                        if p.selected: Path {
+                            width: 16px;
+                            height: 16px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: "M 5 12 L 10 17 L 19 7";
+                            stroke: Tokens.on-pine;
+                            stroke-width: 2.5px;
+                        }
+                    }
+                }
+            }
+        }
+        }
+        if root.group-admin && root.addable.length > 0: HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Adding…" : "Add to group";
+                enabled: !root.busy;
+                clicked => { root.add-members(root.current-id); }
+            }
+        }
+        if root.confirm-leave == "": HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Leave group"; danger: true; clicked => { root.confirm-leave = root.current-id; } }
+        }
+        if root.confirm-leave != "": Notice {
+            title: "Leave " + root.current.name + "?";
+            text: "You'll stop getting its messages. Someone would have to add you again.";
+            kind: 2;
+            HorizontalLayout {
+                alignment: start;
+                spacing: Tokens.space-s;
+                PrimaryButton { text: "Leave"; danger: true; clicked => { root.leave-group(root.current-id); root.confirm-leave = ""; } }
+                QuietButton { text: "Stay"; clicked => { root.confirm-leave = ""; } }
             }
         }
     }

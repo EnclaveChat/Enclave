@@ -179,6 +179,18 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let t = tx.clone();
+    ui.on_add_members(move |id| {
+        let _ = t.send(Cmd::AddMembers(id.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_remove_member(move |id, member| {
+        let _ = t.send(Cmd::RemoveMember(id.to_string(), member.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_leave_group(move |id| {
+        let _ = t.send(Cmd::LeaveGroup(id.to_string()));
+    });
+    let t = tx.clone();
     ui.on_search(move |q| {
         let _ = t.send(Cmd::Search(q.to_string()));
     });

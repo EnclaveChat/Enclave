@@ -5,7 +5,7 @@
 //! The people and messages here are illustrative placeholders.
 #![deny(unsafe_code)]
 
-use enclave_app::view::{self, Msg, Row, Snapshot};
+use enclave_app::view::{self, Msg, Pick, Row, Snapshot};
 use enclave_app::{AppWindow, Screen, Sheet, Tokens};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter};
@@ -203,6 +203,9 @@ fn fixture() -> Snapshot {
         timer: 0,
         search: Vec::new(),
         username_problem: String::new(),
+        members: Vec::new(),
+        group_admin: false,
+        addable: Vec::new(),
     }
 }
 
@@ -386,6 +389,19 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::None);
         shot("14-group", desktop);
         shot("14-group-phone", phone);
+        let mut members = group.clone();
+        members.group_admin = true;
+        members.members = group.contacts[1..4].to_vec();
+        members.addable = vec![Pick {
+            id: "m1".into(),
+            name: "Mara Lindqvist".into(),
+            tint: 3,
+            selected: true,
+        }];
+        view::apply(&ui, &members);
+        ui.set_sheet(Sheet::Members);
+        shot("24-members-phone", phone);
+        ui.set_sheet(Sheet::None);
         view::apply(&ui, &data);
         ui.set_group_name("Book club".into());
         ui.set_sheet(Sheet::NewGroup);

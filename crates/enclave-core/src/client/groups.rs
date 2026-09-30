@@ -413,6 +413,120 @@ impl Client {
         Ok(())
     }
 
+    /// Add contacts to a group (admins only). A new epoch starts first, so
+    /// the newcomers can't read anything sent before they joined; they get a
+    /// welcome and every member's card, and existing members get theirs so
+    /// strangers can introduce themselves.
+    pub async fn add_group_members(&mut self, gid: &[u8; 32], roots: &[[u8; 64]]) -> Result<()> {
+        let now = self.now();
+        let mut new_cards = Vec::new();
+        for r in roots {
+            let c = self.contacts.get(r).ok_or(CoreError::NotFound)?;
+            if c.state != ContactState::Accepted {
+                return Err(CoreError::NotAccepted);
+            }
+            new_cards.push(c.card.clone().ok_or(CoreError::NotFound)?);
+        }
+        let (next, epoch) = {
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            let me = e.group.me;
+            if e.left
+                || !e
+                    .group
+                    .state
+                    .members
+                    .get(me as usize)
+                    .is_some_and(|m| m.admin)
+            {
+                return Err(CoreError::NotAccepted);
+            }
+            let fresh: Vec<[u8; 64]> = roots
+                .iter()
+                .filter(|r| e.group.state.index_of(r).is_none())
+                .copied()
+                .collect();
+            if fresh.is_empty() {
+                return Ok(());
+            }
+            if e.group.state.active().count() + fresh.len() > enclave_proto::group::MAX_MEMBERS {
+                return Err(CoreError::TooLong);
+            }
+            let (epoch, secret) = e.group.new_epoch(&mut self.rng)?;
+            let next = e.group.state.child(|s| {
+                for r in &fresh {
+                    let _ = s.add(*r, false, now);
+                }
+                s.epoch = epoch;
+            })?;
+            e.group.apply_state(next.clone())?;
+            for c in &new_cards {
+                e.cards.insert(c.root, c.clone());
+            }
+            (next, (epoch, secret))
+        };
+        self.save_group(gid)?;
+        let existing: Vec<[u8; 64]> = {
+            let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+            let me = self.account.root_public.0;
+            e.group
+                .state
+                .active()
+                .map(|(_, m)| m.root)
+                .filter(|r| *r != me && !roots.contains(r))
+                .collect()
+        };
+        self.rotate_group(gid, Some(epoch), None, now).await?;
+        self.post_group(gid, &next.encode(), FLAG_STATE_UPDATE, now)
+            .await?;
+        // Newcomers: the welcome, then every card.
+        let all: Vec<Vec<u8>> = self
+            .groups
+            .get(gid)
+            .map(|e| e.cards.values().map(ContactCard::encode).collect())
+            .unwrap_or_default();
+        for r in roots {
+            let welcome = {
+                let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+                let idx = e.group.state.index_of(r).ok_or(CoreError::NotFound)?;
+                e.group.welcome(idx)?.to_vec()
+            };
+            self.send_content(r, &Content::GroupWelcome(welcome), now)
+                .await?;
+            for chunk in all.chunks(MAX_CARDS_PER_MESSAGE) {
+                self.send_content(
+                    r,
+                    &Content::GroupCards {
+                        group_id: *gid,
+                        cards: chunk.to_vec(),
+                    },
+                    now,
+                )
+                .await?;
+            }
+        }
+        // Existing members: the newcomers' cards, so strangers can reach
+        // each other. Members we can't reach learn them from the state and
+        // a later message.
+        let fresh: Vec<Vec<u8>> = new_cards.iter().map(ContactCard::encode).collect();
+        for r in existing {
+            if self.contacts.get(&r).is_some_and(|c| c.inbox.is_some()) {
+                for chunk in fresh.chunks(MAX_CARDS_PER_MESSAGE) {
+                    let _ = self
+                        .send_content(
+                            &r,
+                            &Content::GroupCards {
+                                group_id: *gid,
+                                cards: chunk.to_vec(),
+                            },
+                            now,
+                        )
+                        .await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Leave a group.
     pub async fn leave_group(&mut self, gid: &[u8; 32]) -> Result<()> {
         let now = self.now();
@@ -854,12 +968,21 @@ impl Client {
         let Some(e) = self.groups.get_mut(gid) else {
             return Ok(());
         };
-        if e.group.state.index_of(from).is_none() {
+        let Some(sender) = e.group.state.index_of(from) else {
             return Ok(());
-        }
+        };
+        // An admin's cards may arrive before the state update that adds
+        // those members (the inbox is read before group mailboxes); keep
+        // them. Introductions only ever go to active members.
+        let from_admin = e
+            .group
+            .state
+            .members
+            .get(sender as usize)
+            .is_some_and(|m| m.admin);
         for b in cards {
             if let Ok(c) = ContactCard::decode(b)
-                && e.group.state.index_of(&c.root).is_some()
+                && (from_admin || e.group.state.index_of(&c.root).is_some())
             {
                 e.cards.entry(c.root).or_insert(c);
             }
