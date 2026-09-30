@@ -1,6 +1,6 @@
 # Voice and Video Calls
 
-Status: Draft (M0) · Normative
+Status: Partly implemented (M8) · Normative
 
 Source: PLAN.md §11 (D8, D9). Crates: `enclave-calls`, `enclave-relay`, `enclave-media`. Derivations: `02b-key-schedule.md` §12.
 
@@ -75,6 +75,18 @@ PSK schedule:
 - WireGuard keys are fresh per call. The PSK changes every 2 minutes; both ends switch at the period boundary and WireGuard's own 120 s rekey picks it up.
 - Tickets are obtained **anonymously** over the mixnet and paid with Privacy Pass, so the relay cannot link a ticket to an account. Clients MAY pre-fetch one ticket per relay family to cut setup time.
 
+### 3.4 Implementation status (M8)
+
+`crates/enclave-calls` and `crates/enclave-relay` implement signalling, SFrame, shaping, tickets and two-relay forwarding. Two things differ from §3.1 until their dependencies are ready:
+
+- **Client↔relay link.** Every published Rust WireGuard (boringtun, GotaTun) uses ring or aws-lc for its AEAD (C and assembly), and GotaTun 0.9 needs Rust 1.95. Until one of them can ship under §22, the link seals datagrams with EnclaveSeal (compact form) under per-direction keys derived from the ticket's period PSK (`link-dir`): `type ‖ session 16 ‖ period u32 ‖ counter u64 ‖ ct ‖ tag`. The key schedule is the WireGuard PSK schedule of §3.3, so an observer or relay learns the same things either way. Current and previous periods are accepted; a 128-entry window rejects replays.
+- **Relay↔relay link.** Sealed with EnclaveSeal under per-direction keys from the two relays' static X448 keys (`relay-link`) instead of WireGuard + Rosenpass. Peers are configured explicitly.
+- **Rendezvous.** Both legs of a call join with `rendezvous = KMAC256(call_secret, "", 128, "enclave/v1/calls/rendezvous")`; the join names the peer relay's address. Relays forward media only between a joined session and the named peer relay.
+
+Tested: a two-relay call where each relay sees only its own client's address, constant datagram sizes on both hops, replay rejection on every hop, and a real UDP loopback call.
+
+Not implemented yet: Opus/AV1 media engines, capture, direct mode (ICE), the Maximum-privacy tunnel, group calls (SFU), call links, Privacy Pass payment for tickets, and the call UI.
+
 ## 4. Direct mode (opt-in per call)
 
 - The pre-call sheet offers "Direct (clearer, but Sam can see your internet address)". Checked contacts get one confirmation; unchecked contacts get a second, stronger warning: "You haven't checked Sam's security code. Direct calls show your internet address to whoever is on the other end."
@@ -120,7 +132,7 @@ ct ‖ tag     = SealDN(sframe_key, nonce(CTR), E("enclave/v1/calls/ad-sframe") 
 
 | Stream | Rule |
 |---|---|
-| Audio | Opus CBR 32 kbps, 20 ms frames, DTX off, in-band FEC on. Every packet is padded to a fixed 160 B before WireGuard, at exactly 50 packets/s. |
+| Audio | Opus CBR 32 kbps, 20 ms frames, DTX off, in-band FEC on. Every SFrame packet is exactly 160 B (17 B header, 111 B plaintext, 32 B tag) at exactly 50 packets/s. |
 | Video | Tiers 300, 800, 1,500 kbps, chosen at call start. Fixed 1,200 B packets at a fixed rate: 31.25, 83.33, or 156.25 packets/s. |
 | Step-down | Quality can only step down, at most once per 30 s. It never steps up during a call. |
 | Mute / camera off | Padding frames keep exactly the same size and rate. |

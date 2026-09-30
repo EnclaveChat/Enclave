@@ -1,0 +1,21 @@
+[package]
+name = "enclave-relay"
+description = "Enclave call relay: ticket service, client links, relay-to-relay forwarding."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-calls = { path = "../enclave-calls" }
+enclave-crypto = { path = "../enclave-crypto" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+
+[dev-dependencies]
+enclave-crypto = { path = "../enclave-crypto" }

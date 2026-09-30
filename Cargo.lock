@@ -2194,6 +2194,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-calls"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "enclave-crypto",
+ "enclave-proto",
+ "subtle",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "enclave-core"
 version = "0.1.0"
 dependencies = [
@@ -2287,6 +2299,15 @@ dependencies = [
  "subtle",
  "thiserror 2.0.21",
  "zeroize",
+]
+
+[[package]]
+name = "enclave-relay"
+version = "0.1.0"
+dependencies = [
+ "enclave-calls",
+ "enclave-crypto",
+ "tokio",
 ]
 
 [[package]]

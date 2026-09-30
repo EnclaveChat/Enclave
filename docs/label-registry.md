@@ -229,6 +229,9 @@ These labels belong to features that are specified but not in code. They are res
 | `enclave/v1/calls/ticket-secret` | KMAC | 256 | Relay-ticket secret | 11 §3 |
 | `enclave/v1/calls/ticket-seal` | KMAC | 256 | Seal key for the relay-ticket request body | 11 §3.3 |
 | `enclave/v1/calls/wg-psk` | KMAC | 256 | WireGuard PSK for one 120 s period | 11 §3 |
+| `enclave/v1/calls/link-dir` | KMAC | 256 | Per-direction client↔relay link key from a period PSK (interim framing until WireGuard) | 11 §3.4 |
+| `enclave/v1/calls/relay-link` | KMAC | 256 | Per-direction relay↔relay link key from the relays' static X448 keys (interim until Rosenpass) | 11 §3.4 |
+| `enclave/v1/calls/rendezvous` | KMAC | 128 | Rendezvous id joining the two relay legs of a call | 11 §3.4 |
 | `enclave/v1/calls/link-cap` | KMAC | 256 | Call-link capability | 11 §8 |
 | `enclave/v1/calls/relay-descriptor` | CTX-C | — | Relay descriptor (declares operator family) | 12 §5 |
 | `enclave/v1/calls/ad-ticket` | AD | — | Relay-ticket seal AD prefix | 11 §3 |

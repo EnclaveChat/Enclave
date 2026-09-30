@@ -1,0 +1,21 @@
+[package]
+name = "enclave-calls"
+description = "Enclave calls: per-call hybrid key agreement, SFrame with the EnclaveSeal suite, constant-rate shaping, relay tickets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-proto = { path = "../enclave-proto" }
+bip39 = { version = "3.0.0", default-features = false, features = ["std"] }
+subtle = "2.6.1"
+thiserror = "2"
+zeroize = "1"
