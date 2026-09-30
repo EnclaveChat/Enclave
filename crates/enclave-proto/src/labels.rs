@@ -47,6 +47,8 @@ pub const MERKLE: &str = "enclave/v1/prekey/merkle";
 pub const BOND: &str = "enclave/v1/bond/psk";
 /// Seal words shown after an in-person scan.
 pub const BOND_SEAL_WORDS: &str = "enclave/v1/bond/seal-words";
+/// Hash of a closed poll's tally (`docs/07-groups.md` §7.5).
+pub const POLL_TALLY_HASH: &str = "enclave/v1/proto/poll-tally-hash";
 /// One-way PSK from an invite link's secret.
 pub const INVITE_PSK: &str = "enclave/v1/invite/psk";
 /// Request-inbox capabilities from an invite link's secret.
@@ -77,6 +79,7 @@ pub const ALL: &[&str] = &[
     BOND_SEAL_WORDS,
     INVITE_PSK,
     INVITE_CAP,
+    POLL_TALLY_HASH,
 ];
 
 /// Group: exporter key from a pairwise session.

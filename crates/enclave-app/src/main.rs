@@ -149,6 +149,27 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::NewInvite(1));
     });
     let t = tx.clone();
+    ui.on_create_poll(move |id, q, a, b, c, d| {
+        let options = [a, b, c, d]
+            .iter()
+            .map(|o| o.trim().to_string())
+            .filter(|o| !o.is_empty())
+            .collect();
+        let _ = t.send(Cmd::CreatePoll(id.to_string(), q.to_string(), options));
+    });
+    let t = tx.clone();
+    ui.on_vote(move |id, seq, choice| {
+        if let (Ok(seq), Ok(choice)) = (seq.parse(), u32::try_from(choice)) {
+            let _ = t.send(Cmd::Vote(id.to_string(), seq, choice));
+        }
+    });
+    let t = tx.clone();
+    ui.on_close_poll(move |id, seq| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::ClosePoll(id.to_string(), seq));
+        }
+    });
+    let t = tx.clone();
     ui.on_new_group_invite(move |id| {
         let _ = t.send(Cmd::NewGroupInvite(id.to_string()));
     });

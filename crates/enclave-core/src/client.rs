@@ -105,6 +105,7 @@ mod invites;
 mod link;
 mod meet;
 mod messages;
+mod polls;
 mod search;
 mod usernames;
 
@@ -115,6 +116,7 @@ pub use invites::{InviteInfo, JOIN_PREFIX, JoinLink};
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
+pub use polls::{MAX_OPTIONS, PollView};
 pub use search::{Hit, Place};
 pub use usernames::AUDIT_EVERY_SECS;
 
@@ -160,6 +162,13 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// A vote arrived or a poll closed.
+    PollChanged {
+        /// The group.
+        group_id: [u8; 32],
+        /// The poll.
+        poll: [u8; 16],
+    },
     /// Someone asked to join a group through our group invite link; they
     /// wait for approval ([`Client::approve_join`]).
     JoinRequest {

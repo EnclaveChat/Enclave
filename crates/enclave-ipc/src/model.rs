@@ -89,6 +89,17 @@ pub struct Msg {
     pub file: String,
     /// The attachment is a picture the vault will send a preview of.
     pub image: bool,
+    /// A poll's options (empty when the message isn't a poll).
+    pub poll_options: Vec<String>,
+    /// Votes per option.
+    pub poll_counts: Vec<u32>,
+    /// Our vote: 0 none, else the option's index plus one.
+    pub poll_mine: i32,
+    /// 0 not a poll, 1 open, 2 closed (tallies agree), 3 closed (the
+    /// creator's tally differs from ours).
+    pub poll_state: i32,
+    /// We created the poll (and may close it).
+    pub poll_ours: bool,
 }
 
 /// Everything the window shows.
@@ -268,6 +279,12 @@ pub enum Cmd {
     /// Make a group invite link (admins; joins wait for approval); it comes
     /// back as [`Out::Invite`].
     NewGroupInvite(String),
+    /// Ask a group a question: group, question, options.
+    CreatePoll(String, String, Vec<String>),
+    /// Vote in the poll at a group message: group, position, option index.
+    Vote(String, u64, u32),
+    /// Close our poll at a group message: group, position.
+    ClosePoll(String, u64),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -287,6 +304,8 @@ pub enum Effect {
     PassphraseChanged,
     /// Close the device-removal confirmation.
     RemovalDone,
+    /// Close the poll sheet and clear it.
+    PollCreated,
 }
 
 /// Vault → UI.
@@ -397,7 +416,13 @@ impl Snapshot {
                 .bool(m.can_edit)
                 .bool(m.deleted)
                 .str(&m.file)
-                .bool(m.image);
+                .bool(m.image)
+                .strs(&m.poll_options)
+                .len(m.poll_counts.len());
+            for c in &m.poll_counts {
+                w.u32(*c);
+            }
+            w.i32(m.poll_mine).i32(m.poll_state).bool(m.poll_ours);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -482,6 +507,14 @@ impl Snapshot {
                     deleted: r.bool()?,
                     file: r.str()?,
                     image: r.bool()?,
+                    poll_options: r.strs()?,
+                    poll_counts: {
+                        let n = r.len()?;
+                        (0..n).map(|_| r.u32()).collect::<Result<_>>()?
+                    },
+                    poll_mine: r.i32()?,
+                    poll_state: r.i32()?,
+                    poll_ours: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -619,6 +652,9 @@ impl Cmd {
             Cmd::NewInvite(n) => w.u8(38).u8(*n),
             Cmd::CancelInvites => w.u8(39),
             Cmd::NewGroupInvite(g) => w.u8(40).str(g),
+            Cmd::CreatePoll(g, q, o) => w.u8(41).str(g).str(q).strs(o),
+            Cmd::Vote(g, s, c) => w.u8(42).str(g).u64(*s).u32(*c),
+            Cmd::ClosePoll(g, s) => w.u8(43).str(g).u64(*s),
         };
         w.0
     }
@@ -667,6 +703,9 @@ impl Cmd {
             38 => Cmd::NewInvite(r.u8()?),
             39 => Cmd::CancelInvites,
             40 => Cmd::NewGroupInvite(r.str()?),
+            41 => Cmd::CreatePoll(r.str()?, r.str()?, r.strs()?),
+            42 => Cmd::Vote(r.str()?, r.u64()?, r.u32()?),
+            43 => Cmd::ClosePoll(r.str()?, r.u64()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -709,6 +748,7 @@ impl Out {
                     Effect::FileSent => 5,
                     Effect::LeftGroup => 6,
                     Effect::PassphraseChanged => 7,
+                    Effect::PollCreated => 8,
                 },
             ],
         }
@@ -726,6 +766,7 @@ impl Out {
                 5 => Effect::FileSent,
                 6 => Effect::LeftGroup,
                 7 => Effect::PassphraseChanged,
+                8 => Effect::PollCreated,
                 _ => return Err(IpcError::Malformed),
             })),
             [3, ..] => {

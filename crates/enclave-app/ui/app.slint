@@ -48,6 +48,12 @@ export struct DeviceRow {
 }
 
 // status: 0 sending privately, 1 on its way, 2 delivered.
+export struct PollOption {
+    text: string,
+    count: int,
+    mine: bool,
+}
+
 export struct MessageRow {
     text: string,
     outgoing: bool,
@@ -63,10 +69,14 @@ export struct MessageRow {
     picture: bool,
     has-image: bool,
     image: image,
+    // 0 not a poll, 1 open, 2 closed, 3 closed with a different tally.
+    poll-state: int,
+    poll-options: [PollOption],
+    poll-ours: bool,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -92,6 +102,8 @@ component Bubble inherits HorizontalLayout {
     in property <length> bubble-max;
     in property <bool> selected;
     callback tapped();
+    callback vote(int);
+    callback close-poll();
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
@@ -142,8 +154,54 @@ component Bubble inherits HorizontalLayout {
             if root.msg.text != "": Text {
                 text: root.msg.text;
                 font-size: Tokens.type-body;
+                font-weight: root.msg.poll-state > 0 ? 600 : 400;
                 color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
                 wrap: word-wrap;
+            }
+            for o[i] in root.msg.poll-options: Rectangle {
+                min-width: 220px;
+                height: 40px;
+                border-radius: Tokens.radius-control;
+                border-width: o.mine ? 2px : 1px;
+                border-color: o.mine ? Tokens.pine : Tokens.hairline;
+                accessible-role: button;
+                accessible-label: o.text + ", " + o.count + (o.count == 1 ? " vote" : " votes") + (o.mine ? ", your vote" : "");
+                accessible-action-default => { if root.msg.poll-state == 1 { root.vote(i); } }
+                TouchArea {
+                    enabled: root.msg.poll-state == 1;
+                    mouse-cursor: root.msg.poll-state == 1 ? pointer : default;
+                    clicked => { root.vote(i); }
+                }
+                HorizontalLayout {
+                    padding-left: Tokens.space-sm;
+                    padding-right: Tokens.space-sm;
+                    spacing: Tokens.space-s;
+                    Text {
+                        text: o.text;
+                        font-size: Tokens.type-body;
+                        color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: o.count;
+                        font-size: Tokens.type-secondary;
+                        font-weight: 600;
+                        color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            if root.msg.poll-state >= 2: Text {
+                text: root.msg.poll-state == 2 ? "Closed." : "Closed. The count the person who asked sees differs from yours, so some votes may not have reached everyone.";
+                font-size: Tokens.type-caption;
+                color: root.msg.outgoing ? Tokens.meta-on-bubble-out : Tokens.text-muted;
+                wrap: word-wrap;
+            }
+            if root.msg.poll-state == 1 && root.msg.poll-ours: HorizontalLayout {
+                alignment: start;
+                QuietButton { text: "Close poll"; clicked => { root.close-poll(); } }
             }
             HorizontalLayout {
                 alignment: end;
@@ -398,6 +456,14 @@ export component AppWindow inherits Window {
     in-out property <string> selected-seq;
     in-out property <string> editing-seq;
     in-out property <string> attach-path;
+    in-out property <string> poll-question;
+    in-out property <string> poll-a;
+    in-out property <string> poll-b;
+    in-out property <string> poll-c;
+    in-out property <string> poll-d;
+    callback create-poll(string, string, string, string, string, string);
+    callback vote(string, string, int);
+    callback close-poll(string, string);
     in-out property <string> attach-caption;
     in-out property <string> attach-error;
     in-out property <string> file-note;
@@ -828,6 +894,8 @@ export component AppWindow inherits Window {
                                     root.selected-seq = root.selected-seq == m.seq ? "" : m.seq;
                                 }
                             }
+                            vote(i) => { root.vote(root.current-id, m.seq, i); }
+                            close-poll => { root.close-poll(root.current-id, m.seq); }
                         }
                     }
                 }
@@ -936,6 +1004,11 @@ export component AppWindow inherits Window {
                             icon: Icons.attach;
                             label: "Send a file";
                             clicked => { root.attach-error = ""; root.open-sheet(Sheet.attach); }
+                        }
+                        if root.current.kind == 1: IconButton {
+                            icon: Icons.poll;
+                            label: "Ask a question";
+                            clicked => { root.open-sheet(Sheet.poll); }
                         }
                         composer := Field {
                             placeholder: root.editing-seq != "" ? "Edit your message" : "Message";
@@ -1125,6 +1198,25 @@ export component AppWindow inherits Window {
                 text: root.busy ? "Sending…" : "Send";
                 enabled: root.attach-path != "" && !root.busy;
                 clicked => { root.send-file(root.current-id, root.attach-path, root.attach-caption); }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.poll: SheetFrame {
+        title: "Ask a question";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Everyone in " + root.current.name + " can vote and see how everyone else voted. Only you can close it."; }
+        Field { placeholder: "Question"; text <=> root.poll-question; }
+        Field { placeholder: "Option 1"; text <=> root.poll-a; }
+        Field { placeholder: "Option 2"; text <=> root.poll-b; }
+        Field { placeholder: "Option 3 (optional)"; text <=> root.poll-c; }
+        Field { placeholder: "Option 4 (optional)"; text <=> root.poll-d; }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Sending…" : "Ask";
+                enabled: root.poll-question != "" && root.poll-a != "" && root.poll-b != "" && !root.busy;
+                clicked => { root.create-poll(root.current-id, root.poll-question, root.poll-a, root.poll-b, root.poll-c, root.poll-d); }
             }
         }
     }

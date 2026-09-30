@@ -275,6 +275,7 @@ fn display(m: &enclave_core::Message, now: u64) -> Msg {
             .attachment
             .as_ref()
             .is_some_and(|a| !m.deleted && is_picture(a)),
+        ..Default::default()
     }
 }
 
@@ -625,6 +626,49 @@ impl Engine {
                         c.remove_contact(&root)
                     };
                     self.selected = None;
+                }
+            }
+            Cmd::CreatePoll(id, question, options) => {
+                self.busy = true;
+                self.push();
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut()) {
+                    match c.create_poll(&gid, question.trim(), &options).await {
+                        Ok(_) => self.effect(Effect::PollCreated),
+                        Err(CoreError::TooLong) => {
+                            self.status =
+                                "A poll needs a question and at least two options.".into();
+                        }
+                        Err(_) => {
+                            self.status = "Couldn't send the poll. Check your connection.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::Vote(id, seq, choice) => {
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut())
+                    && let Some(poll) = c
+                        .group_messages(&gid)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.poll)
+                    && c.vote(&gid, &poll, u8::try_from(choice).unwrap_or(u8::MAX))
+                        .await
+                        .is_err()
+                {
+                    self.status = "Couldn't send your vote. The poll may be closed.".into();
+                }
+            }
+            Cmd::ClosePoll(id, seq) => {
+                if let (Some(gid), Some(c)) = (self.group_of(&id), self.client.as_mut())
+                    && let Some(poll) = c
+                        .group_messages(&gid)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.poll)
+                    && c.close_poll(&gid, &poll).await.is_err()
+                {
+                    self.status = "Couldn't close the poll. Check your connection.".into();
                 }
             }
             Cmd::NewGroupInvite(id) => {
@@ -1446,13 +1490,28 @@ impl Engine {
                 }
                 s.messages = msgs
                     .iter()
-                    .map(|m| Msg {
-                        text: m.text.clone(),
-                        outgoing: m.from.is_none(),
-                        time: clock(m.at),
-                        status: if m.delivered { 1 } else { 0 },
-                        sender: m.from_name.clone(),
-                        ..Default::default()
+                    .map(|m| {
+                        let mut msg = Msg {
+                            text: m.text.clone(),
+                            outgoing: m.from.is_none(),
+                            time: clock(m.at),
+                            status: if m.delivered { 1 } else { 0 },
+                            sender: m.from_name.clone(),
+                            seq: m.seq,
+                            ..Default::default()
+                        };
+                        if let Some(p) = m.poll.and_then(|id| c.poll(&g.id, &id)) {
+                            msg.poll_options = p.options.iter().map(|o| o.0.clone()).collect();
+                            msg.poll_counts = p.options.iter().map(|o| o.1).collect();
+                            msg.poll_mine = p.mine.map_or(0, |i| i32::from(i) + 1);
+                            msg.poll_state = match p.tally_agrees {
+                                None => 1,
+                                Some(true) => 2,
+                                Some(false) => 3,
+                            };
+                            msg.poll_ours = p.ours;
+                        }
+                        msg
                     })
                     .collect();
             }

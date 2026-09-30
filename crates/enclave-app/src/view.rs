@@ -174,6 +174,19 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             deleted: m.deleted,
             file: m.file.clone().into(),
             picture: m.image,
+            poll_state: m.poll_state,
+            poll_ours: m.poll_ours,
+            poll_options: ModelRc::from(Rc::new(VecModel::from(
+                m.poll_options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| crate::PollOption {
+                        text: t.clone().into(),
+                        count: m.poll_counts.get(i).copied().unwrap_or(0) as i32,
+                        mine: m.poll_mine == i as i32 + 1,
+                    })
+                    .collect::<Vec<_>>(),
+            ))),
             has_image: img.is_some(),
             image: img.unwrap_or_default(),
         })
@@ -268,6 +281,18 @@ pub fn apply_effect(ui: &AppWindow, e: Effect) {
         Effect::LeftGroup => {
             ui.set_sheet(Sheet::None);
             ui.set_current_id("".into());
+        }
+        Effect::PollCreated => {
+            ui.set_sheet(Sheet::None);
+            for set in [
+                AppWindow::set_poll_question,
+                AppWindow::set_poll_a,
+                AppWindow::set_poll_b,
+                AppWindow::set_poll_c,
+                AppWindow::set_poll_d,
+            ] {
+                set(ui, "".into());
+            }
         }
         Effect::FileSent => {
             ui.set_sheet(Sheet::None);

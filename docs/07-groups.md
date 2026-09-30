@@ -166,6 +166,8 @@ state_hash_n = ID256("enclave/v1/proto/grp-state", state_hash_{n-1} ‖ H512(upd
 
 A poll close carries `tally_hash = H512(E("enclave/v1/proto/poll-tally-hash") ‖ poll_id ‖ canonical_tally)`, authenticated by the poll creator. In On-the-record groups the creator signs it with use label `enclave/v1/proto/poll-tally`. In Off-the-record groups the close message's MAC vector authenticates it (deniable).
 
+**As implemented** (`client/polls.rs`): polls, votes and closes are ordinary group messages with the new flag `FLAG_RICH` (0x02, inside the sealed and MAC-authenticated sender header), content `u8 kind ‖ …`: `1` poll (`poll_id (16) ‖ question ‖ u8 n ‖ n options`, 2–10 options of at most 200 B), `2` vote (`poll_id ‖ u8 choice`), `3` close (`poll_id ‖ tally_hash (64)`). `tally_hash = SHA3-512("enclave/v1/proto/poll-tally-hash" ‖ poll_id ‖ u32 count per option)` (the label is hashed as a prefix, not framed). A member's later vote replaces their earlier one; votes after the close, votes for options that don't exist and closes from anyone but the creator are ignored. Every member compares the creator's tally hash with the tally they counted; a mismatch is shown ("some votes may not have reached everyone"). Only the poll opens a line in the conversation; votes update it (`Event::PollChanged`). Test `polls_in_groups` includes a close that missed a late vote. Not done: the On-the-record signature, polls in 1:1 chats, anonymous polls.
+
 ## 8. Post-compromise security
 
 - A device compromise that ends is healed for that device's outgoing messages when it next rotates (new `cs_0` and MAC keys, distributed under fresh `K_exp` after the pre-rekey PQ step).

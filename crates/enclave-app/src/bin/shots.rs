@@ -463,6 +463,34 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::None);
         shot("14-group", desktop);
         shot("14-group-phone", phone);
+        let mut poll = group.clone();
+        poll.messages.push(Msg {
+            text: "Which book next?".into(),
+            outgoing: false,
+            time: "15:10".into(),
+            status: 2,
+            sender: "Priya Raman".into(),
+            seq: 40,
+            poll_options: vec![
+                "Piranesi".into(),
+                "The Dispossessed".into(),
+                "Pachinko".into(),
+            ],
+            poll_counts: vec![2, 3, 1],
+            poll_mine: 2,
+            poll_state: 1,
+            ..Default::default()
+        });
+        view::apply(&ui, &poll);
+        shot("30-poll", desktop);
+        shot("30-poll-phone", phone);
+        ui.set_sheet(Sheet::Poll);
+        ui.set_poll_question("Where should we meet?".into());
+        ui.set_poll_a("Café on Main St".into());
+        shot("31-poll-sheet-phone", phone);
+        ui.set_poll_question("".into());
+        ui.set_poll_a("".into());
+        ui.set_sheet(Sheet::None);
         let mut members = group.clone();
         members.group_admin = true;
         members.members = group.contacts[1..4].to_vec();

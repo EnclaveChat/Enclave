@@ -16,7 +16,7 @@ use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
 use enclave_proto::group::{
-    BUCKETS, FLAG_STATE_UPDATE, Group, GroupState, RekeyOutcome, RekeyTarget,
+    BUCKETS, FLAG_RICH, FLAG_STATE_UPDATE, Group, GroupState, RekeyOutcome, RekeyTarget,
 };
 use enclave_rpc::api::{FLAG_GROUP, Status};
 use enclave_store::Store;
@@ -67,12 +67,14 @@ pub struct GroupMessage {
     pub at: u64,
     /// Accepted by the group's server (ours only).
     pub delivered: bool,
+    /// The poll this message opened, if any ([`Client::poll`]).
+    pub poll: Option<[u8; 16]>,
 }
 
 impl GroupMessage {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(1).u64(self.seq);
+        w.u8(2).u64(self.seq);
         match &self.from {
             Some(r) => w.u8(1).fixed(r),
             None => w.u8(0),
@@ -81,12 +83,17 @@ impl GroupMessage {
             .bytes(self.text.as_bytes())
             .u64(self.at)
             .u8(u8::from(self.delivered));
+        match &self.poll {
+            Some(p) => w.u8(1).fixed(p),
+            None => w.u8(0),
+        };
         w.finish()
     }
 
     fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
-        if r.u8()? != 1 {
+        let version = r.u8()?;
+        if version != 1 && version != 2 {
             return Err(ProtoError::Decode);
         }
         let seq = r.u64()?;
@@ -105,6 +112,15 @@ impl GroupMessage {
             text: s(&mut r)?,
             at: r.u64()?,
             delivered: r.u8()? == 1,
+            poll: None,
+        };
+        let m = GroupMessage {
+            poll: if version == 2 && r.u8()? == 1 {
+                Some(r.array()?)
+            } else {
+                None
+            },
+            ..m
         };
         r.end()?;
         Ok(m)
@@ -340,12 +356,9 @@ impl Client {
         Ok(gid)
     }
 
-    /// Send text to a group.
-    pub async fn send_group_text(&mut self, gid: &[u8; 32], text: &str) -> Result<GroupMessage> {
-        if text.len() > MAX_TEXT {
-            return Err(CoreError::TooLong);
-        }
-        let now = self.now();
+    /// Check we may send to `gid` now, and rotate our sender chain first if
+    /// it is due.
+    pub(crate) async fn prepare_group_send(&mut self, gid: &[u8; 32], now: u64) -> Result<()> {
         {
             let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
             if e.left {
@@ -369,6 +382,16 @@ impl Client {
         {
             self.rotate_group(gid, None, None, now).await?;
         }
+        Ok(())
+    }
+
+    /// Send text to a group.
+    pub async fn send_group_text(&mut self, gid: &[u8; 32], text: &str) -> Result<GroupMessage> {
+        if text.len() > MAX_TEXT {
+            return Err(CoreError::TooLong);
+        }
+        let now = self.now();
+        self.prepare_group_send(gid, now).await?;
         let mut msg = self.store_group_message(gid, None, text, now)?;
         self.post_group(gid, text.as_bytes(), 0, now).await?;
         msg.delivered = true;
@@ -555,7 +578,7 @@ impl Client {
     // Network
     // ------------------------------------------------------------------
 
-    async fn post_group(
+    pub(crate) async fn post_group(
         &mut self,
         gid: &[u8; 32],
         content: &[u8],
@@ -893,6 +916,13 @@ impl Client {
             }
             return Ok(Some(Event::GroupChanged { group_id: *gid }));
         }
+        if msg.flags & FLAG_RICH != 0 {
+            let name = {
+                let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+                self.member_name(e, &sender_root)
+            };
+            return self.on_group_rich(gid, &sender_root, name, &msg.content, now);
+        }
         let text = String::from_utf8(msg.content).map_err(|_| ProtoError::Decode)?;
         let name = {
             let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
@@ -1002,7 +1032,18 @@ impl Client {
         Ok(self.store.put(NS_GROUPS, gid, &bytes, &mut self.rng)?)
     }
 
-    fn store_group_message(
+    /// Save a changed group message.
+    pub(crate) fn put_group_message(&mut self, gid: &[u8; 32], m: &GroupMessage) -> Result<()> {
+        self.store.put(
+            &msg_ns(gid),
+            &m.seq.to_be_bytes(),
+            &m.encode(),
+            &mut self.rng,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn store_group_message(
         &mut self,
         gid: &[u8; 32],
         from: Option<([u8; 64], String)>,
@@ -1023,6 +1064,7 @@ impl Client {
             text: text.to_string(),
             at: now,
             delivered: false,
+            poll: None,
         };
         self.store
             .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;

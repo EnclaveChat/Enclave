@@ -56,6 +56,9 @@ pub const ROTATE_AFTER_SECS: u64 = 86_400;
 pub const MAX_SKIP: u32 = 1000;
 /// Message flag: this message is a state update (admin MAC label).
 pub const FLAG_STATE_UPDATE: u8 = 0x01;
+/// Message flag: structured content (polls, votes) rather than text. Like
+/// every flag it is inside the sealed, MAC-authenticated sender header.
+pub const FLAG_RICH: u8 = 0x02;
 /// Rekey flag: the rotation starts a new epoch.
 const REKEY_NEW_EPOCH: u8 = 0x01;
 

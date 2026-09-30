@@ -1247,3 +1247,76 @@ async fn group_invite_links() {
     assert!(ada.contact(&nia.root()).is_none());
     assert!(ada.join_request(&nia.root()).is_none());
 }
+
+/// Polls (07 §7.5): votes reach everyone, a later vote replaces an earlier
+/// one, only the creator closes, and a close that missed a vote shows as a
+/// tally that doesn't match.
+#[tokio::test(flavor = "multi_thread")]
+async fn polls_in_groups() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+
+    let opts = [
+        "Friday".to_string(),
+        "Saturday".into(),
+        "  ".into(),
+        "Sunday".into(),
+    ];
+    assert!(
+        ada.create_poll(&gid, "When?", &opts[..1]).await.is_err(),
+        "one option"
+    );
+    let id = ada.create_poll(&gid, "When?", &opts).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    for c in [&ada, &mo, &jo] {
+        let p = c.poll(&gid, &id).expect("poll arrived");
+        assert_eq!(p.question, "When?");
+        assert_eq!(p.options.len(), 3, "blank option dropped");
+        let msgs = c.group_messages(&gid).unwrap();
+        assert!(msgs.iter().any(|m| m.poll == Some(id)));
+    }
+
+    mo.vote(&gid, &id, 0).await.unwrap();
+    mo.vote(&gid, &id, 1).await.unwrap(); // changed their mind
+    jo.vote(&gid, &id, 1).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let p = ada.poll(&gid, &id).unwrap();
+    assert_eq!(
+        p.options.iter().map(|o| o.1).collect::<Vec<_>>(),
+        vec![0, 2, 0]
+    );
+    assert_eq!(mo.poll(&gid, &id).unwrap().mine, Some(1));
+    assert!(p.ours && !mo.poll(&gid, &id).unwrap().ours);
+    assert!(
+        mo.close_poll(&gid, &id).await.is_err(),
+        "only the creator closes"
+    );
+    assert!(ada.vote(&gid, &id, 9).await.is_err(), "no such option");
+
+    // Jo votes again, but Ada closes before it reaches her.
+    jo.vote(&gid, &id, 2).await.unwrap();
+    ada.close_poll(&gid, &id).await.unwrap();
+    settle(&mut [&mut mo, &mut jo, &mut ada], 2).await;
+    let a = ada.poll(&gid, &id).unwrap();
+    assert!(a.closed && a.tally_agrees == Some(true));
+    let m = mo.poll(&gid, &id).unwrap();
+    assert!(m.closed);
+    assert_eq!(m.tally_agrees, Some(false), "Mo counted Jo's last vote");
+    assert!(jo.vote(&gid, &id, 0).await.is_err(), "closed");
+}
