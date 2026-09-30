@@ -246,4 +246,3 @@ The code is normative where it and these documents disagree; each document lists
 | M6 app | `enclave-design`, `enclave-app` | Desktop MVP in Slint: onboarding, message requests, 1:1 chat, contact codes and invite links, security-code check, privacy profile choice, recovery words. Runs as an offline demo or against a dev server. Screenshots render headlessly (`enclave-shots`, `docs/screenshots/`). Not done: Android/iOS packaging, images, voice notes, disappearing messages, push, app lock, the screen-reader audit. |
 | M7–M12 | — | Not started. |
 
-Known code gaps raised by the documentation pass: skipped message keys have no 7-day expiry (05 §10); the conversation mode is not yet bound into device-slot associated data (05 §9).

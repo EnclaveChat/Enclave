@@ -323,7 +323,7 @@ Messages that arrive late within the 16-epoch PQ history and within the skipped-
 
 ## 9. Modes (not yet implemented)
 
-The conversation mode is bound into EQXDH (`04-eqxdh.md` §5) and into the sealed-identity AD. It is not yet bound into device-slot headers, and On-the-record message signatures are not implemented. The label `enclave/v1/ctx/signed-msg` is reserved for them; the intended payload is
+The conversation mode is bound into the EQXDH transcript (`04-eqxdh.md` §5), so every key of the session, including every device-slot and body key, depends on it: a peer that believes a different mode derives different keys and every message fails to open. A separate mode byte in the device-slot AD would add nothing until in-band mode switches exist; `ModeChange` must bind the new mode when it is added. On-the-record message signatures are not implemented. The label `enclave/v1/ctx/signed-msg` is reserved for them; the intended payload is
 
 ```
 payload = conv_id (32) ‖ sender_device_id (16) ‖ recipient_root_hash (32) ‖ u64(send_counter) ‖ u8(mode) ‖ SHA3-512(plaintext)
@@ -335,8 +335,8 @@ and a signature would occupy 4,741 B of the 9,160 B content region. Mode switche
 ## 10. Skipped keys
 
 - `SkipTo` fails the message if it would skip more than 1,000 keys in one chain (`MAX_SKIP`).
-- At most 1,000 skipped keys are stored per session. When the store is full, entries are evicted in tag order (effectively at random), not oldest first.
-- Skipped keys do not expire by time yet (PLAN: 7 days).
+- At most 1,000 skipped keys are stored per session. When the store is full, the oldest entries (by insertion order) are evicted first.
+- Skipped keys expire after 7 days (`SKIPPED_MAX_AGE`). `Session::expire_skipped(now, max_age)` stamps new entries with `now` on its first pass and deletes entries older than `max_age`; `enclave-core` calls it on every sync. The stamp is persisted with the session.
 - A skipped key is deleted as soon as it is used.
 
 ## 11. Gaps and control messages (not yet implemented)
@@ -363,6 +363,6 @@ Tests (`crates/enclave-proto/tests/session.rs`): `full_three_kem_conversation`, 
 2. PLAN §4 has Bob mix an encapsulation to Alice's auth key into the root key and send a confirmation value `KMAC(SK', "confirm")`. The implementation instead makes Alice's auth key the first PQ ratchet key (id 0), so Bob's first PQ step authenticates Alice (§7.3), and there is no confirmation value. This intentionally differs from PLAN.md.
 3. PLAN §4 mixes the braided McEliece secret into the root key. The implementation folds it into the next ML-KEM out-step (§7.4). This intentionally differs from PLAN.md.
 4. PLAN §5 keeps the next 8 tags per chain; the implementation keeps 64 (`TAG_WINDOW`) and has no slow path. A wider window costs 128 KMAC calls per session per commit; a narrower one makes more lost-message cases unrecoverable.
-5. Skipped-key eviction is in tag order and there is no 7-day expiry (§10). PLAN §5 asks for a cap of 1,000 and a 7-day expiry; oldest-first eviction and expiry need to be added.
-6. The mode is not bound into device-slot AD yet (§9); PLAN §5 requires it.
+5. Resolved: skipped keys are evicted oldest first and expire after 7 days (§10).
+6. Resolved: the mode is bound through the EQXDH transcript into every session key (§9). In-band mode switches must bind the new mode when they are added.
 7. Undefined header flag bits are accepted (§6.1). Rejecting them would make future flags a hard format change; accepting them lets a sender set bits a receiver ignores.

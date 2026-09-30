@@ -525,3 +525,49 @@ fn persistence_roundtrips_mid_conversation() {
     let acct = AccountKeys::import_shared(&shared, None).unwrap();
     assert_eq!(acct.root_public, alice.account.root_public);
 }
+
+#[test]
+fn skipped_keys_expire_after_seven_days() {
+    use enclave_proto::ratchet::SKIPPED_MAX_AGE;
+    let mut rng = HedgedRng::new().unwrap();
+    let alice = Party::new(1, &mut rng);
+    let mut bob = Party::new(1, &mut rng);
+    let vault = bob.account.vault_public.clone();
+    let (mut a, mut b) = handshake(
+        &alice,
+        &mut bob,
+        0,
+        Some(&vault),
+        Mode::OffTheRecord,
+        None,
+        &mut rng,
+    );
+    let late1 = send(&mut a, b"late 1", &mut rng);
+    let late2 = send(&mut a, b"late 2", &mut rng);
+    let now = send(&mut a, b"on time", &mut rng);
+    assert_eq!(
+        recv(&mut b, &now, Some(&bob.account.vault), &mut rng).unwrap(),
+        b"on time"
+    );
+    assert_eq!(b.skipped_len(), 2);
+    assert_eq!(
+        b.expire_skipped(NOW, SKIPPED_MAX_AGE),
+        0,
+        "first call only stamps"
+    );
+    assert_eq!(
+        recv(&mut b, &late1, Some(&bob.account.vault), &mut rng).unwrap(),
+        b"late 1"
+    );
+    assert_eq!(
+        b.expire_skipped(NOW + SKIPPED_MAX_AGE - 1, SKIPPED_MAX_AGE),
+        0
+    );
+    // The stamp survives persistence.
+    let mut b = Session::import(&b.export()).unwrap();
+    assert_eq!(b.expire_skipped(NOW + SKIPPED_MAX_AGE, SKIPPED_MAX_AGE), 1);
+    assert!(
+        recv(&mut b, &late2, Some(&bob.account.vault), &mut rng).is_err(),
+        "expired key is gone"
+    );
+}

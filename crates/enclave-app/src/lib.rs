@@ -6,7 +6,15 @@ pub mod engine;
 pub mod view;
 
 /// Code generated from `ui/*.slint`. The only place `unsafe` is allowed.
-#[allow(unsafe_code, missing_docs, clippy::all, clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::todo)]
+#[allow(
+    unsafe_code,
+    missing_docs,
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo
+)]
 mod ui {
     slint::include_modules!();
 }

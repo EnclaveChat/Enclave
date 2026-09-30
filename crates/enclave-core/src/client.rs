@@ -769,6 +769,17 @@ impl Client {
             }
         }
 
+        // Forget message keys for messages that never arrived.
+        let mut expired = Vec::new();
+        for (k, s) in self.sessions.iter_mut() {
+            if s.expire_skipped(now, enclave_proto::ratchet::SKIPPED_MAX_AGE) > 0 {
+                expired.push((*k, s.clone()));
+            }
+        }
+        for ((root, dev), s) in expired {
+            self.save_session(&root, &dev, &s)?;
+        }
+
         self.maintain_prekeys(now).await?;
         Ok(events)
     }

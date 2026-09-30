@@ -37,6 +37,8 @@ use enclave_crypto::seal::{self, SealKey};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use zeroize::Zeroizing;
 
+/// Skipped message keys are deleted after this long (seconds).
+pub const SKIPPED_MAX_AGE: u64 = 7 * 86_400;
 /// Maximum message keys skipped in one chain.
 pub const MAX_SKIP: u32 = 1000;
 /// Look-ahead window for lookup tags in the current and next receiving chains.
@@ -196,6 +198,10 @@ struct Skipped {
     hk: Key,
     n: u32,
     mk: Key,
+    /// Insertion order, for oldest-first eviction.
+    seq: u64,
+    /// When first seen by [`Session::expire_skipped`] (0 = not yet stamped).
+    at: u64,
 }
 
 /// What a lookup tag points at.
@@ -745,6 +751,12 @@ impl Session {
             return Err(ProtoError::Counter);
         }
         let hkr = self.hkr.ok_or(ProtoError::NoSession)?;
+        let mut seq = self
+            .skipped
+            .values()
+            .map(|s| s.seq)
+            .max()
+            .map_or(0, |m| m + 1);
         while self.nr < until {
             let (ck2, mk) = kdf_ck(&ck);
             self.skipped.insert(
@@ -753,17 +765,25 @@ impl Session {
                     hk: hkr,
                     n: self.nr,
                     mk,
+                    seq,
+                    at: 0,
                 },
             );
+            seq += 1;
             ck = ck2;
             self.nr += 1;
         }
         self.ckr = Some(ck);
-        // Bound total skipped keys.
-        while self.skipped.len() > MAX_SKIP as usize {
-            if let Some(k) = self.skipped.keys().next().copied() {
-                self.skipped.remove(&k);
+        // Bound total skipped keys, evicting the oldest first.
+        if self.skipped.len() > MAX_SKIP as usize {
+            let mut order: Vec<([u8; TAG_LEN], u64)> =
+                self.skipped.iter().map(|(t, s)| (*t, s.seq)).collect();
+            order.sort_by_key(|(_, q)| *q);
+            let excess = self.skipped.len() - MAX_SKIP as usize;
+            for (t, _) in order.into_iter().take(excess) {
+                self.skipped.remove(&t);
             }
+            self.tag_cache = None;
         }
         Ok(())
     }
@@ -923,6 +943,31 @@ fn get_hist(r: &mut Reader<'_>) -> Result<VecDeque<(u32, Key)>> {
 }
 
 impl Session {
+    /// Delete skipped message keys held longer than `max_age` seconds. Keys
+    /// are stamped with `now` the first time this runs after they were
+    /// skipped, so call it regularly (the client does on every sync).
+    /// Returns how many were deleted.
+    pub fn expire_skipped(&mut self, now: u64, max_age: u64) -> usize {
+        let before = self.skipped.len();
+        for s in self.skipped.values_mut() {
+            if s.at == 0 {
+                s.at = now.max(1);
+            }
+        }
+        self.skipped
+            .retain(|_, s| s.at.saturating_add(max_age) > now);
+        let removed = before - self.skipped.len();
+        if removed > 0 {
+            self.tag_cache = None;
+        }
+        removed
+    }
+
+    /// Number of skipped message keys held.
+    pub fn skipped_len(&self) -> usize {
+        self.skipped.len()
+    }
+
     /// Serialize the full session state for sealed local storage. The output
     /// holds secrets: callers must seal it and zeroize it after use.
     pub fn export(&self) -> Zeroizing<Vec<u8>> {
@@ -945,7 +990,12 @@ impl Session {
         w.fixed(&self.nhks).fixed(&self.nhkr);
         w.u32(self.skipped.len() as u32);
         for (tag, sk) in &self.skipped {
-            w.fixed(tag).fixed(&sk.hk).u32(sk.n).fixed(&sk.mk);
+            w.fixed(tag)
+                .fixed(&sk.hk)
+                .u32(sk.n)
+                .fixed(&sk.mk)
+                .u64(sk.seq)
+                .u64(sk.at);
         }
         let pq = &self.pq;
         w.fixed(&pq.out_root)
@@ -1025,6 +1075,8 @@ impl Session {
                     hk: r.array()?,
                     n: r.u32()?,
                     mk: r.array()?,
+                    seq: r.u64()?,
+                    at: r.u64()?,
                 },
             );
         }
