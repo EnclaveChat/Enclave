@@ -480,6 +480,37 @@ async fn link_a_second_device() {
     let ev = a.sync().await.unwrap();
     assert!(ev.contains(&Event::DevicesChanged));
 
+    // History waits 24 h unless asked for on the first device.
+    let new_id = a2.devices().iter().find(|d| d.this_device).unwrap().id;
+    assert!(a2.messages(&b.root()).unwrap().is_empty());
+    assert!(!a.history_sent(&new_id));
+    assert!(
+        a2.send_history_now(&new_id).await.is_err(),
+        "only the root sends"
+    );
+    a.send_history_now(&new_id).await.unwrap();
+    assert!(a.history_sent(&new_id));
+    let ev = a2.sync().await.unwrap();
+    assert!(ev.contains(&Event::HistoryImported), "{ev:?}");
+    let texts: Vec<String> = a2
+        .messages(&b.root())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    let on_first: Vec<String> = a
+        .messages(&b.root())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert_eq!(texts, on_first);
+    assert!(texts.contains(&"before the link".to_string()));
+    // Sending again adds nothing twice.
+    a.send_history_now(&new_id).await.unwrap();
+    assert!(!a2.sync().await.unwrap().contains(&Event::HistoryImported));
+    assert_eq!(a2.messages(&b.root()).unwrap().len(), texts.len());
+
     // Ben's next message reaches both of Ada's devices.
     b.send_text(&a.root(), "to both of you").await.unwrap();
     for dev in [&mut a, &mut a2] {

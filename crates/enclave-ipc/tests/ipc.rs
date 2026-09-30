@@ -47,6 +47,7 @@ fn snapshot() -> Snapshot {
             label: "This device".into(),
             detail: "Added 2 Sep 2026".into(),
             removable: false,
+            history_pending: true,
         }],
         link_choices: vec!["a b c".into(); 4],
         link_status: "s".into(),
@@ -80,6 +81,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::StartJoin,
         Cmd::CancelJoin,
         Cmd::RevealWords(true),
+        Cmd::SendHistory("00ff".into()),
     ]
 }
 

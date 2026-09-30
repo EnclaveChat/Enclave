@@ -500,6 +500,24 @@ impl Engine {
                 }
                 self.busy = false;
             }
+            Cmd::SendHistory(hex) => {
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    let id =
+                        c.devices().into_iter().map(|d| d.id).find(|d| {
+                            d.iter().map(|b| format!("{b:02x}")).collect::<String>() == hex
+                        });
+                    if let Some(id) = id {
+                        self.link_status = match c.send_history_now(&id).await {
+                            Ok(()) => "Message history sent. It appears on the other device when it next connects.".into(),
+                            Err(CoreError::Net(_)) => "Couldn't reach your server. Try again in a moment.".into(),
+                            Err(_) => "Couldn't send message history.".into(),
+                        };
+                    }
+                }
+                self.busy = false;
+            }
             Cmd::RemoveDevice(hex) => {
                 self.busy = true;
                 self.push();
@@ -874,11 +892,17 @@ impl Engine {
                 let day = chrono::DateTime::from_timestamp(d.added_at as i64, 0)
                     .map(|t| t.format("%-d %b %Y").to_string())
                     .unwrap_or_default();
+                let history_pending = can_link && !d.this_device && !c.history_sent(&d.id);
                 Device {
                     id: d.id.iter().map(|b| format!("{b:02x}")).collect(),
                     label: label.to_string(),
-                    detail: format!("Added {day}"),
+                    detail: if history_pending {
+                        format!("Added {day} · Message history follows 24 hours after linking")
+                    } else {
+                        format!("Added {day}")
+                    },
                     removable: can_link && !d.this_device,
+                    history_pending,
                 }
             })
             .collect();

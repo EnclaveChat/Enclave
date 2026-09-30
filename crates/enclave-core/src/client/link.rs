@@ -437,6 +437,7 @@ impl LinkingDevice {
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),
+            pending_history: Vec::new(),
         };
         let own = client.card();
         for (card, name, verified, timer, inbox, server, tokens) in contacts {

@@ -98,6 +98,7 @@ impl Contact {
 mod backup;
 mod devices;
 mod groups;
+mod history;
 mod link;
 mod messages;
 mod usernames;
@@ -145,6 +146,8 @@ pub enum Event {
     },
     /// A device was linked to (or is now talking with) this account.
     DevicesChanged,
+    /// Message history from our other device was added.
+    HistoryImported,
     /// This device was removed from the account by another device. It can
     /// no longer read new messages; the app should say so and offer to erase.
     RemovedFromAccount,
@@ -200,6 +203,8 @@ pub struct Client {
     /// Accounts whose device list changed (root → announced manifest
     /// version), refreshed at the end of `sync`.
     stale_manifests: BTreeMap<[u8; 64], u64>,
+    /// History files from our own devices, fetched at the end of `sync`.
+    pending_history: Vec<crate::files::Attachment>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -362,6 +367,7 @@ impl Client {
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),
+            pending_history: Vec::new(),
         };
         Ok((client, words))
     }
@@ -430,6 +436,7 @@ impl Client {
             groups,
             kt: None,
             stale_manifests: BTreeMap::new(),
+            pending_history: Vec::new(),
         })
     }
 
@@ -848,6 +855,10 @@ impl Client {
             self.save_profile()?;
         }
         events.append(&mut self.refresh_manifests(now).await?);
+        if self.import_pending_history(now).await? > 0 {
+            events.push(Event::HistoryImported);
+        }
+        self.send_due_history(now).await?;
 
         // Token refills for contacts who have been writing without replies.
         let due: Vec<([u8; 64], usize)> = self
@@ -1121,6 +1132,12 @@ impl Client {
                 Content::SelfCopy { to, content } => self.on_self_copy(&to, &content, now),
                 Content::Devices(v) => {
                     self.stale_manifests.insert(root, v);
+                    Ok(Vec::new())
+                }
+                Content::History(b) => {
+                    if let Some(att) = history::history_ref(&b) {
+                        self.pending_history.push(att);
+                    }
                     Ok(Vec::new())
                 }
                 _ => Ok(Vec::new()),

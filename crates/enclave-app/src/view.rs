@@ -142,6 +142,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             label: d.label.clone().into(),
             detail: d.detail.clone().into(),
             removable: d.removable,
+            history_pending: d.history_pending,
         })
         .collect();
     ui.set_devices(ModelRc::from(Rc::new(VecModel::from(devices))));

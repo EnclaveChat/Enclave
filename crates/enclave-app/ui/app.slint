@@ -41,6 +41,7 @@ export struct DeviceRow {
     label: string,
     detail: string,
     removable: bool,
+    history-pending: bool,
 }
 
 // status: 0 sending privately, 1 on its way, 2 delivered.
@@ -312,6 +313,7 @@ export component AppWindow inherits Window {
     callback add-contact(string, string);
     callback claim-username(string);
     callback remove-device(string);
+    callback send-history(string);
     callback start-join();
     callback sheet-changed(Sheet);
     changed sheet => { root.sheet-changed(root.sheet); }
@@ -921,7 +923,9 @@ export component AppWindow inherits Window {
     if root.sheet == Sheet.devices: SheetFrame {
         title: "Your devices";
         close => { root.sheet = Sheet.none; }
-        for d in root.devices: VerticalLayout {
+        for d in root.devices: Rectangle {
+            min-height: dev.preferred-height;
+            dev := VerticalLayout {
             spacing: Tokens.space-s;
             HorizontalLayout {
                 spacing: Tokens.space-sm;
@@ -934,6 +938,15 @@ export component AppWindow inherits Window {
                     text: "Remove";
                     accessible-label: "Remove " + d.label;
                     clicked => { root.confirm-remove = d.id; }
+                }
+            }
+            if d.history-pending && root.confirm-remove != d.id: HorizontalLayout {
+                alignment: start;
+                QuietButton {
+                    text: "Send history now";
+                    outlined: true;
+                    accessible-label: "Send message history to " + d.label + " now";
+                    clicked => { root.send-history(d.id); }
                 }
             }
             if root.confirm-remove == d.id: Rectangle {
@@ -959,6 +972,7 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
         }
         if root.can-link && root.link-choices.length == 0: Secondary {
             text: "To link a new device, open Enclave on it, choose \"I already have Enclave\", and paste its link code here. Only do this with your own device.";

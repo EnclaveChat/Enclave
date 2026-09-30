@@ -87,7 +87,7 @@ impl Message {
         }
     }
 
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         w.u8(2).u64(self.seq).fixed(&self.id);
         w.u8(u8::from(self.outgoing))
@@ -113,7 +113,7 @@ impl Message {
         w.finish()
     }
 
-    fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
+    pub(crate) fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         if r.u8()? != 2 {
             return Err(ProtoError::Decode);

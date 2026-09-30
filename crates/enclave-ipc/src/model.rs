@@ -60,6 +60,8 @@ pub struct Device {
     pub detail: String,
     /// This device may remove it.
     pub removable: bool,
+    /// Message history hasn't been sent to it yet (and this device can send it).
+    pub history_pending: bool,
 }
 
 /// A message.
@@ -165,6 +167,8 @@ pub enum Cmd {
     StartJoin,
     /// Stop linking this device.
     CancelJoin,
+    /// Send message history to a linked device now (hex id).
+    SendHistory(String),
     /// Include the recovery words in snapshots (only while the recovery
     /// sheet is open), or stop.
     RevealWords(bool),
@@ -280,7 +284,11 @@ impl Snapshot {
         }
         w.len(self.devices.len());
         for d in &self.devices {
-            w.str(&d.id).str(&d.label).str(&d.detail).bool(d.removable);
+            w.str(&d.id)
+                .str(&d.label)
+                .str(&d.detail)
+                .bool(d.removable)
+                .bool(d.history_pending);
         }
         w.strs(&self.link_choices)
             .str(&self.link_status)
@@ -343,6 +351,7 @@ impl Snapshot {
                     label: r.str()?,
                     detail: r.str()?,
                     removable: r.bool()?,
+                    history_pending: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -399,6 +408,7 @@ impl Cmd {
             Cmd::StartJoin => w.u8(16),
             Cmd::CancelJoin => w.u8(17),
             Cmd::RevealWords(b) => w.u8(18).bool(*b),
+            Cmd::SendHistory(s) => w.u8(19).str(s),
         };
         w.0
     }
@@ -425,6 +435,7 @@ impl Cmd {
             16 => Cmd::StartJoin,
             17 => Cmd::CancelJoin,
             18 => Cmd::RevealWords(r.bool()?),
+            19 => Cmd::SendHistory(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

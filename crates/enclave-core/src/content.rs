@@ -118,6 +118,8 @@ pub enum Content {
     /// The sender's device list changed: fetch its manifest, at least this
     /// version, and stop encrypting to devices no longer in it.
     Devices(u64),
+    /// Our message history, as a sealed file reference (own devices only).
+    History(Vec<u8>),
     /// A copy, for our other devices, of content we sent to `to`.
     SelfCopy {
         /// The conversation it belongs to.
@@ -140,6 +142,7 @@ const K_READ: u8 = 10;
 const K_TIMER: u8 = 11;
 const K_SELF_COPY: u8 = 12;
 const K_DEVICES: u8 = 13;
+const K_HISTORY: u8 = 14;
 /// Largest content a self-copy can wrap.
 pub const MAX_SELF_COPY: usize = 9_000;
 
@@ -288,6 +291,12 @@ impl Content {
             Content::Devices(version) => {
                 w.u8(K_DEVICES).u64(*version);
             }
+            Content::History(att) => {
+                if att.len() > MAX_ATTACHMENT_REF {
+                    return too_large;
+                }
+                w.u8(K_HISTORY).bytes(att);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -359,6 +368,7 @@ impl Content {
             }
             K_TIMER => Content::Timer(timer(r.u32()?)?),
             K_DEVICES => Content::Devices(r.u64()?),
+            K_HISTORY => Content::History(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_SELF_COPY => {
                 let to = r.array()?;
                 let content = r.bytes(MAX_SELF_COPY)?.to_vec();

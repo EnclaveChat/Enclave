@@ -175,6 +175,7 @@ impl Client {
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),
+            pending_history: Vec::new(),
         };
         // Fresh token issuers: the old counters may have been used after the
         // backup was taken.
