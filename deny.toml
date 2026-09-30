@@ -6,6 +6,16 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# Vulnerabilities fail everywhere. "Unmaintained" notices fail for our direct
+# dependencies only; transitive ones (today proc-macro-error2 and ttf-parser,
+# both via Slint) are tracked upstream rather than blocking CI.
+unmaintained = "workspace"
+ignore = [
+    # Marvin attack on RSA private-key operations. `rsa` arrives only through
+    # arti (the `tor` feature), which uses it for public-key checks of Tor
+    # relay identities; Enclave never holds or uses an RSA private key.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operations anywhere in Enclave; public-key use via arti only" },
+]
 
 [licenses]
 version = 2
@@ -29,11 +39,20 @@ allow = [
     "LGPL-3.0-or-later",
     "BSL-1.0",
     "CDLA-Permissive-2.0",
+    # Public-domain dedication (async_executors, via arti).
+    "Unlicense",
+    # equix and hashx (Equi-X proof of work, from the Tor Project). GPLv3
+    # compatible, but LGPL-3.0's installation-information terms are a risk
+    # for App Store builds that our section 7 permission cannot waive for
+    # third-party code. Tracked in legal/ADDITIONAL-PERMISSIONS.md.
+    "LGPL-3.0-only",
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Path dependencies between our own (unpublished) workspace crates.
+allow-wildcard-paths = true
 # Crates that compile C, C++ or assembly must be listed here with a reason.
 # Test-only oracles (openssl-sys) are dev-dependencies and never shipped.
 

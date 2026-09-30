@@ -43,3 +43,8 @@ of section 1 of the GPL.
 These permissions do not extend to third-party code included in or linked by
 Enclave; such code keeps its own license. Anyone who modifies Enclave may
 remove these permissions from their version, as section 7 allows.
+
+
+## Third-party copyleft in App Store builds (open item)
+
+`equix` and `hashx` (the Equi-X proof of work used for anti-spam, from the Tor Project) are LGPL-3.0-only. They are compatible with GPLv3, but the additional permissions above cover only code whose copyright holders granted them. Before the first App Store release, one of the following must happen: the Tor Project grants a matching permission, Enclave switches to a permissively licensed Equi-X implementation, or proof of work on iOS moves behind a server-side token issuer. `cargo deny` flags any new copyleft dependency.

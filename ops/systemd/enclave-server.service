@@ -1,0 +1,29 @@
+[Unit]
+Description=Enclave server (dev transport)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/enclave-server 127.0.0.1:7443
+DynamicUser=yes
+# The server keeps everything in memory today; no state directory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+# No core dumps: they could contain request keys.
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

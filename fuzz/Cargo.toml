@@ -1,0 +1,66 @@
+# Coverage-guided fuzzing (nightly): `cargo +nightly fuzz run <target>` from
+# this directory. Not part of the workspace, so the stable build and its
+# C-free dependency policy are unaffected (libFuzzer is C++).
+[package]
+name = "enclave-fuzz-targets"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+enclave-fuzz = { path = "../crates/enclave-fuzz" }
+
+[workspace]
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proto"
+path = "fuzz_targets/proto.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rpc"
+path = "fuzz_targets/rpc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "content"
+path = "fuzz_targets/content.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "calls"
+path = "fuzz_targets/calls.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "server"
+path = "fuzz_targets/server.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "relay"
+path = "fuzz_targets/relay.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "group_open"
+path = "fuzz_targets/group_open.rs"
+test = false
+doc = false

@@ -37,6 +37,29 @@ async fn main() -> std::io::Result<()> {
     let server =
         Server::new(Config::default(), day).map_err(|e| std::io::Error::other(e.to_string()))?;
     let server = Arc::new(Mutex::new(server));
+    // Daily request-key rotation (the old key is kept one day, then deleted)
+    // and expiry of stored objects past their TTL.
+    {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut current = day;
+            loop {
+                tick.tick().await;
+                let now = now();
+                let today = (now / 86_400) as u32;
+                let mut s = server.lock().await;
+                if today != current {
+                    if let Err(e) = s.rotate(today) {
+                        eprintln!("key rotation failed: {e}");
+                    } else {
+                        current = today;
+                    }
+                }
+                s.expire(now);
+            }
+        });
+    }
     let listener = TcpListener::bind(&addr).await?;
     eprintln!("enclave-server (dev transport) listening on {addr}");
     loop {

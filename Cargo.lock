@@ -2263,6 +2263,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-fuzz"
+version = "0.1.0"
+dependencies = [
+ "enclave-calls",
+ "enclave-core",
+ "enclave-crypto",
+ "enclave-proto",
+ "enclave-relay",
+ "enclave-rpc",
+ "enclave-server",
+ "enclave-wire",
+]
+
+[[package]]
 name = "enclave-kt"
 version = "0.1.0"
 dependencies = [

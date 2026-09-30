@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["fuzz"]
 resolver = "3"
 members = [
     "crates/enclave-crypto",
@@ -16,6 +17,7 @@ members = [
     "crates/enclave-app",
     "crates/enclave-calls",
     "crates/enclave-relay",
+    "crates/enclave-fuzz",
     "xtask",
 ]
 
