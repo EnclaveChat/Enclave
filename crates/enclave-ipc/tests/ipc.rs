@@ -73,6 +73,7 @@ fn snapshot() -> Snapshot {
         timer: 3600,
         search: vec![Row::default()],
         username_problem: "@robin@enclave.example".into(),
+        kt_split: "enclave.example".into(),
         members: vec![Row::default(); 2],
         group_admin: true,
         addable: vec![Pick::default()],

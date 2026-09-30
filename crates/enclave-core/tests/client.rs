@@ -1098,3 +1098,74 @@ async fn invite_links() {
     );
     assert_eq!(host.invites().unwrap()[0].used, 1);
 }
+
+/// RT-04: a server whose witnesses collude shows Ben a forked log in which
+/// Cy's name leads to Mallory. Each view verifies on its own. When Ada, who
+/// saw the real log, messages Ben, the head digests they gossip disagree;
+/// they exchange signed heads, and both end up holding proof that the
+/// server signed two versions of the same epoch.
+#[tokio::test(flavor = "multi_thread")]
+async fn rt04_split_view_detected_by_gossip() {
+    let net = network();
+    let (real, fork, policy) = enclave_kt::KtService::start_dev_twins(S1, "one.test").unwrap();
+    net.with_server(&S1, |s| {
+        s.enable_kt(real);
+        s.enable_kt_fork(fork);
+    })
+    .unwrap();
+    let mut clients = Vec::new();
+    for name in ["Ada", "Ben", "Cy", "Mallory"] {
+        let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), S1, name)
+            .await
+            .unwrap();
+        c.set_kt_policy(policy.clone());
+        clients.push(c);
+    }
+    let [mut ada, mut ben, mut cy, mallory] = <[Client; 4]>::try_from(clients).ok().unwrap();
+    cy.claim_username("cyrus").await.unwrap();
+    // The fork binds the same name, at the same epoch, to Mallory.
+    let forged = [&mallory.root()[..], &mallory.card().encode()].concat();
+    let now = net.now();
+    assert!(
+        net.with_server(&S1, |s| s.kt_fork_force("cyrus", forged, now))
+            .unwrap()
+    );
+
+    connect(&mut ada, &mut ben).await;
+    assert_eq!(
+        ada.find_username("cyrus@one.test").await.unwrap().root,
+        cy.root()
+    );
+    net.with_server(&S1, |s| s.kt_serve_fork(true)).unwrap();
+    // Ben's view verifies: he alone can't tell.
+    assert_eq!(
+        ben.find_username("cyrus@one.test").await.unwrap().root,
+        mallory.root()
+    );
+    net.with_server(&S1, |s| s.kt_serve_fork(false)).unwrap();
+    assert!(ada.kt_alert().is_none() && ben.kt_alert().is_none());
+
+    ada.send_text(&ben.root(), "hi Ben").await.unwrap();
+    let mut events = Vec::new();
+    for _ in 0..4 {
+        events.extend(ben.sync().await.unwrap());
+        events.extend(ada.sync().await.unwrap());
+    }
+    let split = |e: &Event| matches!(e, Event::KtSplitView { server, .. } if *server == S1);
+    assert!(
+        events.iter().filter(|e| split(e)).count() >= 2,
+        "{events:?}"
+    );
+    let a = ada.kt_alert().expect("Ada holds the proof");
+    let b = ben.kt_alert().expect("Ben holds the proof");
+    assert_eq!(a, b);
+    assert_eq!(a.server, S1);
+
+    // Honest views raise nothing: Cy and Ada agree.
+    connect(&mut cy, &mut ada).await;
+    cy.find_username("cyrus@one.test").await.unwrap();
+    cy.send_text(&ada.root(), "hello").await.unwrap();
+    ada.sync().await.unwrap();
+    cy.sync().await.unwrap();
+    assert!(cy.kt_alert().is_none());
+}

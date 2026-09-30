@@ -97,6 +97,7 @@ impl Contact {
 
 mod backup;
 mod devices;
+mod gossip;
 mod groups;
 mod guard;
 mod history;
@@ -107,6 +108,7 @@ mod messages;
 mod search;
 mod usernames;
 
+pub use gossip::{GossipItem, KtAlert};
 pub use groups::{GroupInfo, GroupMessage};
 pub use guard::RecoveryAlert;
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
@@ -157,6 +159,15 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// Gossip with a contact proved that a key-transparency server signed
+    /// two different versions of its log for the same epoch (RT-04): it
+    /// shows different people different keys.
+    KtSplitView {
+        /// The log's server.
+        server: [u8; 16],
+        /// The epoch.
+        epoch: u64,
+    },
     /// Our username no longer leads to this account in the server's log.
     UsernameProblem {
         /// The address (`name@domain`).
@@ -226,6 +237,10 @@ pub struct Client {
     stale_manifests: BTreeMap<[u8; 64], u64>,
     /// History files from our own devices, fetched at the end of `sync`.
     pending_history: Vec<crate::files::Attachment>,
+    /// Signed heads to send contacts whose gossip disagreed with ours.
+    pending_kt_proofs: Vec<([u8; 64], [u8; 16], u64)>,
+    /// Signed heads contacts sent us, to fetch and check.
+    pending_kt_heads: Vec<([u8; 64], crate::files::Attachment)>,
     /// A change to our manifest that none of our devices made.
     recovery_alert: Option<guard::RecoveryAlert>,
     /// Our in-person code while it is on screen: (secret, payload).
@@ -414,6 +429,8 @@ impl Client {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            pending_kt_proofs: Vec::new(),
+            pending_kt_heads: Vec::new(),
             recovery_alert: None,
             meet: None,
             pending_bond: None,
@@ -486,6 +503,8 @@ impl Client {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            pending_kt_proofs: Vec::new(),
+            pending_kt_heads: Vec::new(),
             recovery_alert: None,
             meet: None,
             pending_bond: None,
@@ -952,6 +971,7 @@ impl Client {
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
         events.append(&mut self.audit_username(now).await?);
+        events.extend(self.process_kt(now).await?);
         if self.import_pending_history(now).await? > 0 {
             events.push(Event::HistoryImported);
         }
@@ -1288,6 +1308,10 @@ impl Client {
             let s = s.clone();
             self.save_session(&root, &dev, &s)?;
         }
+        let (content, gossip) = gossip::unwrap(&content)?;
+        if root != self.account.root_public.0 {
+            self.on_gossip(&root, &gossip)?;
+        }
         if root == self.account.root_public.0 {
             // From another device of ours: self-copies and device changes.
             return match Content::decode(&content)? {
@@ -1363,6 +1387,10 @@ impl Client {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 self.on_veto(&root, &b)?;
             }
+            Content::KtHead(b) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                self.on_kt_head(&root, &b);
+            }
             Content::GroupWelcome(welcome) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 if let Some(ev) = self.on_group_welcome(&root, &welcome, now)? {
@@ -1403,6 +1431,16 @@ impl Client {
 
     async fn send_content(&mut self, root: &[u8; 64], content: &Content, now: u64) -> Result<()> {
         let bytes = content.encode()?;
+        // Key-transparency gossip rides in space the envelope pads anyway.
+        let items = self.gossip_items();
+        let capacity = enclave_wire::direct::BODY_LEN
+            - enclave_crypto::seal::OVERHEAD
+            - enclave_wire::CONTENT_FRAMING;
+        let bytes = if bytes.len() + gossip::overhead(items.len()) <= capacity {
+            gossip::wrap(&bytes, &items)?
+        } else {
+            bytes
+        };
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         let inbox = c.inbox.ok_or(CoreError::NotAccepted)?;
         let server = c.server;

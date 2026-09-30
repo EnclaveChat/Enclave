@@ -363,6 +363,7 @@ export component AppWindow inherits Window {
     in property <string> join-words;
     in property <string> recovery-alert;
     in property <string> username-problem;
+    in property <string> kt-split;
     callback stop-recovery();
     callback meet-scan(string);
     callback search(string);
@@ -632,6 +633,11 @@ export component AppWindow inherits Window {
                         }
                         QuietButton { text: "It's me"; clicked => { root.approve-recovery(); } }
                     }
+                }
+                if root.kt-split != "": Notice {
+                    title: "A username server showed people different lists";
+                    text: root.kt-split + " gave you and one of your contacts two different signed versions of its public list of usernames. Someone may be trying to send you, or them, to the wrong person. Check security codes, ideally in person, before sharing anything private.";
+                    kind: 2;
                 }
                 if root.username-problem != "": Notice {
                     title: "Your username no longer leads to you";

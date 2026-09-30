@@ -172,7 +172,7 @@ The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons
 
 ### 3.6 Not implemented yet
 
-Gossip comparison between contacts and the split-view alert; the device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+The device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
 
 ### 3.7 Claims and lookups
 
@@ -195,6 +195,18 @@ The server checks, in order: the PoW (`Pow`); the claim decodes (`Malformed`); t
 
 **Client** (`Client::find_username`): parse `@name@domain` (a bare name means the home server), pick the pinned log by domain (`Unavailable`), normalize (`NotAllowed`), fetch, then `verify_lookup` with the pinned head key, operator, VRF key and witness policy. Any decoding or verification failure is `Unverified`, never "not found", and the UI refuses to add anyone. A bare root is `NotFound`. The card's root must equal the value's root and its server the log's server (`Unverified`). The result is only a contact card: the usual message request and security-code check follow.
 
+
+### 3.8 Gossip (RT-04, `client/gossip.rs`)
+
+A server whose witnesses collude can show different people different logs, each properly signed and cosigned. Contacts compare notes:
+
+- Every head a client verifies (lookups, claims, the daily self-audit) is kept (the newest 64).
+- Every direct message carries, when the content leaves room, up to three `(server (16) ‖ u64 epoch ‖ gossip digest (32))` items for the newest heads held. The payload becomes `0xFE ‖ u32 len ‖ content ‖ u8 n ‖ items` (content kinds are small numbers, so a bare content never starts with `0xFE`); this uses space the envelope pads anyway and never costs a unit.
+- A received item for an epoch the receiver also holds, with a different digest, means one of them saw a fork. The receiver sends its signed head (≈19 KB with cosignatures, so as a sealed blob with a `Content::KtHead` reference, kind 16) to that contact, once per contact and epoch. An item for an epoch not held yet is remembered and compared when that epoch is verified.
+- A received head is checked against the pinned server key and the witness quorum (signatures only, not freshness). If it verifies and its root differs from the held head of the same epoch, the server has **provably equivocated**: both heads are stored as proof, `Event::KtSplitView { server, epoch }` is raised, and the receiver sends its own head back so the other side holds the proof too. A verified head for an epoch not held is kept like any other.
+- The app shows a persistent notice ("A username server showed people different lists … check security codes, ideally in person").
+- Test `rt04_split_view_detected_by_gossip`: twin logs under one server key and one set of (colluding) witnesses (`KtService::start_dev_twins`, server test hooks `enable_kt_fork`, `kt_fork_force`, `kt_serve_fork`); Ada sees the real binding of a name, Ben the forked one, each view verifies alone, and one message from Ada to Ben leaves both holding the proof. Honest views raise nothing.
+- Limits: gossip only compares heads of logs the client pins, the fork is found only if two people who talk saw different heads for the same epoch, and group messages carry no gossip yet. Publishing proofs to the witnesses or a public place is not built.
 ## 4. Discovery and migration (not yet implemented)
 
 - **Server list.** The foundation publishes a signed list of vetted servers, relays, witnesses and push relays, shipped in the app and updated through TUF, with an SLH-DSA signature under ctx `enclave/v1/update/server-list`.

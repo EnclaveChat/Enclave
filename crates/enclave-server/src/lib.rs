@@ -125,6 +125,11 @@ pub struct Server {
     blobs: HashMap<[u8; 32], (Vec<u8>, u64)>,
     uploads: HashMap<(u8, [u8; 32]), Upload>,
     kt: Option<KtService>,
+    /// A second log shown instead of `kt` (test hook, RT-04).
+    #[cfg(feature = "test-hooks")]
+    kt_fork: Option<KtService>,
+    #[cfg(feature = "test-hooks")]
+    kt_serve_fork: bool,
     /// name → (owning root, time of the last accepted claim)
     usernames: HashMap<String, ([u8; 64], u64)>,
     /// root → its current name
@@ -167,6 +172,10 @@ impl Server {
             blobs: HashMap::new(),
             uploads: HashMap::new(),
             kt: None,
+            #[cfg(feature = "test-hooks")]
+            kt_fork: None,
+            #[cfg(feature = "test-hooks")]
+            kt_serve_fork: false,
             usernames: HashMap::new(),
             names_by_root: HashMap::new(),
             kt_replies: HashMap::new(),
@@ -217,6 +226,37 @@ impl Server {
     /// Attach a key-transparency log, enabling usernames.
     pub fn enable_kt(&mut self, kt: KtService) {
         self.kt = Some(kt);
+    }
+
+    /// **Test hook**: a second log (`KtService::start_dev_twins`) this
+    /// server can show instead of its real one, as an equivocating server
+    /// would.
+    #[cfg(feature = "test-hooks")]
+    pub fn enable_kt_fork(&mut self, fork: KtService) {
+        self.kt_fork = Some(fork);
+    }
+
+    /// **Test hook**: bind a name in the fork only.
+    #[cfg(feature = "test-hooks")]
+    pub fn kt_fork_force(&mut self, name: &str, value: Vec<u8>, now: u64) -> bool {
+        self.kt_fork
+            .as_ref()
+            .is_some_and(|k| k.publish(name, value, now).is_ok())
+    }
+
+    /// **Test hook**: answer lookups from the fork (true) or the real log.
+    #[cfg(feature = "test-hooks")]
+    pub fn kt_serve_fork(&mut self, on: bool) {
+        self.kt_serve_fork = on;
+    }
+
+    /// The log lookups are answered from.
+    fn kt_lookups(&self) -> Option<&KtService> {
+        #[cfg(feature = "test-hooks")]
+        if self.kt_serve_fork {
+            return self.kt_fork.as_ref();
+        }
+        self.kt.as_ref()
     }
 
     /// **Tests only**: bind `name` to `value` in the log without any of the
@@ -626,7 +666,7 @@ impl Server {
     }
 
     fn lookup_username(&mut self, req: &DirRequest, now: u64) -> (Status, Reply) {
-        let Some(kt) = &self.kt else {
+        let Some(kt) = self.kt_lookups() else {
             return (Status::NotFound, Reply::Empty);
         };
         let Some(name) = api::key_name(&req.key) else {

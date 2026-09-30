@@ -187,6 +187,8 @@ impl Client {
             KtError::Username => UsernameError::NotAllowed,
             _ => UsernameError::Unverified,
         })?;
+        // Kept for gossip with contacts (RT-04).
+        self.record_head(&reply.head)?;
         // A bare root is a released name.
         if value.len() <= ROOT_LEN {
             return Err(UsernameError::NotFound.into());

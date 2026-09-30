@@ -1271,6 +1271,13 @@ impl Engine {
         s.my_link = c.card().to_link();
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
+        s.kt_split = c
+            .kt_alert()
+            .map(|a| {
+                c.kt_domain(&a.server)
+                    .unwrap_or_else(|| "Your server".into())
+            })
+            .unwrap_or_default();
         s.recovery_alert = c
             .recovery_alert()
             .map(|a| {

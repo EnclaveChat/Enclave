@@ -161,6 +161,9 @@ pub struct Snapshot {
     /// Our username (`@name@domain`) if the server's log no longer leads to
     /// us, or empty.
     pub username_problem: String,
+    /// The domain of a username server proven to show people different
+    /// versions of its log (RT-04), or empty.
+    pub kt_split: String,
     /// Members of the open group (other than us).
     pub members: Vec<Row>,
     /// We are an admin of the open group.
@@ -429,7 +432,7 @@ impl Snapshot {
             .str(&self.meet_done)
             .u32(self.timer);
         put_rows(&mut w, &self.search);
-        w.str(&self.username_problem);
+        w.str(&self.username_problem).str(&self.kt_split);
         put_rows(&mut w, &self.members);
         w.bool(self.group_admin);
         w.len(self.addable.len());
@@ -537,6 +540,7 @@ impl Snapshot {
             timer: r.u32()?,
             search: get_rows(&mut r)?,
             username_problem: r.str()?,
+            kt_split: r.str()?,
             members: get_rows(&mut r)?,
             group_admin: r.bool()?,
             addable: {

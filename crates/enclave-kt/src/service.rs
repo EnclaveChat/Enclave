@@ -109,6 +109,67 @@ impl KtService {
         Ok((svc, policy))
     }
 
+    /// **Testing only**: two independent logs under the *same* server key,
+    /// VRF key and witness keys, as a server whose witnesses collude would
+    /// run to show different people different views (RT-04). Both logs'
+    /// heads verify under the one policy returned; only comparing heads
+    /// between clients (gossip) can tell them apart.
+    pub fn start_dev_twins(server: [u8; 16], domain: &str) -> Result<(Self, Self, KtPolicy)> {
+        use enclave_crypto::sig::COMPOSITE_SEED_LEN;
+        let mut rng = HedgedRng::new().map_err(|_| KtError::Directory("rng".into()))?;
+        let err = |_| KtError::Directory("keygen".into());
+        // Keys are made from seeds so each twin gets its own copy.
+        let mut seed = || {
+            rng.array::<COMPOSITE_SEED_LEN>("kt/dev-twin-seed")
+                .map_err(err)
+        };
+        let key = |s: &[u8; COMPOSITE_SEED_LEN]| CompositeSigningKey::from_seed(s).map_err(err);
+        let mut wseeds = Vec::new();
+        for i in 0..3u8 {
+            let mut id = server;
+            id[15] ^= 0x80 | i;
+            wseeds.push((id, format!("dev-witness-{i}"), seed()?));
+        }
+        let server_seed = seed()?;
+        let vrf = rng
+            .array::<32>("kt/dev-vrf")
+            .map_err(|_| KtError::Directory("rng".into()))?;
+        let witnesses = || -> Result<Vec<Witness>> {
+            wseeds
+                .iter()
+                .map(|(id, op, s)| Ok(Witness::new(*id, op, key(s)?)))
+                .collect()
+        };
+        let pins = witnesses()?
+            .iter()
+            .map(|w| (w.id, w.public_key().clone(), w.operator.clone()))
+            .collect();
+        let a = Self::start(
+            server,
+            domain,
+            "dev-server",
+            key(&server_seed)?,
+            vrf,
+            witnesses()?,
+        )?;
+        let b = Self::start(
+            server,
+            domain,
+            "dev-server",
+            key(&server_seed)?,
+            vrf,
+            witnesses()?,
+        )?;
+        let policy = KtPolicy {
+            servers: vec![a.info().clone()],
+            witnesses: WitnessPolicy {
+                witnesses: pins,
+                threshold: 3,
+            },
+        };
+        Ok((a, b, policy))
+    }
+
     /// Parameters clients pin for this log.
     pub fn info(&self) -> &KtInfo {
         &self.info

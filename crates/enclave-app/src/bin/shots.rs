@@ -203,6 +203,7 @@ fn fixture() -> Snapshot {
         timer: 0,
         search: Vec::new(),
         username_problem: String::new(),
+        kt_split: String::new(),
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
@@ -504,6 +505,11 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::None);
         ui.set_current_id("".into());
         shot("19-recovery-alert-phone", phone);
+        let mut split = alert.clone();
+        split.recovery_alert = String::new();
+        split.kt_split = "enclave.example".into();
+        view::apply(&ui, &split);
+        shot("28-kt-split-phone", phone);
         let mut meet = data.clone();
         meet.meet_code = "enclave:meet#AQCDAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4_QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A".into();
         view::apply(&ui, &meet);

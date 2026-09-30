@@ -438,6 +438,8 @@ impl LinkingDevice {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            pending_kt_proofs: Vec::new(),
+            pending_kt_heads: Vec::new(),
             recovery_alert: None,
             meet: None,
             pending_bond: None,
