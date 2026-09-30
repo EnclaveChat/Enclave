@@ -51,6 +51,10 @@ pub enum Cmd {
     ClaimUsername(String),
     /// Remove a linked device (hex id).
     RemoveDevice(String),
+    /// Link this device to an existing account ("I already have Enclave").
+    StartJoin,
+    /// Stop linking this device.
+    CancelJoin,
 }
 
 /// Where the account lives.
@@ -101,6 +105,10 @@ struct Engine {
     add_error: String,
     username_error: String,
     kt: Option<enclave_core::KtPolicy>,
+    /// This device, while it is being linked to an existing account.
+    joining: Option<enclave_core::LinkingDevice>,
+    join_code: String,
+    join_words: String,
     busy: bool,
 }
 
@@ -264,6 +272,9 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
         add_error: String::new(),
         username_error: String::new(),
         kt,
+        joining: None,
+        join_code: String::new(),
+        join_words: String::new(),
         busy: false,
     };
     // Reopen an existing profile.
@@ -292,6 +303,9 @@ async fn run(ui: slint::Weak<AppWindow>, mode: Mode, mut rx: mpsc::UnboundedRece
             _ = tick.tick() => {
                 if e.client.is_some() {
                     e.sync().await;
+                    e.push(&ui);
+                } else if e.joining.is_some() {
+                    e.poll_join().await;
                     e.push(&ui);
                 }
             }
@@ -493,6 +507,34 @@ impl Engine {
                     .ok();
                 self.busy = false;
             }
+            Cmd::StartJoin => {
+                self.status.clear();
+                match enclave_core::LinkingDevice::start(
+                    self.options(),
+                    Arc::clone(&self.transport),
+                    self.server,
+                )
+                .await
+                {
+                    Ok(l) => {
+                        self.join_code = l.code();
+                        self.joining = Some(l);
+                        self.status = "Waiting for your other device…".into();
+                    }
+                    Err(CoreError::Net(_)) => {
+                        self.status =
+                            "Couldn't reach the server. Check your connection and try again."
+                                .into();
+                    }
+                    Err(_) => self.status = "Couldn't start linking. Try again.".into(),
+                }
+            }
+            Cmd::CancelJoin => {
+                self.joining = None;
+                self.join_code.clear();
+                self.join_words.clear();
+                self.status.clear();
+            }
             Cmd::Check(id) => {
                 if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
                     let _ = c.set_verified(&root, true);
@@ -569,6 +611,46 @@ impl Engine {
                     self.busy = false;
                 }
             }
+        }
+    }
+
+    /// Advance linking this device: words to show, then the account.
+    async fn poll_join(&mut self) {
+        let Some(l) = self.joining.as_mut() else {
+            return;
+        };
+        match l.poll().await {
+            Ok(enclave_core::LinkProgress::Waiting) => {}
+            Ok(enclave_core::LinkProgress::Words(w)) => {
+                self.join_words = w.join(" ");
+                self.status = "Waiting for you to pick them there…".into();
+            }
+            Ok(enclave_core::LinkProgress::Ready) => {
+                let Some(l) = self.joining.take() else {
+                    return;
+                };
+                self.status = "Bringing over your contacts…".into();
+                match l.finish().await {
+                    Ok(mut c) => {
+                        if let Some(p) = self.kt.clone() {
+                            c.set_kt_policy(p);
+                        }
+                        self.client = Some(c);
+                        self.join_code.clear();
+                        self.join_words.clear();
+                        self.status.clear();
+                    }
+                    Err(_) => {
+                        self.join_code.clear();
+                        self.join_words.clear();
+                        self.status = "Linking didn't finish. Start again on both devices.".into();
+                    }
+                }
+            }
+            Err(CoreError::Net(_)) => {
+                self.status = "Couldn't reach the server. Still trying…".into();
+            }
+            Err(_) => {}
         }
     }
 
@@ -649,6 +731,9 @@ impl Engine {
             add_error: self.add_error.clone(),
             username_error: self.username_error.clone(),
             usernames: self.kt.is_some(),
+            can_join: matches!(self.mode, Mode::Server { .. }),
+            join_code: self.join_code.clone(),
+            join_words: self.join_words.clone(),
             busy: self.busy,
             ..Default::default()
         };

@@ -181,6 +181,9 @@ fn fixture() -> Snapshot {
         my_username: "@robin@enclave.example".into(),
         usernames: true,
         username_error: String::new(),
+        can_join: false,
+        join_code: String::new(),
+        join_words: String::new(),
     }
 }
 
@@ -271,6 +274,23 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::None);
         shot("01-welcome", desktop);
         shot("01-welcome-phone", phone);
+        let mut joining = Snapshot {
+            can_join: true,
+            join_code:
+                "enclave:link#AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8w"
+                    .into(),
+            ..Default::default()
+        };
+        view::apply(&ui, &joining);
+        shot("01-welcome-server-phone", phone);
+        ui.set_screen(Screen::Join);
+        ui.set_status_line("Waiting for your other device…".into());
+        shot("18-join-code-phone", phone);
+        joining.join_words = "harbor ivory kettle".into();
+        view::apply(&ui, &joining);
+        ui.set_status_line("Waiting for you to pick them there…".into());
+        shot("18-join-words-phone", phone);
+        view::apply(&ui, &Snapshot::default());
         ui.set_screen(Screen::Name);
         ui.set_name_input("Robin".into());
         shot("02-name", phone);

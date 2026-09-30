@@ -77,5 +77,8 @@ cargo run --release -p enclave-app --bin enclave -- --server 127.0.0.1:7443 --pr
 In the demo, the demo contact has the username `@sam@demo.enclave`; choose
 your own under Settings. `--kt-pins` is the file where the dev server writes
 its key-transparency keys and witnesses, which the app pins to check lookups.
+To add a second device to an account, start another profile against the same
+server, choose "I already have Enclave", and paste its link code on the first
+device under Settings → Your devices.
 
 ![Conversation](docs/screenshots/05-conversation-light.png)

@@ -124,6 +124,12 @@ pub struct Snapshot {
     pub usernames: bool,
     /// Error for the username field.
     pub username_error: String,
+    /// This device can be linked to an existing account (server mode).
+    pub can_join: bool,
+    /// Link code this device shows while it is being linked.
+    pub join_code: String,
+    /// Words to pick on the other device.
+    pub join_words: String,
 }
 
 /// Initials for contact art: first letters of up to two words.
@@ -263,6 +269,14 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_link_choices(strings(&s.link_choices));
     ui.set_link_status(s.link_status.clone().into());
     ui.set_can_link(s.can_link);
+    ui.set_can_join(s.can_join);
+    if ui.get_join_code().as_str() != s.join_code {
+        ui.set_join_code(s.join_code.clone().into());
+        if !s.join_code.is_empty() {
+            ui.set_join_qr(qr_image(&s.join_code));
+        }
+    }
+    ui.set_join_words(s.join_words.clone().into());
     if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
     }

@@ -52,7 +52,7 @@ export struct MessageRow {
     sender: string,
 }
 
-export enum Screen { welcome, name, setting-up, main }
+export enum Screen { welcome, name, setting-up, join, main }
 export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices }
 
 component DeliveryMark inherits Rectangle {
@@ -312,6 +312,12 @@ export component AppWindow inherits Window {
     callback add-contact(string, string);
     callback claim-username(string);
     callback remove-device(string);
+    callback start-join();
+    callback cancel-join();
+    in property <bool> can-join;
+    in property <string> join-code;
+    in property <image> join-qr;
+    in property <string> join-words;
     in-out property <string> confirm-remove;
     callback mark-checked(string);
     callback copy-text(string);
@@ -349,7 +355,9 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     alignment: start;
+                    spacing: Tokens.space-s;
                     PrimaryButton { text: "Get started"; clicked => { root.get-started(); } }
+                    if root.can-join: QuietButton { text: "I already have Enclave"; clicked => { root.start-join(); } }
                 }
             }
         }
@@ -392,6 +400,61 @@ export component AppWindow inherits Window {
         HorizontalLayout { alignment: center; Seal { size: 48px; } }
         Body { text: "Setting up your private address…"; horizontal-alignment: center; }
         Secondary { text: root.status-line; horizontal-alignment: center; }
+    }
+
+    // ------------------------------------------------------ link this device
+    if root.screen == Screen.join: VerticalLayout {
+        alignment: center;
+        padding: Tokens.space-l;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: min(440px, root.width - 2 * Tokens.space-l);
+                spacing: Tokens.space-m;
+                ScreenTitle { text: root.join-words == "" ? "Link this device" : "Pick these words"; }
+                Secondary {
+                    text: root.join-words == ""
+                        ? "On the device you already use, open Settings → Your devices and paste this code. Only use it with your own account."
+                        : "Your other device now shows four sets of words. Pick the set that matches these.";
+                }
+                if root.join-words == "" && root.join-code != "": HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 216px;
+                        height: 216px;
+                        background: #ffffff;
+                        border-radius: Tokens.radius-control;
+                        Image {
+                            width: 200px;
+                            height: 200px;
+                            source: root.join-qr;
+                            image-rendering: pixelated;
+                            accessible-role: image;
+                            accessible-label: "QR code of this device's link code";
+                        }
+                    }
+                }
+                if root.join-words == "" && root.join-code != "": Text {
+                    text: root.join-code;
+                    font-family: "Atkinson Hyperlegible Mono";
+                    font-size: Tokens.type-caption;
+                    color: Tokens.text-muted;
+                    overflow: elide;
+                }
+                if root.join-words != "": Code {
+                    text: root.join-words;
+                    wrap: word-wrap;
+                    accessible-label: "Words: " + root.join-words;
+                }
+                if root.status-line != "": Secondary { text: root.status-line; }
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: Tokens.space-s;
+                    if root.join-words == "" && root.join-code != "": PrimaryButton { text: "Copy code"; clicked => { root.copy-text(root.join-code); } }
+                    QuietButton { text: "Cancel"; clicked => { root.cancel-join(); } }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------- main
