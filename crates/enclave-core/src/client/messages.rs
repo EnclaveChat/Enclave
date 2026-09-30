@@ -1,0 +1,679 @@
+//! 1:1 messages: storage, disappearing messages, attachments, reactions,
+//! edits, deletes and read receipts (`docs/16-features.md`).
+//!
+//! * Every message has a 16-byte id chosen by its sender, so later messages
+//!   can refer to it.
+//! * A disappearing message is sealed under the conversation's crypto-shred
+//!   key for the day it expires. Its timer starts when it is sent (ours) or
+//!   read (theirs). Each sync shreds the keys of past days, so expired
+//!   messages are unrecoverable even from an image of the disk taken later.
+//! * Edits and deletes for everyone are advisory: they apply only to the
+//!   author's own messages, edits only within 24 hours.
+
+use super::{Client, ContactState, Event};
+use crate::content::{Content, MAX_TEXT, MsgId};
+use crate::files::{self, Attachment};
+use crate::{CoreError, Result, unix_now};
+use enclave_crypto::rng::HedgedRng;
+use enclave_proto::ProtoError;
+use enclave_proto::codec::{Reader, Writer};
+use enclave_rpc::api::Status;
+use enclave_store::shred::Shredder;
+use enclave_wire::{Op, RequestHeader};
+
+/// Edits are accepted this long after the original.
+pub const EDIT_WINDOW: u64 = 24 * 3600;
+/// Unread disappearing messages are kept at most this long.
+const UNREAD_HOLD_DAYS: u64 = 30;
+const SEALED: u8 = 0xDE;
+const NS_FILES: &str = "files";
+
+/// A reaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reaction {
+    /// Ours (else theirs).
+    pub from_us: bool,
+    /// The emoji.
+    pub emoji: String,
+}
+
+/// A stored message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    /// Position in the conversation.
+    pub seq: u64,
+    /// Id chosen by the sender.
+    pub id: MsgId,
+    /// Sent by us.
+    pub outgoing: bool,
+    /// Accepted by the recipient's server (outgoing only).
+    pub delivered: bool,
+    /// Ours: they read it. Theirs: we read it.
+    pub read: bool,
+    /// Unix time (local clock) when sent or received.
+    pub at: u64,
+    /// Text (the caption, for attachments).
+    pub text: String,
+    /// Attached file.
+    pub attachment: Option<Attachment>,
+    /// Reactions (at most one per side).
+    pub reactions: Vec<Reaction>,
+    /// Edited by its author.
+    pub edited: bool,
+    /// Deleted by its author.
+    pub deleted: bool,
+    /// Disappearing timer (0 = off).
+    pub expires_secs: u32,
+    /// When it disappears, once the timer has started.
+    pub expires_at: Option<u64>,
+}
+
+impl Message {
+    fn new(seq: u64, id: MsgId, outgoing: bool, at: u64, text: String) -> Self {
+        Self {
+            seq,
+            id,
+            outgoing,
+            delivered: false,
+            read: false,
+            at,
+            text,
+            attachment: None,
+            reactions: Vec::new(),
+            edited: false,
+            deleted: false,
+            expires_secs: 0,
+            expires_at: None,
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(2).u64(self.seq).fixed(&self.id);
+        w.u8(u8::from(self.outgoing))
+            .u8(u8::from(self.delivered))
+            .u8(u8::from(self.read))
+            .u64(self.at);
+        w.bytes(self.text.as_bytes());
+        w.bytes(
+            &self
+                .attachment
+                .as_ref()
+                .map(Attachment::encode)
+                .unwrap_or_default(),
+        );
+        w.u8(self.reactions.len() as u8);
+        for r in &self.reactions {
+            w.u8(u8::from(r.from_us)).bytes(r.emoji.as_bytes());
+        }
+        w.u8(u8::from(self.edited))
+            .u8(u8::from(self.deleted))
+            .u32(self.expires_secs)
+            .u64(self.expires_at.unwrap_or(0));
+        w.finish()
+    }
+
+    fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 2 {
+            return Err(ProtoError::Decode);
+        }
+        let s = |r: &mut Reader<'_>, n| {
+            String::from_utf8(r.bytes(n)?.to_vec()).map_err(|_| ProtoError::Decode)
+        };
+        let seq = r.u64()?;
+        let id = r.array()?;
+        let (outgoing, delivered, read) = (r.u8()? == 1, r.u8()? == 1, r.u8()? == 1);
+        let at = r.u64()?;
+        let text = s(&mut r, 1 << 16)?;
+        let att = r.bytes(crate::content::MAX_ATTACHMENT_REF)?;
+        let attachment = if att.is_empty() {
+            None
+        } else {
+            Some(Attachment::decode(att)?)
+        };
+        let mut reactions = Vec::new();
+        for _ in 0..r.u8()?.min(2) {
+            reactions.push(Reaction {
+                from_us: r.u8()? == 1,
+                emoji: s(&mut r, 64)?,
+            });
+        }
+        let (edited, deleted, expires_secs) = (r.u8()? == 1, r.u8()? == 1, r.u32()?);
+        let expires_at = Some(r.u64()?).filter(|t| *t != 0);
+        r.end()?;
+        Ok(Self {
+            seq,
+            id,
+            outgoing,
+            delivered,
+            read,
+            at,
+            text,
+            attachment,
+            reactions,
+            edited,
+            deleted,
+            expires_secs,
+            expires_at,
+        })
+    }
+
+    /// The shred day this message's record is sealed under.
+    fn shred_day(&self) -> u64 {
+        match self.expires_at {
+            Some(t) => t / 86_400,
+            None => self.at / 86_400 + UNREAD_HOLD_DAYS,
+        }
+    }
+}
+
+fn msg_ns(root: &[u8; 64]) -> String {
+    crate::persist::msg_ns(root)
+}
+
+fn id_ns(root: &[u8; 64]) -> String {
+    let mut s = String::from("mid/");
+    for b in &root[..16] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn conv(root: &[u8; 64]) -> &[u8] {
+    &root[..32]
+}
+
+impl Client {
+    // ------------------------------------------------------------------
+    // Storage
+    // ------------------------------------------------------------------
+
+    /// Messages with `root`, oldest first. Expired messages are skipped.
+    pub fn messages(&self, root: &[u8; 64]) -> Result<Vec<Message>> {
+        let now = unix_now();
+        let mut rng = HedgedRng::new()?;
+        let shred = Shredder::open(&self.store, &mut rng)?;
+        let mut v: Vec<Message> = self
+            .store
+            .scan(&msg_ns(root))?
+            .into_iter()
+            .filter_map(|(_, b)| Self::decode_record(&shred, root, &b))
+            .filter(|m| m.expires_at.is_none_or(|t| t > now))
+            .collect();
+        v.sort_by_key(|m| m.seq);
+        Ok(v)
+    }
+
+    fn decode_record(shred: &Shredder<'_>, root: &[u8; 64], b: &[u8]) -> Option<Message> {
+        if b.first() == Some(&SEALED) {
+            let day = u64::from_be_bytes(b.get(1..9)?.try_into().ok()?);
+            let pt = shred.open_msg(conv(root), day, b.get(9..)?).ok()?;
+            Message::decode(&pt).ok()
+        } else {
+            Message::decode(b).ok()
+        }
+    }
+
+    pub(crate) fn put_message(&mut self, root: &[u8; 64], m: &Message) -> Result<()> {
+        let rec = if m.expires_secs > 0 {
+            let day = m.shred_day();
+            let mut shred = Shredder::open(&self.store, &mut self.rng)?;
+            let sealed = shred.seal(conv(root), day, &m.encode(), &mut self.rng)?;
+            [&[SEALED][..], &day.to_be_bytes(), &sealed].concat()
+        } else {
+            m.encode()
+        };
+        self.store
+            .put(&msg_ns(root), &m.seq.to_be_bytes(), &rec, &mut self.rng)?;
+        self.store
+            .put(&id_ns(root), &m.id, &m.seq.to_be_bytes(), &mut self.rng)?;
+        Ok(())
+    }
+
+    fn get_message(&mut self, root: &[u8; 64], seq: u64) -> Result<Message> {
+        let b = self
+            .store
+            .get(&msg_ns(root), &seq.to_be_bytes())?
+            .ok_or(CoreError::NotFound)?;
+        let shred = Shredder::open(&self.store, &mut self.rng)?;
+        Self::decode_record(&shred, root, &b).ok_or(CoreError::NotFound)
+    }
+
+    fn find(&mut self, root: &[u8; 64], id: &MsgId) -> Result<Message> {
+        let b = self
+            .store
+            .get(&id_ns(root), id)?
+            .ok_or(CoreError::NotFound)?;
+        let seq = u64::from_be_bytes(b.as_slice().try_into().map_err(|_| CoreError::NotFound)?);
+        self.get_message(root, seq)
+    }
+
+    /// Store a new message and assign its position.
+    pub(crate) fn new_message(
+        &mut self,
+        root: &[u8; 64],
+        id: MsgId,
+        outgoing: bool,
+        text: &str,
+        expires_secs: u32,
+        now: u64,
+    ) -> Result<Message> {
+        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
+        let seq = c.next_seq;
+        c.next_seq += 1;
+        let c = c.clone();
+        self.save_contact(&c)?;
+        let mut m = Message::new(seq, id, outgoing, now, text.to_string());
+        m.expires_secs = expires_secs;
+        if outgoing && expires_secs > 0 {
+            m.expires_at = Some(now + u64::from(expires_secs));
+        }
+        self.put_message(root, &m)?;
+        Ok(m)
+    }
+
+    /// Store one of our messages with a fresh id.
+    pub(crate) fn store_message(
+        &mut self,
+        root: &[u8; 64],
+        outgoing: bool,
+        text: &str,
+        now: u64,
+    ) -> Result<Message> {
+        let id: MsgId = self.rng.array("core/msg-id")?;
+        let timer = if outgoing {
+            self.contacts.get(root).map_or(0, |c| c.timer)
+        } else {
+            0
+        };
+        self.new_message(root, id, outgoing, text, timer, now)
+    }
+
+    /// Delete expired messages and shred the keys of past days.
+    pub(crate) fn purge_expired(&mut self, now: u64) -> Result<usize> {
+        let today = now / 86_400;
+        let roots: Vec<[u8; 64]> = self.contacts.keys().copied().collect();
+        let mut removed = 0;
+        for root in roots {
+            let ns = msg_ns(&root);
+            let mut dead = Vec::new();
+            {
+                let shred = Shredder::open(&self.store, &mut self.rng)?;
+                for (k, b) in self.store.scan(&ns)? {
+                    if b.first() != Some(&SEALED) {
+                        continue;
+                    }
+                    match Self::decode_record(&shred, &root, &b) {
+                        Some(m) if m.expires_at.is_none_or(|t| t > now) => {}
+                        Some(m) => dead.push((k, Some(m.id))),
+                        None => dead.push((k, None)),
+                    }
+                }
+            }
+            for (k, id) in dead {
+                self.store.delete(&ns, &k)?;
+                if let Some(id) = id {
+                    self.store.delete(&id_ns(&root), &id)?;
+                }
+                removed += 1;
+            }
+            let mut shred = Shredder::open(&self.store, &mut self.rng)?;
+            shred.shred(conv(&root), today, &mut self.rng)?;
+        }
+        Ok(removed)
+    }
+
+    // ------------------------------------------------------------------
+    // Commands
+    // ------------------------------------------------------------------
+
+    /// Mark a conversation read: starts disappearing timers of their
+    /// messages and sends read receipts (unless turned off in settings).
+    pub async fn mark_read(&mut self, root: &[u8; 64]) -> Result<()> {
+        let now = unix_now();
+        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
+        c.unread = 0;
+        let c = c.clone();
+        self.save_contact(&c)?;
+        let mut ids = Vec::new();
+        for mut m in self
+            .messages(root)?
+            .into_iter()
+            .filter(|m| !m.outgoing && !m.read)
+        {
+            m.read = true;
+            if m.expires_secs > 0 && m.expires_at.is_none() {
+                m.expires_at = Some(now + u64::from(m.expires_secs));
+                // Re-seal under the new day, then drop the old record's day.
+            }
+            self.put_message(root, &m)?;
+            ids.push(m.id);
+        }
+        let receipts = !matches!(self.setting("receipts"), Ok(Some(v)) if v == [0]);
+        if receipts && !ids.is_empty() && c.state == ContactState::Accepted {
+            for chunk in ids.chunks(crate::content::MAX_RECEIPTS) {
+                self.send_content(root, &Content::Read(chunk.to_vec()), now)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the conversation's disappearing timer (0 turns it off).
+    pub async fn set_timer(&mut self, root: &[u8; 64], secs: u32) -> Result<()> {
+        if secs > crate::content::MAX_TIMER {
+            return Err(CoreError::TooLong);
+        }
+        let now = unix_now();
+        self.send_content(root, &Content::Timer(secs), now).await?;
+        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
+        c.timer = secs;
+        let c = c.clone();
+        self.save_contact(&c)
+    }
+
+    /// React to a message (empty `emoji` removes our reaction).
+    pub async fn react(&mut self, root: &[u8; 64], seq: u64, emoji: &str) -> Result<()> {
+        let mut m = self.get_message(root, seq)?;
+        self.send_content(
+            root,
+            &Content::React {
+                target: m.id,
+                emoji: emoji.to_string(),
+            },
+            unix_now(),
+        )
+        .await?;
+        m.reactions.retain(|r| !r.from_us);
+        if !emoji.is_empty() {
+            m.reactions.push(Reaction {
+                from_us: true,
+                emoji: emoji.to_string(),
+            });
+        }
+        self.put_message(root, &m)
+    }
+
+    /// Edit one of our messages (within 24 hours).
+    pub async fn edit_message(&mut self, root: &[u8; 64], seq: u64, text: &str) -> Result<()> {
+        let now = unix_now();
+        let mut m = self.get_message(root, seq)?;
+        if !m.outgoing
+            || m.deleted
+            || now.saturating_sub(m.at) > EDIT_WINDOW
+            || text.len() > MAX_TEXT
+        {
+            return Err(CoreError::NotAccepted);
+        }
+        self.send_content(
+            root,
+            &Content::Edit {
+                target: m.id,
+                text: text.to_string(),
+            },
+            now,
+        )
+        .await?;
+        m.text = text.to_string();
+        m.edited = true;
+        self.put_message(root, &m)
+    }
+
+    /// Delete one of our messages for everyone.
+    pub async fn delete_for_everyone(&mut self, root: &[u8; 64], seq: u64) -> Result<()> {
+        let mut m = self.get_message(root, seq)?;
+        if !m.outgoing {
+            return Err(CoreError::NotAccepted);
+        }
+        self.send_content(root, &Content::Delete { target: m.id }, unix_now())
+            .await?;
+        wipe(&mut m);
+        self.put_message(root, &m)
+    }
+
+    /// Send a file. It is sealed, padded to a size bucket and uploaded to our
+    /// home server before the message that points to it is sent.
+    pub async fn send_attachment(
+        &mut self,
+        root: &[u8; 64],
+        name: &str,
+        mime: &str,
+        data: &[u8],
+        caption: &str,
+    ) -> Result<Message> {
+        if caption.len() > MAX_TEXT {
+            return Err(CoreError::TooLong);
+        }
+        let c = self.contacts.get(root).ok_or(CoreError::NotFound)?;
+        if c.state != ContactState::Accepted {
+            return Err(CoreError::NotAccepted);
+        }
+        let timer = c.timer;
+        let now = unix_now();
+        let host = self.profile.server;
+        let (att, chunks) = files::seal_file(data, name, mime, host, &mut self.rng)?;
+        for (id, chunk) in &chunks {
+            self.rpc
+                .blob_put(&host, *id, chunk, now, &mut self.rng)
+                .await?;
+        }
+        let id: MsgId = self.rng.array("core/msg-id")?;
+        let mut m = self.new_message(root, id, true, caption, timer, now)?;
+        m.attachment = Some(att.clone());
+        self.put_message(root, &m)?;
+        // Keep our own copy so we never download what we sent.
+        self.store
+            .put(NS_FILES, &att.hash[..32], data, &mut self.rng)?;
+        let content = Content::Attachment {
+            id,
+            attachment: att.encode(),
+            caption: caption.to_string(),
+            expires: timer,
+        };
+        self.send_content(root, &content, now).await?;
+        m.delivered = true;
+        self.put_message(root, &m)?;
+        Ok(m)
+    }
+
+    /// The file of a message: from the local cache, or downloaded (every
+    /// chunk of its bucket, so the server learns nothing about the size),
+    /// verified against its hash and cached.
+    pub async fn fetch_attachment(&mut self, root: &[u8; 64], seq: u64) -> Result<Vec<u8>> {
+        let m = self.get_message(root, seq)?;
+        let att = m.attachment.ok_or(CoreError::NotFound)?;
+        if let Some(b) = self.store.get(NS_FILES, &att.hash[..32])? {
+            return Ok(b);
+        }
+        let now = unix_now();
+        let mut parts = Vec::with_capacity(att.chunks as usize);
+        for i in 0..att.chunks {
+            let chunk = self
+                .rpc
+                .blob_get(&att.host, att.chunk_id(i), now, &mut self.rng)
+                .await?;
+            parts.push(files::open_chunk(&att, i, &chunk)?);
+        }
+        let data = files::finish(&att, &parts)?;
+        self.store
+            .put(NS_FILES, &att.hash[..32], &data, &mut self.rng)?;
+        Ok(data)
+    }
+
+    // ------------------------------------------------------------------
+    // Incoming
+    // ------------------------------------------------------------------
+
+    /// Handle the content types this module owns. Returns the events and
+    /// whether the content counts as a message the sender used a token for.
+    pub(crate) fn on_message_content(
+        &mut self,
+        root: &[u8; 64],
+        content: Content,
+        now: u64,
+    ) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
+        match content {
+            Content::Text {
+                text, id, expires, ..
+            } => {
+                if self.find(root, &id).is_ok() {
+                    return Ok(events); // duplicate
+                }
+                let m = self.new_message(root, id, false, &text, expires, now)?;
+                self.bump_unread(root)?;
+                events.push(Event::Message {
+                    root: *root,
+                    message: m,
+                });
+            }
+            Content::Attachment {
+                id,
+                attachment,
+                caption,
+                expires,
+            } => {
+                if self.find(root, &id).is_ok() {
+                    return Ok(events);
+                }
+                let att = Attachment::decode(&attachment)?;
+                let mut m = self.new_message(root, id, false, &caption, expires, now)?;
+                m.attachment = Some(att);
+                self.put_message(root, &m)?;
+                self.bump_unread(root)?;
+                events.push(Event::Message {
+                    root: *root,
+                    message: m,
+                });
+            }
+            Content::React { target, emoji } => {
+                if let Ok(mut m) = self.find(root, &target) {
+                    m.reactions.retain(|r| r.from_us);
+                    if !emoji.is_empty() {
+                        m.reactions.push(Reaction {
+                            from_us: false,
+                            emoji,
+                        });
+                    }
+                    self.put_message(root, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *root,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Edit { target, text } => {
+                if let Ok(mut m) = self.find(root, &target)
+                    && !m.outgoing
+                    && !m.deleted
+                    && now.saturating_sub(m.at) <= EDIT_WINDOW
+                {
+                    m.text = text;
+                    m.edited = true;
+                    self.put_message(root, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *root,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Delete { target } => {
+                if let Ok(mut m) = self.find(root, &target)
+                    && !m.outgoing
+                {
+                    wipe(&mut m);
+                    self.put_message(root, &m)?;
+                    events.push(Event::MessageChanged {
+                        root: *root,
+                        seq: m.seq,
+                    });
+                }
+            }
+            Content::Read(ids) => {
+                for id in ids {
+                    if let Ok(mut m) = self.find(root, &id)
+                        && m.outgoing
+                        && !m.read
+                    {
+                        m.read = true;
+                        self.put_message(root, &m)?;
+                        events.push(Event::MessageChanged {
+                            root: *root,
+                            seq: m.seq,
+                        });
+                    }
+                }
+            }
+            Content::Timer(secs) => {
+                let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
+                c.timer = secs;
+                let c = c.clone();
+                self.save_contact(&c)?;
+                events.push(Event::TimerChanged { root: *root, secs });
+            }
+            _ => return Err(ProtoError::Decode.into()),
+        }
+        Ok(events)
+    }
+
+    fn bump_unread(&mut self, root: &[u8; 64]) -> Result<()> {
+        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
+        c.unread = c.unread.saturating_add(1);
+        let c = c.clone();
+        self.save_contact(&c)
+    }
+}
+
+fn wipe(m: &mut Message) {
+    m.deleted = true;
+    m.text.clear();
+    m.attachment = None;
+    m.reactions.clear();
+}
+
+impl crate::rpc::Rpc {
+    /// Upload one blob chunk, escalating proof of work as the server asks.
+    pub(crate) async fn blob_put(
+        &mut self,
+        server: &[u8; 16],
+        id: [u8; 32],
+        chunk: &[u8],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        let ctx = enclave_rpc::api::pow_context_blob(&id, &enclave_crypto::hash::sha3_512(chunk));
+        for effort in [1u32, 8, 64, 512, 4096] {
+            let proof = enclave_tokens::solve(&ctx, effort, rng)?;
+            let h = RequestHeader {
+                op: Op::BlobPut,
+                flags: 0,
+                mailbox: id,
+                token: proof.0,
+            };
+            match self.call(server, h, chunk, now, rng).await?.status {
+                Status::Ok => return Ok(()),
+                Status::Pow => continue,
+                s => return Err(CoreError::Server(s)),
+            }
+        }
+        Err(CoreError::Server(Status::Pow))
+    }
+
+    /// Download one blob chunk.
+    pub(crate) async fn blob_get(
+        &mut self,
+        server: &[u8; 16],
+        id: [u8; 32],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Vec<u8>> {
+        let h = RequestHeader {
+            op: Op::BlobGet,
+            flags: 0,
+            mailbox: id,
+            token: [0; 32],
+        };
+        Ok(self.call_ok(server, h, &[], now, rng).await?.envelope)
+    }
+}

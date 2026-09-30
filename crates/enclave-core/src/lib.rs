@@ -21,11 +21,14 @@
 pub mod card;
 pub mod client;
 pub mod content;
+pub mod files;
 mod persist;
 mod rpc;
 
 pub use card::{ContactCard, LinkError};
-pub use client::{Client, Contact, ContactState, Event, Message, Options};
+pub use client::{
+    Client, Contact, ContactState, Event, GroupInfo, GroupMessage, Message, Options, Reaction,
+};
 
 use enclave_rpc::api::Status;
 

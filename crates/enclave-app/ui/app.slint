@@ -45,7 +45,7 @@ component DeliveryMark inherits Rectangle {
     border-color: Tokens.meta-on-bubble-out;
     background: root.status >= 2 ? Tokens.meta-on-bubble-out : transparent;
     accessible-role: image;
-    accessible-label: root.status == 0 ? "Sending privately" : root.status == 1 ? "On its way" : "Delivered";
+    accessible-label: root.status == 0 ? "Sending privately" : root.status == 1 ? "On its way" : "Read";
     if root.status == 1: Rectangle {
         x: 0;
         width: parent.width / 2;

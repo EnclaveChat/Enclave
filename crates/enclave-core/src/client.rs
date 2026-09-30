@@ -84,6 +84,8 @@ pub struct Contact {
     pub(crate) card: Option<ContactCard>,
     /// Known only through a group: not shown in the conversation list.
     pub group_only: bool,
+    /// Disappearing timer for new messages (seconds, 0 = off).
+    pub timer: u32,
 }
 
 impl Contact {
@@ -93,23 +95,10 @@ impl Contact {
     }
 }
 
-/// A stored message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Message {
-    /// Position in the conversation.
-    pub seq: u64,
-    /// Sent by us.
-    pub outgoing: bool,
-    /// Accepted by the recipient's server (outgoing only).
-    pub delivered: bool,
-    /// Unix time (local clock) when sent or received.
-    pub at: u64,
-    /// Text.
-    pub text: String,
-}
-
 mod groups;
+mod messages;
 pub use groups::{GroupInfo, GroupMessage};
+pub use messages::{EDIT_WINDOW, Message, Reaction};
 
 /// Something the UI should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +123,20 @@ pub enum Event {
         root: [u8; 64],
         /// The message.
         message: Message,
+    },
+    /// A reaction, edit, delete or read receipt changed a message.
+    MessageChanged {
+        /// Conversation.
+        root: [u8; 64],
+        /// Message position.
+        seq: u64,
+    },
+    /// The contact changed the disappearing timer.
+    TimerChanged {
+        /// Conversation.
+        root: [u8; 64],
+        /// New timer in seconds (0 = off).
+        secs: u32,
     },
     /// We were added to a group.
     GroupJoined {
@@ -469,18 +472,6 @@ impl Client {
         security_code(&self.account.root_public.0, root)
     }
 
-    /// Messages with `root`, oldest first.
-    pub fn messages(&self, root: &[u8; 64]) -> Result<Vec<Message>> {
-        let mut v: Vec<Message> = self
-            .store
-            .scan(&persist::msg_ns(root))?
-            .into_iter()
-            .filter_map(|(_, b)| persist::decode_message(&b).ok())
-            .collect();
-        v.sort_by_key(|m| m.seq);
-        Ok(v)
-    }
-
     /// Whether every session with `root` has completed the post-quantum
     /// authentication round trip and uses all three KEMs.
     pub fn fully_protected(&self, root: &[u8; 64]) -> bool {
@@ -516,14 +507,6 @@ impl Client {
     pub fn set_verified(&mut self, root: &[u8; 64], verified: bool) -> Result<()> {
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         c.verified = verified;
-        let c = c.clone();
-        self.save_contact(&c)
-    }
-
-    /// Mark a conversation as read.
-    pub fn mark_read(&mut self, root: &[u8; 64]) -> Result<()> {
-        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
-        c.unread = 0;
         let c = c.clone();
         self.save_contact(&c)
     }
@@ -586,6 +569,7 @@ impl Client {
         }
 
         let tokens = self.issue_tokens(&card.root, HELLO_TOKENS, now).await?;
+        let hello_id: crate::content::MsgId = self.rng.array("core/msg-id")?;
         let hello = Content::Hello {
             server: self.profile.server,
             inbox: self.profile.inbox,
@@ -594,6 +578,7 @@ impl Client {
             text: text.to_string(),
             card: self.card().encode(),
             group,
+            id: hello_id,
         }
         .encode()?;
 
@@ -613,11 +598,12 @@ impl Client {
             added_at: now,
             card: Some(card.clone()),
             group_only: group.is_some(),
+            timer: 0,
         };
         self.contacts.insert(card.root, contact.clone());
         self.save_contact(&contact)?;
         if !text.is_empty() {
-            self.store_message(&card.root, true, text, now)?;
+            self.new_message(&card.root, hello_id, true, text, 0, now)?;
         }
 
         for dev in peer_manifest.devices.iter().take(MAX_DEVICES) {
@@ -676,6 +662,7 @@ impl Client {
             text: String::new(),
             card: self.card().encode(),
             group,
+            id: self.rng.array("core/msg-id")?,
         };
         self.send_content(root, &hello, now).await?;
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
@@ -731,6 +718,8 @@ impl Client {
             &Content::Text {
                 tokens,
                 text: text.to_string(),
+                id: msg.id,
+                expires: msg.expires_secs,
             },
             now,
         )
@@ -741,12 +730,7 @@ impl Client {
             self.save_contact(&c)?;
         }
         msg.delivered = true;
-        self.store.put(
-            &persist::msg_ns(root),
-            &msg.seq.to_be_bytes(),
-            &persist::encode_message(&msg),
-            &mut self.rng,
-        )?;
+        self.put_message(root, &msg)?;
         Ok(msg)
     }
 
@@ -834,6 +818,7 @@ impl Client {
             self.save_session(&root, &dev, &s)?;
         }
 
+        self.purge_expired(now)?;
         let mut group_events = self.sync_groups(now).await?;
         events.append(&mut group_events);
 
@@ -921,6 +906,7 @@ impl Client {
             text,
             card,
             group,
+            id: hello_id,
         } = content
         else {
             return Err(ProtoError::Decode.into());
@@ -989,6 +975,7 @@ impl Client {
                     added_at: now,
                     card: card.clone(),
                     group_only: introduced_by.is_some(),
+                    timer: 0,
                 };
                 let ev = if introduced_by.is_some() {
                     None
@@ -1006,6 +993,9 @@ impl Client {
         if !text.is_empty() {
             contact.unread = contact.unread.saturating_add(1);
         }
+        if contact.card.is_none() {
+            contact.card = card.clone();
+        }
         let auto_accept = contact.state == ContactState::Request && introduced_by.is_some();
         self.contacts.insert(root, contact.clone());
         self.save_contact(&contact)?;
@@ -1014,7 +1004,7 @@ impl Client {
             return Ok(None);
         }
         if !text.is_empty() {
-            let m = self.store_message(&root, false, &text, now)?;
+            let m = self.new_message(&root, hello_id, false, &text, 0, now)?;
             if event.is_none() {
                 return Ok(Some(Event::Message { root, message: m }));
             }
@@ -1041,7 +1031,8 @@ impl Client {
             .cloned()
             .ok_or(CoreError::NotFound)?;
         let mut events = Vec::new();
-        let text = match Content::decode(&content)? {
+        let mut rest = None;
+        match Content::decode(&content)? {
             Content::Hello {
                 server,
                 inbox,
@@ -1050,6 +1041,7 @@ impl Client {
                 text,
                 card,
                 group: _,
+                id,
             } => {
                 c.server = server;
                 c.inbox = Some(inbox);
@@ -1064,39 +1056,53 @@ impl Client {
                     c.state = ContactState::Accepted;
                     events.push(Event::Accepted { root });
                 }
-                text
-            }
-            Content::Text { tokens, text } => {
-                add_tokens(&mut c.tokens, tokens);
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                text
+                if !text.is_empty() {
+                    rest = Some(Content::Text {
+                        tokens: Vec::new(),
+                        text,
+                        id,
+                        expires: 0,
+                    });
+                }
             }
             Content::Tokens(tokens) => {
                 add_tokens(&mut c.tokens, tokens);
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
-                String::new()
             }
             Content::GroupWelcome(welcome) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 if let Some(ev) = self.on_group_welcome(&root, &welcome, now)? {
                     events.push(ev);
                 }
-                String::new()
             }
             Content::GroupCards { group_id, cards } => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 self.on_group_cards(&root, &group_id, &cards)?;
-                String::new()
             }
-        };
-        if !text.is_empty() {
-            c.unread = c.unread.saturating_add(1);
+            Content::Text {
+                tokens,
+                text,
+                id,
+                expires,
+            } => {
+                add_tokens(&mut c.tokens, tokens);
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                rest = Some(Content::Text {
+                    tokens: Vec::new(),
+                    text,
+                    id,
+                    expires,
+                });
+            }
+            other => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                rest = Some(other);
+            }
         }
         self.contacts.insert(root, c.clone());
         self.save_contact(&c)?;
-        if !text.is_empty() {
-            let m = self.store_message(&root, false, &text, now)?;
-            events.push(Event::Message { root, message: m });
+        if let Some(content) = rest {
+            events.extend(self.on_message_content(&root, content, now)?);
         }
         Ok(events)
     }
@@ -1194,34 +1200,6 @@ impl Client {
                 &mut self.rng,
             )
             .await
-    }
-
-    fn store_message(
-        &mut self,
-        root: &[u8; 64],
-        outgoing: bool,
-        text: &str,
-        now: u64,
-    ) -> Result<Message> {
-        let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
-        let seq = c.next_seq;
-        c.next_seq += 1;
-        let c = c.clone();
-        self.save_contact(&c)?;
-        let m = Message {
-            seq,
-            outgoing,
-            delivered: false,
-            at: now,
-            text: text.to_string(),
-        };
-        self.store.put(
-            &persist::msg_ns(root),
-            &seq.to_be_bytes(),
-            &persist::encode_message(&m),
-            &mut self.rng,
-        )?;
-        Ok(m)
     }
 
     fn save_contact(&mut self, c: &Contact) -> Result<()> {

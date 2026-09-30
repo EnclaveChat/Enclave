@@ -113,6 +113,50 @@ fn clock(at: u64) -> String {
         .unwrap_or_default()
 }
 
+/// How a stored message reads in the conversation.
+fn display(m: &enclave_core::Message) -> Msg {
+    let mut text = if m.deleted {
+        "This message was deleted.".to_string()
+    } else if let Some(a) = &m.attachment {
+        let kind = if a.mime.starts_with("image/") {
+            "Photo"
+        } else {
+            "File"
+        };
+        if m.text.is_empty() {
+            format!("{kind}: {}", a.name)
+        } else {
+            format!("{kind}: {}\n{}", a.name, m.text)
+        }
+    } else {
+        m.text.clone()
+    };
+    if m.edited && !m.deleted {
+        text.push_str(" (edited)");
+    }
+    for r in &m.reactions {
+        text.push_str(&format!("  {}", r.emoji));
+    }
+    // 0 sending privately, 1 on its way (accepted by their server), 2 read.
+    let status = if !m.outgoing || m.read {
+        2
+    } else if m.delivered {
+        1
+    } else {
+        0
+    };
+    let mut time = clock(m.at);
+    if m.expires_secs > 0 {
+        time.push_str(" · disappears");
+    }
+    Msg {
+        text,
+        outgoing: m.outgoing,
+        time,
+        status,
+    }
+}
+
 fn link_error(e: &CoreError) -> String {
     match e {
         CoreError::Link(LinkError::DeviceLinkCode) => "This code links a device to your account. Only scan it from Settings → Your devices, on your own new device. No one from Enclave will ever ask you to scan one.".into(),
@@ -243,7 +287,7 @@ impl Engine {
             Cmd::Select(id) => {
                 self.selected = self.root_of(&id);
                 if let (Some(c), Some(r)) = (self.client.as_mut(), self.selected) {
-                    let _ = c.mark_read(&r);
+                    let _ = c.mark_read(&r).await;
                 }
             }
             Cmd::Send(id, text) => {
@@ -352,7 +396,7 @@ impl Engine {
                             .iter()
                             .any(|e| matches!(e, Event::Message { root, .. } if *root == sel))
                     {
-                        let _ = c.mark_read(&sel);
+                        let _ = c.mark_read(&sel).await;
                     }
                 }
                 Err(_) => self.status = "Offline. Messages will send when you're back.".into(),
@@ -401,11 +445,8 @@ impl Engine {
                 name: ct.name.clone(),
                 preview: last
                     .map(|m| {
-                        if m.outgoing {
-                            format!("You: {}", m.text)
-                        } else {
-                            m.text.clone()
-                        }
+                        let t = display(m).text;
+                        if m.outgoing { format!("You: {t}") } else { t }
                     })
                     .unwrap_or_default(),
                 time: last.map(|m| clock(m.at)).unwrap_or_default(),
@@ -420,15 +461,7 @@ impl Engine {
             };
             if self.selected == Some(ct.root) {
                 s.current = Some(row.clone());
-                s.messages = msgs
-                    .iter()
-                    .map(|m| Msg {
-                        text: m.text.clone(),
-                        outgoing: m.outgoing,
-                        time: clock(m.at),
-                        status: if m.delivered { 2 } else { 0 },
-                    })
-                    .collect();
+                s.messages = msgs.iter().map(display).collect();
                 let digits: String = c
                     .security_code(&ct.root)
                     .chars()

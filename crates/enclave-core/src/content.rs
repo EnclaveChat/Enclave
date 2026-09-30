@@ -12,7 +12,7 @@ use enclave_proto::{ProtoError, Result};
 /// Most write tokens one message may carry.
 pub const MAX_TOKENS: usize = 32;
 /// Maximum text in one message (bytes of UTF-8). Longer text is refused
-/// until continuation units land (M9).
+/// until continuation units land.
 pub const MAX_TEXT: usize = 4096;
 /// Largest encoded card accepted.
 pub const MAX_CARD: usize = 512;
@@ -20,9 +20,20 @@ pub const MAX_CARD: usize = 512;
 pub const MAX_CARDS_PER_MESSAGE: usize = 40;
 /// Largest group welcome accepted.
 pub const MAX_WELCOME: usize = 9_000;
+/// Most message ids one read receipt may carry.
+pub const MAX_RECEIPTS: usize = 64;
+/// Longest reaction (one emoji, possibly with modifiers).
+pub const MAX_REACTION: usize = 32;
+/// Longest disappearing timer: four weeks.
+pub const MAX_TIMER: u32 = 28 * 86_400;
+/// Largest encoded attachment reference.
+pub const MAX_ATTACHMENT_REF: usize = 1024;
 
 /// A write token for someone's inbox.
 pub type Token = [u8; 32];
+
+/// Identifier of a message, chosen by its sender.
+pub type MsgId = [u8; 16];
 
 /// Decrypted message content.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +56,8 @@ pub enum Content {
         /// Set when a group introduced us: the receiver accepts automatically
         /// if the sender is a member of that group.
         group: Option<[u8; 32]>,
+        /// Id of the first text.
+        id: MsgId,
     },
     /// A text message, optionally carrying fresh tokens.
     Text {
@@ -52,6 +65,10 @@ pub enum Content {
         tokens: Vec<Token>,
         /// The text.
         text: String,
+        /// Message id.
+        id: MsgId,
+        /// Disappearing timer in seconds (0 = off).
+        expires: u32,
     },
     /// Token refill with no user-visible content.
     Tokens(Vec<Token>),
@@ -64,6 +81,40 @@ pub enum Content {
         /// Encoded cards.
         cards: Vec<Vec<u8>>,
     },
+    /// A file (`crate::files::Attachment`, encoded) with an optional caption.
+    Attachment {
+        /// Message id.
+        id: MsgId,
+        /// Encoded attachment reference.
+        attachment: Vec<u8>,
+        /// Caption.
+        caption: String,
+        /// Disappearing timer.
+        expires: u32,
+    },
+    /// Set (or, with an empty emoji, remove) our reaction to a message.
+    React {
+        /// Target message.
+        target: MsgId,
+        /// Emoji.
+        emoji: String,
+    },
+    /// Replace the text of one of our messages (advisory, 24 h).
+    Edit {
+        /// Target message.
+        target: MsgId,
+        /// New text.
+        text: String,
+    },
+    /// Delete one of our messages for everyone (advisory).
+    Delete {
+        /// Target message.
+        target: MsgId,
+    },
+    /// Read receipts.
+    Read(Vec<MsgId>),
+    /// The conversation's disappearing timer changed.
+    Timer(u32),
 }
 
 const K_HELLO: u8 = 1;
@@ -71,6 +122,12 @@ const K_TEXT: u8 = 2;
 const K_TOKENS: u8 = 3;
 const K_GROUP_WELCOME: u8 = 4;
 const K_GROUP_CARDS: u8 = 5;
+const K_ATTACHMENT: u8 = 6;
+const K_REACT: u8 = 7;
+const K_EDIT: u8 = 8;
+const K_DELETE: u8 = 9;
+const K_READ: u8 = 10;
+const K_TIMER: u8 = 11;
 
 fn put_tokens(w: &mut Writer, t: &[Token]) {
     w.u8(t.len() as u8);
@@ -91,10 +148,19 @@ fn get_str(r: &mut Reader<'_>, max: usize) -> Result<String> {
     String::from_utf8(r.bytes(max)?.to_vec()).map_err(|_| ProtoError::Decode)
 }
 
+fn timer(secs: u32) -> Result<u32> {
+    if secs > MAX_TIMER {
+        Err(ProtoError::Decode)
+    } else {
+        Ok(secs)
+    }
+}
+
 impl Content {
     /// Encode. Fails if a limit is exceeded.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut w = Writer::new();
+        let too_large = Err(ProtoError::TooLarge);
         match self {
             Content::Hello {
                 server,
@@ -104,13 +170,14 @@ impl Content {
                 text,
                 card,
                 group,
+                id,
             } => {
                 if tokens.len() > MAX_TOKENS
                     || name.len() > MAX_NAME
                     || text.len() > MAX_TEXT
                     || card.len() > MAX_CARD
                 {
-                    return Err(ProtoError::TooLarge);
+                    return too_large;
                 }
                 w.u8(K_HELLO).fixed(server).fixed(inbox);
                 put_tokens(&mut w, tokens);
@@ -119,36 +186,90 @@ impl Content {
                     Some(g) => w.u8(1).fixed(g),
                     None => w.u8(0),
                 };
+                w.fixed(id);
             }
-            Content::Text { tokens, text } => {
-                if tokens.len() > MAX_TOKENS || text.len() > MAX_TEXT {
-                    return Err(ProtoError::TooLarge);
+            Content::Text {
+                tokens,
+                text,
+                id,
+                expires,
+            } => {
+                if tokens.len() > MAX_TOKENS || text.len() > MAX_TEXT || *expires > MAX_TIMER {
+                    return too_large;
                 }
                 w.u8(K_TEXT);
                 put_tokens(&mut w, tokens);
-                w.bytes(text.as_bytes());
+                w.bytes(text.as_bytes()).fixed(id).u32(*expires);
             }
             Content::Tokens(tokens) => {
                 if tokens.len() > MAX_TOKENS {
-                    return Err(ProtoError::TooLarge);
+                    return too_large;
                 }
                 w.u8(K_TOKENS);
                 put_tokens(&mut w, tokens);
             }
             Content::GroupWelcome(b) => {
                 if b.len() > MAX_WELCOME {
-                    return Err(ProtoError::TooLarge);
+                    return too_large;
                 }
                 w.u8(K_GROUP_WELCOME).bytes(b);
             }
             Content::GroupCards { group_id, cards } => {
                 if cards.len() > MAX_CARDS_PER_MESSAGE || cards.iter().any(|c| c.len() > MAX_CARD) {
-                    return Err(ProtoError::TooLarge);
+                    return too_large;
                 }
                 w.u8(K_GROUP_CARDS).fixed(group_id).u8(cards.len() as u8);
                 for c in cards {
                     w.bytes(c);
                 }
+            }
+            Content::Attachment {
+                id,
+                attachment,
+                caption,
+                expires,
+            } => {
+                if attachment.len() > MAX_ATTACHMENT_REF
+                    || caption.len() > MAX_TEXT
+                    || *expires > MAX_TIMER
+                {
+                    return too_large;
+                }
+                w.u8(K_ATTACHMENT)
+                    .fixed(id)
+                    .bytes(attachment)
+                    .bytes(caption.as_bytes())
+                    .u32(*expires);
+            }
+            Content::React { target, emoji } => {
+                if emoji.len() > MAX_REACTION {
+                    return too_large;
+                }
+                w.u8(K_REACT).fixed(target).bytes(emoji.as_bytes());
+            }
+            Content::Edit { target, text } => {
+                if text.len() > MAX_TEXT {
+                    return too_large;
+                }
+                w.u8(K_EDIT).fixed(target).bytes(text.as_bytes());
+            }
+            Content::Delete { target } => {
+                w.u8(K_DELETE).fixed(target);
+            }
+            Content::Read(ids) => {
+                if ids.len() > MAX_RECEIPTS {
+                    return too_large;
+                }
+                w.u8(K_READ).u8(ids.len() as u8);
+                for i in ids {
+                    w.fixed(i);
+                }
+            }
+            Content::Timer(secs) => {
+                if *secs > MAX_TIMER {
+                    return too_large;
+                }
+                w.u8(K_TIMER).u32(*secs);
             }
         }
         Ok(w.finish())
@@ -170,10 +291,13 @@ impl Content {
                     1 => Some(r.array()?),
                     _ => return Err(ProtoError::Decode),
                 },
+                id: r.array()?,
             },
             K_TEXT => Content::Text {
                 tokens: get_tokens(&mut r)?,
                 text: get_str(&mut r, MAX_TEXT)?,
+                id: r.array()?,
+                expires: timer(r.u32()?)?,
             },
             K_TOKENS => Content::Tokens(get_tokens(&mut r)?),
             K_GROUP_WELCOME => Content::GroupWelcome(r.bytes(MAX_WELCOME)?.to_vec()),
@@ -188,6 +312,29 @@ impl Content {
                     .collect::<Result<_>>()?;
                 Content::GroupCards { group_id, cards }
             }
+            K_ATTACHMENT => Content::Attachment {
+                id: r.array()?,
+                attachment: r.bytes(MAX_ATTACHMENT_REF)?.to_vec(),
+                caption: get_str(&mut r, MAX_TEXT)?,
+                expires: timer(r.u32()?)?,
+            },
+            K_REACT => Content::React {
+                target: r.array()?,
+                emoji: get_str(&mut r, MAX_REACTION)?,
+            },
+            K_EDIT => Content::Edit {
+                target: r.array()?,
+                text: get_str(&mut r, MAX_TEXT)?,
+            },
+            K_DELETE => Content::Delete { target: r.array()? },
+            K_READ => {
+                let n = r.u8()? as usize;
+                if n > MAX_RECEIPTS {
+                    return Err(ProtoError::Decode);
+                }
+                Content::Read((0..n).map(|_| r.array()).collect::<Result<_>>()?)
+            }
+            K_TIMER => Content::Timer(timer(r.u32()?)?),
             _ => return Err(ProtoError::Decode),
         };
         r.end()?;
@@ -211,10 +358,13 @@ mod tests {
                 text: "hi".into(),
                 card: vec![1; 180],
                 group: Some([4; 32]),
+                id: [8; 16],
             },
             Content::Text {
                 tokens: vec![],
                 text: "héllo 👋".into(),
+                id: [1; 16],
+                expires: 3600,
             },
             Content::Tokens(vec![[9; 32]; 8]),
             Content::GroupWelcome(vec![5; 7000]),
@@ -222,6 +372,23 @@ mod tests {
                 group_id: [6; 32],
                 cards: vec![vec![7; 180]; 30],
             },
+            Content::Attachment {
+                id: [2; 16],
+                attachment: vec![3; 300],
+                caption: "look".into(),
+                expires: 0,
+            },
+            Content::React {
+                target: [4; 16],
+                emoji: "👍🏽".into(),
+            },
+            Content::Edit {
+                target: [4; 16],
+                text: "fixed".into(),
+            },
+            Content::Delete { target: [4; 16] },
+            Content::Read(vec![[5; 16]; 10]),
+            Content::Timer(86_400),
         ];
         for c in all {
             let e = c.encode().unwrap();
@@ -234,14 +401,18 @@ mod tests {
             longer.push(0);
             assert!(Content::decode(&longer).is_err());
         }
+        let long = "x".repeat(MAX_TEXT + 1);
         assert!(
             Content::Text {
                 tokens: vec![],
-                text: "x".repeat(MAX_TEXT + 1)
+                text: long,
+                id: [0; 16],
+                expires: 0
             }
             .encode()
             .is_err()
         );
+        assert!(Content::Timer(MAX_TIMER + 1).encode().is_err());
         assert!(
             Content::Tokens(vec![[0; 32]; MAX_TOKENS + 1])
                 .encode()

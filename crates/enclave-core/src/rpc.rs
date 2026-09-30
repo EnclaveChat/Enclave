@@ -54,7 +54,7 @@ impl Rpc {
         rng: &mut HedgedRng,
     ) -> Result<Reply> {
         let key = self.key(server, now).await?;
-        let (bytes, ex) = if h.op == Op::Poll || h.op == Op::Ack {
+        let (bytes, ex) = if matches!(h.op, Op::Poll | Op::Ack | Op::BlobGet) {
             enclave_rpc::seal_poll(&key, &h, rng)?
         } else {
             enclave_rpc::seal_request(&key, &h, env, rng)?

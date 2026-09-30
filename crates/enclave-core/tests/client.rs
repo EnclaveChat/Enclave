@@ -301,3 +301,119 @@ async fn group_of_three_where_two_are_strangers() {
         "removed member reads nothing"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_reactions_edits_deletes_receipts_and_timers() {
+    let net = network();
+    let (mut a, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    let (ra, rb) = (a.root(), b.root());
+
+    // A 300 KB file travels as a padded 1 MiB bucket and verifies.
+    let photo: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let sent = a
+        .send_attachment(&rb, "beach.jpg", "image/jpeg", &photo, "Look!")
+        .await
+        .unwrap();
+    let ev = b.sync().await.unwrap();
+    let got = ev
+        .iter()
+        .find_map(|e| match e {
+            Event::Message { message, .. } if message.attachment.is_some() => Some(message.clone()),
+            _ => None,
+        })
+        .expect("attachment message");
+    assert_eq!(got.text, "Look!");
+    assert_eq!(got.attachment.as_ref().unwrap().name, "beach.jpg");
+    assert_eq!(b.fetch_attachment(&ra, got.seq).await.unwrap(), photo);
+    assert_eq!(
+        a.fetch_attachment(&rb, sent.seq).await.unwrap(),
+        photo,
+        "sender keeps a local copy"
+    );
+    let chunk_sizes = net
+        .with_server(&S1, |s| s.stored_lengths().clone())
+        .unwrap();
+    assert!(chunk_sizes.iter().all(|l| *l == enclave_wire::ENVELOPE_LEN));
+
+    // Reaction, edit, delete for everyone, read receipt.
+    let m = a.send_text(&rb, "See you at 10").await.unwrap();
+    b.sync().await.unwrap();
+    let theirs = b
+        .messages(&ra)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.text == "See you at 10")
+        .unwrap();
+    b.react(&ra, theirs.seq, "👍").await.unwrap();
+    b.mark_read(&ra).await.unwrap();
+    let ev = a.sync().await.unwrap();
+    assert!(ev.iter().any(|e| matches!(e, Event::MessageChanged { .. })));
+    let mine = a
+        .messages(&rb)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.seq == m.seq)
+        .unwrap();
+    assert_eq!(
+        mine.reactions,
+        vec![enclave_core::Reaction {
+            from_us: false,
+            emoji: "👍".into()
+        }]
+    );
+    assert!(mine.read, "read receipt arrived");
+    a.edit_message(&rb, m.seq, "See you at 11").await.unwrap();
+    b.sync().await.unwrap();
+    let theirs = b
+        .messages(&ra)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.seq == theirs.seq)
+        .unwrap();
+    assert_eq!(
+        (theirs.text.as_str(), theirs.edited),
+        ("See you at 11", true)
+    );
+    // Ben cannot edit or delete Ada's message.
+    assert!(b.edit_message(&ra, theirs.seq, "no").await.is_err());
+    assert!(b.delete_for_everyone(&ra, theirs.seq).await.is_err());
+    a.delete_for_everyone(&rb, m.seq).await.unwrap();
+    b.sync().await.unwrap();
+    let theirs = b
+        .messages(&ra)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.seq == theirs.seq)
+        .unwrap();
+    assert!(theirs.deleted && theirs.text.is_empty());
+
+    // Disappearing messages: timer set by Ada applies to both sides.
+    a.set_timer(&rb, 60).await.unwrap();
+    let ev = b.sync().await.unwrap();
+    assert!(ev.contains(&Event::TimerChanged { root: ra, secs: 60 }));
+    let gone = a.send_text(&rb, "this disappears").await.unwrap();
+    assert_eq!(gone.expires_secs, 60);
+    assert!(gone.expires_at.is_some());
+    b.sync().await.unwrap();
+    let theirs = b
+        .messages(&ra)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.text == "this disappears")
+        .unwrap();
+    assert_eq!(theirs.expires_at, None, "their clock starts when read");
+    b.mark_read(&ra).await.unwrap();
+    let theirs = b
+        .messages(&ra)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.seq == theirs.seq)
+        .unwrap();
+    assert!(theirs.expires_at.is_some());
+}

@@ -1,7 +1,7 @@
 //! Encodings of client records kept in the sealed store.
 
 use crate::card::ContactCard;
-use crate::client::{Contact, ContactState, Message};
+use crate::client::{Contact, ContactState};
 use crate::content::Token;
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::seal::{self, SealKey};
@@ -113,7 +113,7 @@ pub(crate) fn encode_contact(c: &Contact) -> Result<Vec<u8>> {
         .u32(c.unread)
         .u64(c.added_at);
     w.bytes(&c.card.as_ref().map(ContactCard::encode).unwrap_or_default());
-    w.u8(u8::from(c.group_only));
+    w.u8(u8::from(c.group_only)).u32(c.timer);
     Ok(w.finish())
 }
 
@@ -164,36 +164,10 @@ pub(crate) fn decode_contact(b: &[u8]) -> Result<Contact> {
             }
         },
         group_only: r.u8()? == 1,
+        timer: r.u32()?,
     };
     r.end()?;
     Ok(c)
-}
-
-pub(crate) fn encode_message(m: &Message) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.u8(1)
-        .u64(m.seq)
-        .u8(u8::from(m.outgoing))
-        .u8(u8::from(m.delivered))
-        .u64(m.at);
-    w.bytes(m.text.as_bytes());
-    w.finish()
-}
-
-pub(crate) fn decode_message(b: &[u8]) -> Result<Message> {
-    let mut r = Reader::new(b);
-    if r.u8()? != 1 {
-        return Err(ProtoError::Decode);
-    }
-    let m = Message {
-        seq: r.u64()?,
-        outgoing: r.u8()? == 1,
-        delivered: r.u8()? == 1,
-        at: r.u64()?,
-        text: String::from_utf8(r.bytes(1 << 16)?.to_vec()).map_err(|_| ProtoError::Decode)?,
-    };
-    r.end()?;
-    Ok(m)
 }
 
 /// Seal a large public object (the McEliece vault key) for the directory.
