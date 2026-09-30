@@ -128,6 +128,9 @@ pub struct Snapshot {
     pub join_code: String,
     /// Words to pick on the other device.
     pub join_words: String,
+    /// When someone else's change to this account takes effect unless it is
+    /// stopped ("3 Oct 14:02"), or empty.
+    pub recovery_alert: String,
 }
 
 /// UI → vault.
@@ -169,6 +172,10 @@ pub enum Cmd {
     CancelJoin,
     /// Send message history to a linked device now (hex id).
     SendHistory(String),
+    /// "This wasn't me": veto the pending change to this account.
+    StopRecovery,
+    /// "It's me": approve the pending change to this account.
+    ApproveRecovery,
     /// Include the recovery words in snapshots (only while the recovery
     /// sheet is open), or stop.
     RevealWords(bool),
@@ -298,7 +305,8 @@ impl Snapshot {
             .str(&self.username_error)
             .bool(self.can_join)
             .str(&self.join_code)
-            .str(&self.join_words);
+            .str(&self.join_words)
+            .str(&self.recovery_alert);
         w.0
     }
 
@@ -379,6 +387,7 @@ impl Snapshot {
             can_join: r.bool()?,
             join_code: r.str()?,
             join_words: r.str()?,
+            recovery_alert: r.str()?,
         };
         r.end()?;
         Ok(s)
@@ -409,6 +418,8 @@ impl Cmd {
             Cmd::CancelJoin => w.u8(17),
             Cmd::RevealWords(b) => w.u8(18).bool(*b),
             Cmd::SendHistory(s) => w.u8(19).str(s),
+            Cmd::StopRecovery => w.u8(20),
+            Cmd::ApproveRecovery => w.u8(21),
         };
         w.0
     }
@@ -436,6 +447,8 @@ impl Cmd {
             17 => Cmd::CancelJoin,
             18 => Cmd::RevealWords(r.bool()?),
             19 => Cmd::SendHistory(r.str()?),
+            20 => Cmd::StopRecovery,
+            21 => Cmd::ApproveRecovery,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

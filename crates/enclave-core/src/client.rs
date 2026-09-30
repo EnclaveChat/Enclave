@@ -7,7 +7,7 @@ use crate::persist::{
     Profile,
 };
 use crate::rpc::Rpc;
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_crypto::hash::{security_code, sha3_512};
 use enclave_crypto::kem::McEliecePublic;
 use enclave_crypto::pwhash::PwParams;
@@ -98,11 +98,14 @@ impl Contact {
 mod backup;
 mod devices;
 mod groups;
+mod guard;
 mod history;
 mod link;
 mod messages;
 mod usernames;
+
 pub use groups::{GroupInfo, GroupMessage};
+pub use guard::RecoveryAlert;
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
 
@@ -148,6 +151,13 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// Someone changed this account's devices without any of our devices
+    /// (for example, restoring it from the recovery words elsewhere). Contacts
+    /// accept the change at `until` unless a device stops it.
+    RecoveryPending {
+        /// Unix time when contacts would accept it.
+        until: u64,
+    },
     /// This device was removed from the account by another device. It can
     /// no longer read new messages; the app should say so and offer to erase.
     RemovedFromAccount,
@@ -205,6 +215,8 @@ pub struct Client {
     stale_manifests: BTreeMap<[u8; 64], u64>,
     /// History files from our own devices, fetched at the end of `sync`.
     pending_history: Vec<crate::files::Attachment>,
+    /// A change to our manifest that none of our devices made.
+    recovery_alert: Option<guard::RecoveryAlert>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -241,6 +253,12 @@ impl ManifestResolver for Resolver<'_> {
 }
 
 impl Client {
+    /// Current time, Unix seconds (from the transport, so simulations can
+    /// move it).
+    pub fn now(&self) -> u64 {
+        self.rpc.now()
+    }
+
     // ------------------------------------------------------------------
     // Profile lifecycle
     // ------------------------------------------------------------------
@@ -260,7 +278,7 @@ impl Client {
             return Err(CoreError::TooLong);
         }
         let mut rng = HedgedRng::new()?;
-        let now = unix_now();
+        let now = transport.now();
         let recovery = RecoverySecret::generate(&mut rng)?;
         let words = recovery.to_words()?;
         let account = AccountKeys::create(&recovery, &mut rng)?;
@@ -368,6 +386,7 @@ impl Client {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            recovery_alert: None,
         };
         Ok((client, words))
     }
@@ -437,6 +456,7 @@ impl Client {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            recovery_alert: None,
         })
     }
 
@@ -562,7 +582,7 @@ impl Client {
         if self.contacts.contains_key(&card.root) {
             return Ok(());
         }
-        let now = unix_now();
+        let now = self.now();
         let server = card.server;
         let (peer_manifest, vault) = self.fetch_peer(card, now).await?;
 
@@ -713,7 +733,7 @@ impl Client {
         if c.state != ContactState::Request {
             return Ok(());
         }
-        let now = unix_now();
+        let now = self.now();
         let tokens = self.issue_tokens(root, HELLO_TOKENS, now).await?;
         let hello = Content::Hello {
             server: self.profile.server,
@@ -765,7 +785,7 @@ impl Client {
         if c.state != ContactState::Accepted {
             return Err(CoreError::NotAccepted);
         }
-        let now = unix_now();
+        let now = self.now();
         let tokens = if c.received_since_refill >= REFILL_AFTER {
             let n = refill_size(c.received_since_refill);
             self.issue_tokens(root, n, now).await?
@@ -805,7 +825,7 @@ impl Client {
     /// Fetch and process everything waiting in our inboxes, refill tokens and
     /// maintain prekeys. Returns what the UI should show.
     pub async fn sync(&mut self) -> Result<Vec<Event>> {
-        let now = unix_now();
+        let now = self.now();
         let mut events = Vec::new();
 
         let server = self.profile.server;
@@ -855,6 +875,8 @@ impl Client {
             self.save_profile()?;
         }
         events.append(&mut self.refresh_manifests(now).await?);
+        events.append(&mut self.release_held(now).await?);
+        events.append(&mut self.check_own_manifest(now).await?);
         if self.import_pending_history(now).await? > 0 {
             events.push(Event::HistoryImported);
         }
@@ -955,7 +977,8 @@ impl Client {
                             &mut self.rng,
                         )
                         .await?;
-                    let m = SignedManifest::from_bytes(&mb)?.verify(&RootPublic(root), now)?;
+                    let sm = SignedManifest::from_bytes(&mb)?;
+                    let m = sm.verify(&RootPublic(root), now)?;
                     if m.version != version {
                         return Err(ProtoError::Rollback.into());
                     }
@@ -963,6 +986,28 @@ impl Client {
                         && c.manifest.version > m.version
                     {
                         return Err(ProtoError::Rollback.into());
+                    }
+                    // A newer manifest of an account we know (a contact, or
+                    // our own) takes effect only if a device co-signed it,
+                    // or after the 72-hour guard.
+                    let known = if root == self.account.root_public.0 {
+                        Some(self.manifest.clone())
+                    } else {
+                        self.contacts.get(&root).map(|c| c.manifest.clone())
+                    };
+                    if let Some(old) = known
+                        && m.version > old.version
+                    {
+                        match self.judge(&root, &server, &old, &sm, &m, now).await? {
+                            guard::Judgement::Accept => {}
+                            guard::Judgement::Wait(until) => {
+                                self.hold_request(&rid, env, until, now)?;
+                                return Ok(None);
+                            }
+                            guard::Judgement::Vetoed => {
+                                return Err(ProtoError::BadSignature.into());
+                            }
+                        }
                     }
                     fetched = Some(m);
                 }
@@ -1140,6 +1185,10 @@ impl Client {
                     }
                     Ok(Vec::new())
                 }
+                Content::Veto(b) => {
+                    self.on_veto(&root, &b)?;
+                    Ok(Vec::new())
+                }
                 _ => Ok(Vec::new()),
             };
         }
@@ -1192,6 +1241,10 @@ impl Client {
                 if v > c.manifest.version {
                     self.stale_manifests.insert(root, v);
                 }
+            }
+            Content::Veto(b) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                self.on_veto(&root, &b)?;
             }
             Content::GroupWelcome(welcome) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);

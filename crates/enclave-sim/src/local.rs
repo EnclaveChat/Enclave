@@ -42,6 +42,13 @@ impl LocalTransport {
         Some(policy)
     }
 
+    /// Move simulated time forward (clients and servers see it).
+    pub fn advance(&self, secs: u64) {
+        if let Ok(mut o) = self.offset.lock() {
+            *o += secs;
+        }
+    }
+
     /// Current simulated time.
     pub fn now(&self) -> u64 {
         let sys = std::time::SystemTime::now()
@@ -70,6 +77,10 @@ impl Transport for LocalTransport {
             .get_mut(server)
             .ok_or_else(|| NetError::Unreachable("unknown server".into()))?;
         Ok(s.handle(&request, now))
+    }
+
+    fn now(&self) -> u64 {
+        LocalTransport::now(self)
     }
 
     async fn server_key(&self, server: &ServerId) -> enclave_net::Result<ServerKey> {

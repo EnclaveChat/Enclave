@@ -322,6 +322,9 @@ export component AppWindow inherits Window {
     in property <string> join-code;
     in property <image> join-qr;
     in property <string> join-words;
+    in property <string> recovery-alert;
+    callback stop-recovery();
+    callback approve-recovery();
     in-out property <string> confirm-remove;
     callback mark-checked(string);
     callback copy-text(string);
@@ -485,6 +488,22 @@ export component AppWindow inherits Window {
                     ActionTile { text: "My code"; icon: Icons.qr; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.my-code); } }
                     ActionTile { text: "Add"; icon: Icons.link; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.add); } }
                     ActionTile { text: "Group"; icon: Icons.group; horizontal-stretch: 1; clicked => { root.open-sheet(Sheet.new-group); } }
+                }
+                if root.recovery-alert != "": Notice {
+                    title: "Someone is setting up your account on another device";
+                    text: "They used your recovery words. If this isn't you, stop it now. Otherwise your contacts will accept that device on " + root.recovery-alert + ".";
+                    kind: 2;
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: Tokens.space-s;
+                        PrimaryButton {
+                            text: "Stop it";
+                            danger: true;
+                            enabled: !root.busy;
+                            clicked => { root.stop-recovery(); }
+                        }
+                        QuietButton { text: "It's me"; clicked => { root.approve-recovery(); } }
+                    }
                 }
                 if !root.recovery-saved: Notice {
                     title: "Save your recovery words";

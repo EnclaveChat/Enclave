@@ -25,6 +25,14 @@ pub trait Transport: Send + Sync {
     async fn exchange(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>>;
     /// Fetch the server's current request key (from its descriptor).
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey>;
+    /// Current time, Unix seconds. The system clock, except in simulations
+    /// that move time forward.
+    fn now(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
 }
 
 /// Decode `key_id ‖ x448 ‖ mlkem` as served by the dev transport.

@@ -17,7 +17,7 @@ use super::Client;
 use crate::content::Content;
 use crate::files::{self, Attachment};
 use crate::persist::NS_SETTINGS;
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_proto::codec::{Reader, Writer};
 use enclave_proto::manifest::Role;
 use zeroize::Zeroizing;
@@ -37,7 +37,7 @@ impl Client {
         if !self.can_link() || *device == self.device.id || self.manifest.device(device).is_none() {
             return Err(CoreError::NotFound);
         }
-        self.send_history(device, unix_now()).await
+        self.send_history(device, self.now()).await
     }
 
     /// Whether history has been sent to `device`.

@@ -120,6 +120,9 @@ pub enum Content {
     Devices(u64),
     /// Our message history, as a sealed file reference (own devices only).
     History(Vec<u8>),
+    /// A device of the sender vetoes a change to the sender's account
+    /// (an encoded `Attestation`).
+    Veto(Vec<u8>),
     /// A copy, for our other devices, of content we sent to `to`.
     SelfCopy {
         /// The conversation it belongs to.
@@ -143,6 +146,7 @@ const K_TIMER: u8 = 11;
 const K_SELF_COPY: u8 = 12;
 const K_DEVICES: u8 = 13;
 const K_HISTORY: u8 = 14;
+const K_VETO: u8 = 15;
 /// Largest content a self-copy can wrap.
 pub const MAX_SELF_COPY: usize = 9_000;
 
@@ -297,6 +301,12 @@ impl Content {
                 }
                 w.u8(K_HISTORY).bytes(att);
             }
+            Content::Veto(a) => {
+                if a.len() > enclave_proto::attest::MAX_ATTESTATION {
+                    return too_large;
+                }
+                w.u8(K_VETO).bytes(a);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -369,6 +379,7 @@ impl Content {
             K_TIMER => Content::Timer(timer(r.u32()?)?),
             K_DEVICES => Content::Devices(r.u64()?),
             K_HISTORY => Content::History(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
+            K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_SELF_COPY => {
                 let to = r.array()?;
                 let content = r.bytes(MAX_SELF_COPY)?.to_vec();

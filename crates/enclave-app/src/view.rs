@@ -157,6 +157,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
         }
     }
     ui.set_join_words(s.join_words.clone().into());
+    ui.set_recovery_alert(s.recovery_alert.clone().into());
     if !s.my_name.is_empty() && ui.get_screen() != Screen::Main {
         ui.set_screen(Screen::Main);
     }

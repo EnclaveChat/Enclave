@@ -114,6 +114,11 @@ pub struct Server {
     keys: VecDeque<ServerSecret>,
     inboxes: HashMap<[u8; 32], Inbox>,
     manifests: HashMap<[u8; 32], (u64, Vec<u8>)>,
+    /// Every device an account's manifests have listed. Attestations must
+    /// come from one of them.
+    devices_seen: HashMap<[u8; 32], Vec<SeenDevice>>,
+    /// Device attestations per manifest key, newest last.
+    attestations: HashMap<[u8; 32], Vec<Vec<u8>>>,
     bundles: HashMap<[u8; 16], DeviceBundles>,
     claims: HashMap<[u8; 32], (Vec<u8>, u64)>,
     vaults: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
@@ -134,6 +139,13 @@ pub struct Server {
 
 pub use enclave_rpc::api::{device_key, manifest_key};
 
+/// A device some manifest of an account listed.
+struct SeenDevice {
+    root: [u8; 64],
+    id: [u8; 16],
+    key: enclave_crypto::sig::CompositePublic,
+}
+
 impl Server {
     /// Create a server with today's request key.
     pub fn new(cfg: Config, day: u32) -> enclave_crypto::Result<Self> {
@@ -147,6 +159,8 @@ impl Server {
             keys,
             inboxes: HashMap::new(),
             manifests: HashMap::new(),
+            devices_seen: HashMap::new(),
+            attestations: HashMap::new(),
             bundles: HashMap::new(),
             claims: HashMap::new(),
             vaults: HashMap::new(),
@@ -487,6 +501,14 @@ impl Server {
                 Some((bytes, _)) => Self::chunk_reply(bytes, req.index, req.key),
                 None => (Status::NotFound, Reply::Empty),
             },
+            (DirKind::Attest, DirAction::Get) => match self.attestations.get(&req.key) {
+                Some(list) => Self::chunk_reply(
+                    &enclave_proto::attest::encode_list(list),
+                    req.index,
+                    [0; 32],
+                ),
+                None => (Status::NotFound, Reply::Empty),
+            },
             (DirKind::Username, DirAction::Get) if req.index == 0 => {
                 self.lookup_username(&req, now)
             }
@@ -573,6 +595,7 @@ impl Server {
             DirKind::Bundle => self.accept_publication(&req.key, object, now),
             DirKind::Vault => self.accept_vault(&req.key, &req.proof, object),
             DirKind::Username => self.accept_username(&req.key, &req.proof, &object, now),
+            DirKind::Attest => self.accept_attestation(&req.key, object),
         };
         (status, Reply::Empty)
     }
@@ -670,6 +693,29 @@ impl Server {
         Status::Ok
     }
 
+    /// Keep a device attestation if a device the account has ever listed
+    /// signed it. At most 16 per account, newest last.
+    fn accept_attestation(&mut self, key: &[u8; 32], bytes: Vec<u8>) -> Status {
+        let Ok(a) = enclave_proto::attest::Attestation::decode(&bytes) else {
+            return Status::Malformed;
+        };
+        let signed = self.devices_seen.get(key).is_some_and(|seen| {
+            seen.iter()
+                .any(|s| s.id == a.device && a.verify_key(&s.root, &s.key))
+        });
+        if !signed {
+            return Status::Invalid;
+        }
+        let list = self.attestations.entry(*key).or_default();
+        if !list.contains(&bytes) {
+            list.push(bytes);
+            if list.len() > 16 {
+                list.remove(0);
+            }
+        }
+        Status::Ok
+    }
+
     fn accept_manifest(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {
         let Ok(sm) = SignedManifest::from_bytes(&bytes) else {
             return Status::Malformed;
@@ -687,6 +733,16 @@ impl Server {
             && m.version <= *v
         {
             return Status::Invalid;
+        }
+        let seen = self.devices_seen.entry(*key).or_default();
+        for d in &m.devices {
+            if !seen.iter().any(|s| s.id == d.id) && seen.len() < 256 {
+                seen.push(SeenDevice {
+                    root: m.root.0,
+                    id: d.id,
+                    key: d.signing.clone(),
+                });
+            }
         }
         self.manifests.insert(*key, (m.version, bytes));
         Status::Ok

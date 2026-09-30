@@ -15,7 +15,7 @@
 
 use super::{Client, ContactState, Event, session_key};
 use crate::persist::NS_SESSIONS;
-use crate::{CoreError, Result, content::Content, unix_now};
+use crate::{CoreError, Result, content::Content};
 use enclave_crypto::sig::RootPublic;
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{DirAction, DirKind, manifest_key};
@@ -31,7 +31,7 @@ impl Client {
         if *id == self.device.id || self.manifest.device(id).is_none() {
             return Err(CoreError::NotFound);
         }
-        let now = unix_now();
+        let now = self.now();
         let gone = *id;
         self.publish_manifest(|m| m.devices.retain(|d| d.id != gone), now)
             .await?;
@@ -114,10 +114,23 @@ impl Client {
             if m.version < announced {
                 continue;
             }
-            if root == own {
-                if m.version <= self.manifest.version {
-                    continue;
+            // Only changes a listed device co-signed, or past the 72-hour
+            // guard (`guard.rs`).
+            let old = if root == own {
+                self.manifest.clone()
+            } else {
+                match self.contacts.get(&root) {
+                    Some(c) => c.manifest.clone(),
+                    None => continue,
                 }
+            };
+            if m.version <= old.version
+                || self.judge(&root, &server, &old, &signed, &m, now).await?
+                    != super::guard::Judgement::Accept
+            {
+                continue;
+            }
+            if root == own {
                 self.set_manifest(m.clone(), &signed)?;
                 self.drop_sessions(&own, &m)?;
                 events.push(if m.device(&self.device.id).is_none() {
@@ -126,9 +139,6 @@ impl Client {
                     Event::DevicesChanged
                 });
             } else if let Some(mut c) = self.contacts.get(&root).cloned() {
-                if m.version <= c.manifest.version {
-                    continue;
-                }
                 c.manifest = m.clone();
                 self.drop_sessions(&root, &m)?;
                 self.contacts.insert(root, c.clone());

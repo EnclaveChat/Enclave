@@ -26,6 +26,7 @@ mod persist;
 mod rpc;
 
 pub use card::{ContactCard, LinkError};
+pub use client::RecoveryAlert;
 pub use client::{
     Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
     LinkProgress, LinkingDevice, Message, Options, Reaction,

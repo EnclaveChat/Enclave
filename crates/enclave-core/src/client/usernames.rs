@@ -10,7 +10,7 @@
 use super::Client;
 use crate::card::ContactCard;
 use crate::rpc::EFFORT_LADDER;
-use crate::{CoreError, Result, UsernameError, unix_now};
+use crate::{CoreError, Result, UsernameError};
 use enclave_kt::username::normalize;
 use enclave_kt::wire::{CTX_CLAIM, ROOT_LEN};
 use enclave_kt::{KtError, KtPolicy, LookupReply, UsernameClaim, verify_lookup};
@@ -56,7 +56,7 @@ impl Client {
             .ok_or(UsernameError::Unavailable)?;
         let name = normalize(name).map_err(|_| UsernameError::NotAllowed)?;
         let key = api::name_key(&name).ok_or(UsernameError::NotAllowed)?;
-        let now = unix_now();
+        let now = self.now();
         let mut value = self.account.root_public.0.to_vec();
         value.extend_from_slice(&self.card().encode());
         let msg = UsernameClaim::message(&self.profile.server, &name, &value, now);
@@ -118,7 +118,7 @@ impl Client {
         .ok_or(UsernameError::Unavailable)?;
         let name = normalize(&name).map_err(|_| UsernameError::NotAllowed)?;
         let key = api::name_key(&name).ok_or(UsernameError::NotAllowed)?;
-        let now = unix_now();
+        let now = self.now();
         let bytes = match self
             .rpc
             .dir_get(

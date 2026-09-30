@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod attest;
 pub mod bundle;
 pub mod codec;
 pub mod envelope;

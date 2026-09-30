@@ -186,6 +186,7 @@ fn fixture() -> Snapshot {
         can_join: false,
         join_code: String::new(),
         join_words: String::new(),
+        recovery_alert: String::new(),
     }
 }
 
@@ -388,6 +389,15 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Settings);
         shot("11-privacy", desktop);
         shot("11-privacy-phone", phone);
+        let mut alert = data.clone();
+        alert.recovery_alert = "3 Oct 14:02".into();
+        alert.current = None;
+        view::apply(&ui, &alert);
+        ui.set_sheet(Sheet::None);
+        ui.set_current_id("".into());
+        shot("19-recovery-alert-phone", phone);
+        view::apply(&ui, &data);
+        ui.set_sheet(Sheet::Settings);
         ui.set_sheet(Sheet::Recovery);
         shot("12-recovery", desktop);
         shot("12-recovery-phone", phone);

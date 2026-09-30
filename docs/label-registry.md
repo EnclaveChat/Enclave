@@ -64,6 +64,8 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/ctx/last-resort` | CTX-C | — | `bundle.rs` `LastResortPrekey::verify`, `PrekeyStore::publish` | Last-resort ML-KEM-1024 prekey |
 | `enclave/v1/ctx/signed-msg` | CTX-C | — | `labels.rs` only (`CTX_SIGNED_MESSAGE`); no call site yet | On-the-record message signature. Defined, not yet used: On-the-record message signatures are not implemented (`05-ratchet.md` §9). |
 | `enclave/v1/ctx/eqxdh-transcript` | CTX-C | — | `eqxdh.rs` `initiate`, `verify_transcript_sig` | On-the-record initiator transcript signature |
+| `enclave/v1/ctx/manifest-cosign` | CTX-C | — | `attest.rs` `Attestation::sign`, `verify` | A listed device approves a manifest update |
+| `enclave/v1/ctx/manifest-veto` | CTX-C | — | `attest.rs` `Attestation::sign`, `verify` | A listed device vetoes a manifest update |
 | `enclave/v1/eqxdh/identity` | KMAC | 256 | `eqxdh.rs` `stage1_key` (through `seal::derive_key`) | Stage-1 key `k_id` that seals the initiator identity |
 | `enclave/v1/ratchet/init-rk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial root key `RK0` from `SK` |
 | `enclave/v1/ratchet/init-hk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial header keys; two calls with inputs `frame("a")` (HKA) and `frame("b")` (NHKB) |

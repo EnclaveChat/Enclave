@@ -13,7 +13,7 @@
 use super::{Client, ContactState, Event};
 use crate::content::{Content, MAX_TEXT, MsgId};
 use crate::files::{self, Attachment};
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_crypto::rng::HedgedRng;
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
@@ -191,7 +191,7 @@ impl Client {
 
     /// Messages with `root`, oldest first. Expired messages are skipped.
     pub fn messages(&self, root: &[u8; 64]) -> Result<Vec<Message>> {
-        let now = unix_now();
+        let now = self.now();
         let mut rng = HedgedRng::new()?;
         let shred = Shredder::open(&self.store, &mut rng)?;
         let mut v: Vec<Message> = self
@@ -331,7 +331,7 @@ impl Client {
     /// Mark a conversation read: starts disappearing timers of their
     /// messages and sends read receipts (unless turned off in settings).
     pub async fn mark_read(&mut self, root: &[u8; 64]) -> Result<()> {
-        let now = unix_now();
+        let now = self.now();
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         c.unread = 0;
         let c = c.clone();
@@ -365,7 +365,7 @@ impl Client {
         if secs > crate::content::MAX_TIMER {
             return Err(CoreError::TooLong);
         }
-        let now = unix_now();
+        let now = self.now();
         self.send_content(root, &Content::Timer(secs), now).await?;
         self.send_self_copy(root, &Content::Timer(secs), now)
             .await?;
@@ -382,8 +382,8 @@ impl Client {
             target: m.id,
             emoji: emoji.to_string(),
         };
-        self.send_content(root, &content, unix_now()).await?;
-        self.send_self_copy(root, &content, unix_now()).await?;
+        self.send_content(root, &content, self.now()).await?;
+        self.send_self_copy(root, &content, self.now()).await?;
         m.reactions.retain(|r| !r.from_us);
         if !emoji.is_empty() {
             m.reactions.push(Reaction {
@@ -396,7 +396,7 @@ impl Client {
 
     /// Edit one of our messages (within 24 hours).
     pub async fn edit_message(&mut self, root: &[u8; 64], seq: u64, text: &str) -> Result<()> {
-        let now = unix_now();
+        let now = self.now();
         let mut m = self.get_message(root, seq)?;
         if !m.outgoing
             || m.deleted
@@ -423,8 +423,8 @@ impl Client {
             return Err(CoreError::NotAccepted);
         }
         let content = Content::Delete { target: m.id };
-        self.send_content(root, &content, unix_now()).await?;
-        self.send_self_copy(root, &content, unix_now()).await?;
+        self.send_content(root, &content, self.now()).await?;
+        self.send_self_copy(root, &content, self.now()).await?;
         wipe(&mut m);
         self.put_message(root, &m)
     }
@@ -447,7 +447,7 @@ impl Client {
             return Err(CoreError::NotAccepted);
         }
         let timer = c.timer;
-        let now = unix_now();
+        let now = self.now();
         let host = self.profile.server;
         let (att, chunks) = files::seal_file(data, name, mime, host, &mut self.rng)?;
         for (id, chunk) in &chunks {
@@ -484,7 +484,7 @@ impl Client {
         if let Some(b) = self.store.get(NS_FILES, &att.hash[..32])? {
             return Ok(b);
         }
-        let now = unix_now();
+        let now = self.now();
         let mut parts = Vec::with_capacity(att.chunks as usize);
         for i in 0..att.chunks {
             let chunk = self

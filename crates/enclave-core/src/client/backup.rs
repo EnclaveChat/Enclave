@@ -10,7 +10,7 @@
 use super::{Client, Options};
 use crate::persist::{self, NS_CONTACTS, NS_ISSUERS, NS_PROFILE, NS_SECRETS, Profile};
 use crate::rpc::Rpc;
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::RootPublic;
 use enclave_net::transport::Transport;
@@ -71,7 +71,7 @@ impl Client {
         opts: Options,
         transport: Arc<dyn Transport>,
     ) -> Result<Self> {
-        let now = unix_now();
+        let now = transport.now();
         let mut rng = HedgedRng::new()?;
         let rs = RecoverySecret::from_words(words)?;
         let pw = opts
@@ -176,6 +176,7 @@ impl Client {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            recovery_alert: None,
         };
         // Fresh token issuers: the old counters may have been used after the
         // backup was taken.

@@ -46,6 +46,8 @@ fn proto(d: &[u8]) {
     let _ = ratchet::Session::import(d);
     let _ = group::GroupState::decode(d);
     let _ = group::Group::import(d);
+    let _ = attest::Attestation::decode(d);
+    let _ = attest::decode_list(d);
     let _ = recovery::RecoverySecret::from_words(&String::from_utf8_lossy(d));
 }
 

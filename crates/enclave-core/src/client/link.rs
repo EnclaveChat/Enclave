@@ -22,7 +22,7 @@ use crate::content::{Content, Token};
 use crate::files::{self, Attachment};
 use crate::persist::{NS_PROFILE, NS_SECRETS, Profile};
 use crate::rpc::Rpc;
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_crypto::hash::sha3_512;
 use enclave_crypto::kem::{
     MLKEM_CT_LEN, MLKEM_PK_LEN, MlKemCiphertext, MlKemPublic, MlKemSecret, Suite, X448_LEN,
@@ -255,7 +255,7 @@ impl LinkingDevice {
         server: ServerId,
     ) -> Result<Self> {
         let mut rng = HedgedRng::new()?;
-        let now = unix_now();
+        let now = transport.now();
         let device = DeviceKeys::generate(&mut rng)?;
         let (x, xp) = X448Secret::generate(&mut rng)?;
         let (k, kp) = MlKemSecret::generate(&mut rng)?;
@@ -295,7 +295,7 @@ impl LinkingDevice {
 
     /// Check the mailbox.
     pub async fn poll(&mut self) -> Result<LinkProgress> {
-        let now = unix_now();
+        let now = self.rpc.now();
         for p in read(
             &mut self.rpc,
             &self.code,
@@ -340,7 +340,7 @@ impl LinkingDevice {
 
     /// Install the account and connect to every contact.
     pub async fn finish(mut self) -> Result<Client> {
-        let now = unix_now();
+        let now = self.rpc.now();
         let att = self.package.clone().ok_or(CoreError::NotFound)?;
         let mut parts = Vec::with_capacity(att.chunks as usize);
         for i in 0..att.chunks {
@@ -438,6 +438,7 @@ impl LinkingDevice {
             kt: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
+            recovery_alert: None,
         };
         let own = client.card();
         for (card, name, verified, timer, inbox, server, tokens) in contacts {
@@ -544,7 +545,7 @@ impl Client {
             return Err(CoreError::TooLong);
         }
         let code = LinkCode::from_link(link)?;
-        let now = unix_now();
+        let now = self.now();
         let mut cursor = 0;
         let offer = read(&mut self.rpc, &code, &mut cursor, now, &mut self.rng)
             .await?
@@ -605,7 +606,7 @@ impl Client {
         if choice != offer.correct {
             return Err(CoreError::Crypto);
         }
-        let now = unix_now();
+        let now = self.now();
         // New manifest with the device.
         let entry = offer.entry.clone();
         let signed = self
@@ -691,6 +692,9 @@ impl Client {
         m.expires_at = now + MAX_VALIDITY_SECS;
         change(&mut m);
         let signed = m.sign(&self.account, &mut self.rng)?;
+        // Co-signed by this device (listed in the current manifest), so
+        // contacts take it at once rather than after the 72-hour guard.
+        self.cosign_own(&signed, m.version, now).await?;
         let root = self.account.root_public.0;
         self.rpc
             .dir_put(

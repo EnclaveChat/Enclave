@@ -500,6 +500,25 @@ impl Engine {
                 }
                 self.busy = false;
             }
+            Cmd::StopRecovery | Cmd::ApproveRecovery => {
+                let stop = cmd == Cmd::StopRecovery;
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    let r = if stop {
+                        c.stop_recovery().await
+                    } else {
+                        c.approve_recovery().await
+                    };
+                    self.status = match (r, stop) {
+                        (Ok(()), true) => "Stopped. Your contacts won't accept that device. Choose new recovery words soon: whoever used them still has them.".into(),
+                        (Ok(()), false) => "Approved. Your contacts will accept your new device now.".into(),
+                        (Err(CoreError::Net(_)), _) => "Couldn't reach your server. Try again now — this matters.".into(),
+                        (Err(_), _) => "Couldn't do that. Try again.".into(),
+                    };
+                }
+                self.busy = false;
+            }
             Cmd::SendHistory(hex) => {
                 self.busy = true;
                 self.push();
@@ -775,6 +794,17 @@ impl Engine {
         s.my_name = c.name().to_string();
         s.my_link = c.card().to_link();
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
+        s.recovery_alert = c
+            .recovery_alert()
+            .map(|a| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(a.until as i64, 0)
+                    .single()
+                    .map(|t| t.format("%-d %b %H:%M").to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
         if self.reveal_words {
             s.recovery_words = c.recovery_words().unwrap_or_default();
         }

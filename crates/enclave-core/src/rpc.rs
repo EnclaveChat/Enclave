@@ -33,6 +33,11 @@ impl Rpc {
         }
     }
 
+    /// Current time, from the transport (simulations move it).
+    pub fn now(&self) -> u64 {
+        self.transport.now()
+    }
+
     async fn key(&mut self, server: &ServerId, now: u64) -> Result<ServerKey> {
         let today = (now / 86_400) as u32;
         if let Some(k) = self.keys.get(server)

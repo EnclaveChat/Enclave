@@ -12,6 +12,10 @@ pub const CTX_LAST_RESORT: &str = "enclave/v1/ctx/last-resort";
 pub const CTX_SIGNED_MESSAGE: &str = "enclave/v1/ctx/signed-msg";
 /// Composite-signature context for the initiator's transcript signature.
 pub const CTX_EQXDH_TRANSCRIPT: &str = "enclave/v1/ctx/eqxdh-transcript";
+/// Composite-signature context for a device approving a manifest change.
+pub const CTX_MANIFEST_COSIGN: &str = "enclave/v1/ctx/manifest-cosign";
+/// Composite-signature context for a device vetoing a manifest change.
+pub const CTX_MANIFEST_VETO: &str = "enclave/v1/ctx/manifest-veto";
 
 /// EQXDH stage-1 key that seals the initiator's identity.
 pub const EQXDH_IDENTITY: &str = "enclave/v1/eqxdh/identity";

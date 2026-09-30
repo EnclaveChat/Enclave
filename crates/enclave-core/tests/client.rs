@@ -607,7 +607,12 @@ async fn restore_from_backup_on_a_new_device() {
         history.contains(&"remember this".to_string()) && history.contains(&"I will".to_string())
     );
 
-    // Ben's client accepts the new device silently and sends it fresh tokens.
+    // No device co-signed the restore, so Ben's client holds the new device's
+    // greeting for 72 hours (someone else might hold the words).
+    let ev = b.sync().await.unwrap();
+    assert!(ev.is_empty(), "{ev:?}");
+    net.advance(enclave_proto::attest::RECOVERY_WAIT_SECS + 1);
+    // Then it accepts the new device silently and sends it fresh tokens.
     let ev = b.sync().await.unwrap();
     assert!(ev.iter().all(|e| !matches!(e, Event::Request { .. })));
     a.sync().await.unwrap();
@@ -741,4 +746,106 @@ async fn usernames_through_key_transparency() {
         carol.find_username("bob@two.test").await,
         Err(CoreError::Username(UsernameError::Unverified))
     ));
+}
+
+/// Someone restores Ada's account from her words while her devices still
+/// exist: her devices are told, contacts hold the change, and a veto from any
+/// of her devices stops it for good. A restore her device approves is
+/// accepted at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_without_a_device_waits_and_can_be_vetoed() {
+    use enclave_proto::attest::RECOVERY_WAIT_SECS;
+    let net = network();
+    let (mut a, words) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    let archive = a.export_backup().unwrap();
+
+    // Someone with the words and a backup restores the account elsewhere.
+    let mut thief = Client::restore(&words.join(" "), &archive, memory(), Arc::new(net.clone()))
+        .await
+        .unwrap();
+    assert!(b.sync().await.unwrap().is_empty(), "held, not accepted");
+
+    // Ada's phone notices within ten minutes and she stops it.
+    net.advance(601);
+    let ev = a.sync().await.unwrap();
+    let Some(Event::RecoveryPending { until }) = ev
+        .iter()
+        .find(|e| matches!(e, Event::RecoveryPending { .. }))
+        .cloned()
+    else {
+        panic!("no alert: {ev:?}")
+    };
+    assert!(until > net.now());
+    assert!(a.recovery_alert().is_some());
+    a.stop_recovery().await.unwrap();
+    assert!(a.recovery_alert().is_none());
+
+    // Three days later Ben still refuses the thief's device, and Ada's phone
+    // still talks to Ben.
+    net.advance(RECOVERY_WAIT_SECS + 601);
+    let ev = b.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .all(|e| !matches!(e, Event::Message { .. } | Event::Request { .. })),
+        "{ev:?}"
+    );
+    let _ = thief.send_text(&b.root(), "it's me, really").await;
+    a.send_text(&b.root(), "ignore any new device of mine")
+        .await
+        .unwrap();
+    let texts: Vec<String> = b
+        .sync()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Message { message, .. } => Some(message.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["ignore any new device of mine"]);
+    drop(thief);
+
+    // Later Ada really does restore onto a new phone, and approves it from
+    // her old one: Ben accepts it without waiting.
+    let archive = a.export_backup().unwrap();
+    let mut a_new = Client::restore(&words.join(" "), &archive, memory(), Arc::new(net.clone()))
+        .await
+        .unwrap();
+    net.advance(601);
+    let ev = a.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::RecoveryPending { .. })),
+        "{ev:?}"
+    );
+    a.approve_recovery().await.unwrap();
+    net.advance(601);
+    let ev = b.sync().await.unwrap();
+    assert!(
+        ev.iter().all(|e| !matches!(e, Event::Request { .. })),
+        "{ev:?}"
+    );
+    a_new.sync().await.unwrap();
+    a_new
+        .send_text(&b.root(), "new phone, same me")
+        .await
+        .unwrap();
+    let ev = b.sync().await.unwrap();
+    assert!(
+        ev.iter().any(
+            |e| matches!(e, Event::Message { message, .. } if message.text == "new phone, same me")
+        ),
+        "{ev:?}"
+    );
+    // The approving phone learns it was replaced.
+    net.advance(601);
+    let ev = a.sync().await.unwrap();
+    assert!(ev.contains(&Event::RemovedFromAccount), "{ev:?}");
 }

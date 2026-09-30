@@ -122,6 +122,42 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let t = tx.clone();
+    ui.on_claim_username(move |name| {
+        let _ = t.send(Cmd::ClaimUsername(name.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_remove_device(move |id| {
+        let _ = t.send(Cmd::RemoveDevice(id.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_send_history(move |id| {
+        let _ = t.send(Cmd::SendHistory(id.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_stop_recovery(move || {
+        let _ = t.send(Cmd::StopRecovery);
+    });
+    let t = tx.clone();
+    ui.on_approve_recovery(move || {
+        let _ = t.send(Cmd::ApproveRecovery);
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_start_join(move || {
+        if let Some(ui) = w.upgrade() {
+            ui.set_screen(Screen::Join);
+        }
+        let _ = t.send(Cmd::StartJoin);
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_cancel_join(move || {
+        if let Some(ui) = w.upgrade() {
+            ui.set_screen(Screen::Welcome);
+        }
+        let _ = t.send(Cmd::CancelJoin);
+    });
+    let t = tx.clone();
     ui.on_sheet_changed(move |s| {
         let _ = t.send(Cmd::RevealWords(s == Sheet::Recovery));
     });

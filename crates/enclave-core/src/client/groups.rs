@@ -12,7 +12,7 @@
 use super::{Client, ContactState, Event, sanitize_name};
 use crate::card::ContactCard;
 use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_TEXT};
-use crate::{CoreError, Result, unix_now};
+use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
 use enclave_proto::group::{
@@ -280,7 +280,7 @@ impl Client {
         {
             return Err(CoreError::TooLong);
         }
-        let now = unix_now();
+        let now = self.now();
         let me = self.account.root_public.0;
         let mut cards = BTreeMap::from([(me, self.card())]);
         for r in members {
@@ -345,7 +345,7 @@ impl Client {
         if text.len() > MAX_TEXT {
             return Err(CoreError::TooLong);
         }
-        let now = unix_now();
+        let now = self.now();
         {
             let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
             if e.left {
@@ -384,7 +384,7 @@ impl Client {
     /// Remove a member (admins only): a new epoch the removed member never
     /// learns, then a state update in it.
     pub async fn remove_group_member(&mut self, gid: &[u8; 32], root: &[u8; 64]) -> Result<()> {
-        let now = unix_now();
+        let now = self.now();
         let (next, removed) = {
             let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
             let idx = e.group.state.index_of(root).ok_or(CoreError::NotFound)?;
@@ -415,7 +415,7 @@ impl Client {
 
     /// Leave a group.
     pub async fn leave_group(&mut self, gid: &[u8; 32]) -> Result<()> {
-        let now = unix_now();
+        let now = self.now();
         let me = self.account.root_public.0;
         let next = {
             let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;

@@ -58,6 +58,7 @@ fn snapshot() -> Snapshot {
         can_join: true,
         join_code: "enclave:link#q".into(),
         join_words: "x y z".into(),
+        recovery_alert: "3 Oct 14:02".into(),
     }
 }
 
@@ -82,6 +83,8 @@ fn cmds() -> Vec<Cmd> {
         Cmd::CancelJoin,
         Cmd::RevealWords(true),
         Cmd::SendHistory("00ff".into()),
+        Cmd::StopRecovery,
+        Cmd::ApproveRecovery,
     ]
 }
 

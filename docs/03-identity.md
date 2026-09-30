@@ -72,9 +72,9 @@ hash(signed) = SHA3-512(signed)                     # the next manifest's prev_h
 
 34,365 B for one device and a 32 B locator; 51,365 B for five devices (PLAN: "about 52 KB").
 
-### 3.3 Manifest update cosignatures (not yet implemented)
+### 3.3 Manifest update cosignatures
 
-The M0 draft publishes each update with a cosignature by a device listed in the previous manifest (`enclave/v1/proto/veto`, decision 0x01 approve) and treats an update without one as a 72 h pending action (§8.1). None of this is in code.
+Every manifest update the primary makes (linking, removing a device) is co-signed by the primary's device key, which the previous manifest lists; an update without such a co-signature is held for 72 h (§8.1). Implemented as `enclave_proto::attest` (§8.1, "Implementation").
 
 ### 3.4 Validation
 
@@ -142,7 +142,7 @@ The rendezvous mailbox accepts writes and reads authorized by `link_cap` (`02b-k
 - **Handover.** The primary signs and publishes manifest `version + 1` (with `prev_hash`), then uploads the account as a sealed blob: profile, shared account keys, the signed manifest, and every accepted contact's card, name, checked state, timer, inbox and **half of its write tokens** (tokens are single use, so each device needs its own). The blob reference travels sealed under `link-keys`.
 - **After linking.** The new device publishes its prekeys and opens sessions with every contact's devices (contacts accept them silently: the device is in the root-signed manifest) and with the account's other devices. Every message sent from one device is copied to the others (`Content::SelfCopy`) through the shared account inbox.
 - **History transfer** (`client/history.rs`): not part of the link. The device holding the root sends history to a linked device 24 h after it was added (checked on every `sync`), or at once when the person taps "Send history now" on that device. History is one sealed file in our server's blob store (`files::seal_file`, bucket-padded chunks) whose reference goes to our devices as `Content::History` (kind 14). It holds every 1:1 conversation's messages except disappearing and deleted ones: `u8(1) ‖ u32(n) ‖ n × (root (64) ‖ u32(m) ‖ m × bytes(message record))`. A receiver merges it into conversations with contacts it knows, skipping message ids it already has, and renumbers each conversation by time. Sending is recorded per device, so it happens once; a repeat adds nothing. Group history is not sent.
-- **Not implemented:** the "both devices confirm" shortcut (only the root device can skip the delay), the 7-day "new device" banner, automatic removal of inactive devices, the 72 h pending-root veto, group membership for the new device, and contacts without a card (from before cards were exchanged) are not handed over.
+- **Not implemented:** the "both devices confirm" shortcut (only the root device can skip the delay), the 7-day "new device" banner, automatic removal of inactive devices, group membership for the new device, and contacts without a card (from before cards were exchanged) are not handed over.
 
 ## 5. Revocation and "Secure my account"
 
@@ -239,6 +239,15 @@ Rules:
 - Contacts' clients MUST NOT accept a pending manifest before `not_before`, and MUST NOT accept it at all if a valid veto exists. Contacts' clients check for a veto when they fetch the manifest after `not_before`.
 - Every device of the account shows a persistent alert while a pending action exists: "Someone is setting up your account on a new device. If this isn't you, tap Stop."
 - After a successful recovery, contacts see "Sam set up a new device". The security code does not change.
+
+**Implementation** (`enclave_proto::attest`, `client/guard.rs`; differs from the draft above where noted):
+
+- An **attestation** is `u8(verdict) ‖ u64(version) ‖ manifest_hash (64) ‖ device (16) ‖ u32 len ‖ signature`, where `verdict` is 1 co-sign or 2 veto and the signature is `CompositeSign(device_sk, ctx, root_pk (64) ‖ u64(version) ‖ manifest_hash)` with ctx `enclave/v1/ctx/manifest-cosign` or `enclave/v1/ctx/manifest-veto`. It counts only if the device is listed in the manifest the judge currently holds for that account.
+- Attestations live in the directory (`DirKind::Attest`, keyed like the manifest). The server keeps at most 16 per account and stores one only if its signature verifies against a device that some manifest of the account has listed, so strangers can't fill the slot. The primary uploads its co-signature **before** the manifest, so no contact ever sees the update unsigned.
+- **The wait is counted from when each contact first saw the update**, not from a `not_before` in a root-signed record: whoever signs with the root chooses every time in the manifest, and there is no trusted (witnessed) time yet. The first sighting is stored per account (`version ‖ hash ‖ first_seen`).
+- A contact that receives a greeting whose sender's manifest is held keeps the envelope and re-runs it every 10 minutes and when the wait ends; if the update is vetoed, the greeting is dropped. The `refresh` after a `Devices` notice applies the same rule.
+- Our own devices fetch our manifest every 10 minutes. A newer version that no listed device co-signed raises `Event::RecoveryPending { until }` and a persistent card ("Someone is setting up your account on another device… Stop it / It's me"). **Stop it** signs a veto, publishes it, and also sends it as `Content::Veto` (kind 15) to every contact and our devices, so a server that withholds it doesn't win. **It's me** signs a co-signature, and contacts accept the update on their next look.
+- Not implemented: posting pending records and vetoes to KT, the recovering device's own "One of your other devices stopped this change" notice, and refusing to send from a device whose update is still held (its messages are lost until contacts accept it).
 
 ### 8.2 Migration (recovery words compromised)
 

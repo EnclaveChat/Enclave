@@ -98,6 +98,9 @@ pub enum DirKind {
     /// Username claims (put, keyed by the name) and key-transparency lookups
     /// (get: index 0 keyed by the name, later chunks by the returned reply id).
     Username = 4,
+    /// Device attestations about an account's manifest changes (co-sign or
+    /// veto), keyed like the manifest.
+    Attest = 5,
 }
 
 /// Directory action.
@@ -156,6 +159,7 @@ impl DirRequest {
             2 => DirKind::Bundle,
             3 => DirKind::Vault,
             4 => DirKind::Username,
+            5 => DirKind::Attest,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {
