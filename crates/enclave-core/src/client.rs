@@ -108,6 +108,7 @@ mod messages;
 mod polls;
 mod push;
 mod search;
+mod social;
 mod usernames;
 
 pub use gossip::{GossipItem, KtAlert};
@@ -119,6 +120,7 @@ pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
 pub use polls::{MAX_OPTIONS, PollView};
 pub use search::{Hit, Place};
+pub use social::{MAX_HOLDERS, words_from_shares};
 pub use usernames::AUDIT_EVERY_SECS;
 
 /// Something the UI should show.
@@ -163,6 +165,11 @@ pub enum Event {
     DevicesChanged,
     /// Message history from our other device was added.
     HistoryImported,
+    /// A contact gave us part of their recovery to keep.
+    RecoveryShareReceived {
+        /// Whose.
+        root: [u8; 64],
+    },
     /// A vote arrived or a poll closed.
     PollChanged {
         /// The group.
@@ -1427,6 +1434,11 @@ impl Client {
             Content::KtHead(b) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 self.on_kt_head(&root, &b);
+            }
+            Content::RecoveryShare(share) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                self.keep_recovery_share(&root, &share)?;
+                events.push(Event::RecoveryShareReceived { root });
             }
             Content::GroupWelcome(welcome) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);

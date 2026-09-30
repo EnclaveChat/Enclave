@@ -177,6 +177,18 @@ pub struct Snapshot {
     pub kt_split: String,
     /// Names of groups we asked to join that haven't let us in yet.
     pub joining: Vec<String>,
+    /// Why restoring failed.
+    pub restore_error: String,
+    /// Accepted contacts who could hold a share of our recovery.
+    pub friends: Vec<Pick>,
+    /// Who holds a share of our recovery, and how many are needed.
+    pub share_holders: Vec<String>,
+    /// Shares needed to rebuild our recovery (0: none given).
+    pub share_threshold: u32,
+    /// We hold part of the open contact's recovery.
+    pub holds_share: bool,
+    /// The share we hold for the open contact: only while shown.
+    pub shown_share: String,
     /// Members of the open group (other than us).
     pub members: Vec<Row>,
     /// We are an admin of the open group.
@@ -285,6 +297,15 @@ pub enum Cmd {
     Vote(String, u64, u32),
     /// Close our poll at a group message: group, position.
     ClosePoll(String, u64),
+    /// Export an encrypted backup; it comes back as [`Out::File`].
+    SaveBackup,
+    /// Restore on this new device: the recovery words (one item) or
+    /// friends' shares (one per item), and the backup file.
+    Restore(Vec<String>, Vec<u8>),
+    /// Split our recovery among these contacts; this many are needed.
+    GiveShares(Vec<String>, u32),
+    /// Show the recovery share we hold for this contact (empty id: hide it).
+    RevealShare(String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -464,7 +485,19 @@ impl Snapshot {
         put_rows(&mut w, &self.search);
         w.str(&self.username_problem)
             .str(&self.kt_split)
-            .strs(&self.joining);
+            .strs(&self.joining)
+            .str(&self.restore_error);
+        w.len(self.friends.len());
+        for p in self.friends.iter().take(crate::codec::MAX_ITEMS) {
+            w.str(&p.id)
+                .str(&p.name)
+                .u8((p.tint % TINT_COUNT) as u8)
+                .bool(p.selected);
+        }
+        w.strs(&self.share_holders)
+            .u32(self.share_threshold)
+            .bool(self.holds_share)
+            .str(&self.shown_share);
         put_rows(&mut w, &self.members);
         w.bool(self.group_admin);
         w.len(self.addable.len());
@@ -582,6 +615,24 @@ impl Snapshot {
             username_problem: r.str()?,
             kt_split: r.str()?,
             joining: r.strs()?,
+            restore_error: r.str()?,
+            friends: {
+                let n = r.len()?;
+                (0..n)
+                    .map(|_| {
+                        Ok(Pick {
+                            id: r.str()?,
+                            name: r.str()?,
+                            tint: usize::from(r.u8()?) % TINT_COUNT,
+                            selected: r.bool()?,
+                        })
+                    })
+                    .collect::<Result<_>>()?
+            },
+            share_holders: r.strs()?,
+            share_threshold: r.u32()?,
+            holds_share: r.bool()?,
+            shown_share: r.str()?,
             members: get_rows(&mut r)?,
             group_admin: r.bool()?,
             addable: {
@@ -655,6 +706,10 @@ impl Cmd {
             Cmd::CreatePoll(g, q, o) => w.u8(41).str(g).str(q).strs(o),
             Cmd::Vote(g, s, c) => w.u8(42).str(g).u64(*s).u32(*c),
             Cmd::ClosePoll(g, s) => w.u8(43).str(g).u64(*s),
+            Cmd::SaveBackup => w.u8(44),
+            Cmd::Restore(s, b) => w.u8(45).strs(s).bytes(b),
+            Cmd::GiveShares(ids, t) => w.u8(46).strs(ids).u32(*t),
+            Cmd::RevealShare(id) => w.u8(47).str(id),
         };
         w.0
     }
@@ -706,6 +761,10 @@ impl Cmd {
             41 => Cmd::CreatePoll(r.str()?, r.str()?, r.strs()?),
             42 => Cmd::Vote(r.str()?, r.u64()?, r.u32()?),
             43 => Cmd::ClosePoll(r.str()?, r.u64()?),
+            44 => Cmd::SaveBackup,
+            45 => Cmd::Restore(r.strs()?, r.bytes()?),
+            46 => Cmd::GiveShares(r.strs()?, r.u32()?),
+            47 => Cmd::RevealShare(r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

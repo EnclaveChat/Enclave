@@ -123,6 +123,9 @@ pub enum Content {
     /// A device of the sender vetoes a change to the sender's account
     /// (an encoded `Attestation`).
     Veto(Vec<u8>),
+    /// A share of the sender's recovery secret for us to keep (SLIP-0039
+    /// words; `docs/03-identity.md` §8.3).
+    RecoveryShare(String),
     /// Our signed key-transparency head for an epoch where the sender's
     /// gossip disagreed, as a sealed file reference (RT-04).
     KtHead(Vec<u8>),
@@ -151,6 +154,9 @@ const K_DEVICES: u8 = 13;
 const K_HISTORY: u8 = 14;
 const K_VETO: u8 = 15;
 const K_KT_HEAD: u8 = 16;
+const K_RECOVERY_SHARE: u8 = 17;
+/// Longest recovery share (33 words of at most 8 letters).
+pub const MAX_RECOVERY_SHARE: usize = 512;
 /// Largest content a self-copy can wrap.
 pub const MAX_SELF_COPY: usize = 9_000;
 
@@ -311,6 +317,12 @@ impl Content {
                 }
                 w.u8(K_VETO).bytes(a);
             }
+            Content::RecoveryShare(s) => {
+                if s.len() > MAX_RECOVERY_SHARE {
+                    return too_large;
+                }
+                w.u8(K_RECOVERY_SHARE).bytes(s.as_bytes());
+            }
             Content::KtHead(att) => {
                 if att.len() > MAX_ATTACHMENT_REF {
                     return too_large;
@@ -391,6 +403,7 @@ impl Content {
             K_HISTORY => Content::History(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
+            K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
             K_SELF_COPY => {
                 let to = r.array()?;
                 let content = r.bytes(MAX_SELF_COPY)?.to_vec();

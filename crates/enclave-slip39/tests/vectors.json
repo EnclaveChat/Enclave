@@ -1,0 +1,124 @@
+[
+ {
+  "group_threshold": 1,
+  "groups": [
+   [
+    3,
+    5
+   ]
+  ],
+  "master": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "passphrase": "",
+  "extendable": true,
+  "iteration_exponent": 1,
+  "mnemonics": [
+   [
+    "academic aquatic academic acne academic leaves again biology garlic safari amount corner public advance aspect dream acrobat emerald benefit extra failure lizard branch graduate parcel season camera item vanish always desktop rapids injury",
+    "academic aquatic academic agree amount justice chemical diet vexed painting endorse general source zero marathon invasion scout angel lair index jewelry various energy package stay platform flame square script axle eclipse secret purchase",
+    "academic aquatic academic amazing apart gesture hesitate library drift august usual bundle zero obtain drift float wildlife havoc afraid smart package pipeline cubic tracks bulge speak hospital military iris literary facility lawsuit minister",
+    "academic aquatic academic arcade aircraft news evaluate parking pitch herald rich family ordinary guard rich beyond earth client hospital uncover recall taste index busy glen review climate earth elite ordinary client august filter",
+    "academic aquatic academic axle agree medal election racism bundle geology genuine junk depend genuine system clinic lunch orbit devote budget belong amount hospital believe vegan modify estate hand average hazard pickup remove purple"
+   ]
+  ]
+ },
+ {
+  "group_threshold": 1,
+  "groups": [
+   [
+    3,
+    5
+   ]
+  ],
+  "master": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+  "passphrase": "",
+  "extendable": false,
+  "iteration_exponent": 0,
+  "mnemonics": [
+   [
+    "academic aluminum academic acne academic leaves again biology garlic safari amount corner public advance aspect dream acrobat emerald benefit extra failure lizard branch graduate parcel season camera item vanish always cultural dictate float",
+    "academic aluminum academic agree ajar airport identify spit closet flea yelp cover learn pajamas decent element bike rich quiet eyebrow mild declare wireless ladybug painting believe valuable rebuild raspy slap prisoner coal explain",
+    "academic aluminum academic amazing agency traffic relate market justice column pipeline mixed glen yoga calcium skin amazing axis downtown rhythm decrease reunion arena syndrome category laden husband photo jump disaster twice emphasis graduate",
+    "academic aluminum academic arcade actress hobo sister exchange duckling review fumes modify fangs freshman check quiet building trip obtain rich vampire analysis unkind scared change pink oral hamster duckling work guitar filter include",
+    "academic aluminum academic axle again fangs chemical vegan spill medical best starting have loyalty magazine exclude ceiling ivory mother total income pipeline dismiss loan remove veteran episode artwork legend slow shelter junk bike"
+   ]
+  ]
+ },
+ {
+  "group_threshold": 1,
+  "groups": [
+   [
+    1,
+    1
+   ]
+  ],
+  "master": "000102030405060708090a0b0c0d0e0f",
+  "passphrase": "TREZOR",
+  "extendable": true,
+  "iteration_exponent": 0,
+  "mnemonics": [
+   [
+    "academic apart academic academic alive goat mouse junk level museum obesity scandal wildlife crunch bulge island library mayor numb increase"
+   ]
+  ]
+ },
+ {
+  "group_threshold": 2,
+  "groups": [
+   [
+    2,
+    3
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    3,
+    5
+   ]
+  ],
+  "master": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+  "passphrase": "pass",
+  "extendable": true,
+  "iteration_exponent": 2,
+  "mnemonics": [
+   [
+    "academic arcade acrobat leaf advocate spider best location chew coastal glimpse equation victim symbolic voice shelter salt capture tadpole spray density tackle dragon employer junior inform burden scared peaceful ruler activity length maximum",
+    "academic arcade acrobat lily argue smirk patrol tolerate phrase woman angry hospital founder luxury type elder loud manager geology stilt involve herd screw duration twin vexed eclipse lend curious guest type scared have",
+    "academic arcade acrobat lungs average chest hawk craft crazy mobile pulse advocate animal recall ruler subject wavy desert rhyme sister remember wolf subject superior transfer insect primary example carbon blanket safari detect union"
+   ],
+   [
+    "academic arcade beard leader again crowd main moment glasses pancake satisfy gesture exotic senior greatest nylon have agency flexible client ladybug endorse trash scholar fatal bundle sympathy award mule else universe home kitchen"
+   ],
+   [
+    "academic arcade ceramic learn advocate medal dramatic video theory smoking editor amount desert beaver endless camera lips famous evaluate decision spill moisture extra emphasis clinic spine finance fluff inmate body smirk twice quiet",
+    "academic arcade ceramic lips afraid curly herald lunar damage diet focus else warmth ladle plan usual exercise payroll dryer camera boring entrance resident rich adorn traveler diploma eclipse join ultimate wrote short evoke",
+    "academic arcade ceramic luxury ancestor dominant fraction again both carbon paces artwork window execute view puny declare hairy smug eraser envy thank switch snapshot withdraw guest satoshi fumes orange steady kitchen recover smear",
+    "academic arcade ceramic march ancient negative answer invasion style warmth lunar ecology diminish chest budget froth wine nervous physics grill making disease diet crisis superior favorite parking engage metric chew excuse numb debut",
+    "academic arcade ceramic method already year saver duckling guard budget include install smug priority watch museum cowboy freshman papa vegan taste health eraser class helpful together decision decorate lily inside jury unhappy stick"
+   ]
+  ]
+ },
+ {
+  "group_threshold": 1,
+  "groups": [
+   [
+    5,
+    5
+   ]
+  ],
+  "master": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "passphrase": "",
+  "extendable": true,
+  "iteration_exponent": 1,
+  "mnemonics": [
+   [
+    "academic aquatic academic acrobat academic leaves again biology garlic safari amount corner public advance aspect dream acrobat emerald benefit extra failure lizard branch graduate parcel season camera item vanish always beyond jury scandal",
+    "academic aquatic academic aircraft adequate lying clay mortgage gesture short cover pistol python answer cylinder retreat adult exact depart snapshot fantasy math disaster thumb peanut smear drink watch veteran axis lips trouble lunch",
+    "academic aquatic academic amount again metric email blanket graduate solution episode cover railroad best exercise drove aircraft fiber fantasy failure finance much flexible gray petition staff friendly jewelry visitor brave ounce reject memory",
+    "academic aquatic academic argue aircraft fawn filter elite total says scout liquid wrote debris chemical wavy emphasis cradle orange burden ruler plunge total bundle lunch preach living beaver husband lobe mandate cage agree",
+    "academic aquatic academic beard actress endless darkness pickup species squeeze burden document curly benefit rebound peasant lips eclipse axis venture finance makeup rumor mailman percent trash acrobat smug sweater peanut device decent silent"
+   ]
+  ]
+ }
+]

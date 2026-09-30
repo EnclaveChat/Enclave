@@ -30,7 +30,7 @@ pub use client::{
     Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
     LinkProgress, LinkingDevice, Message, Options, Reaction,
 };
-pub use client::{Hit, MeetMatch, Place, RecoveryAlert};
+pub use client::{Hit, MeetMatch, Place, RecoveryAlert, words_from_shares};
 pub use enclave_kt::KtPolicy;
 
 use enclave_rpc::api::Status;

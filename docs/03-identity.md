@@ -274,6 +274,15 @@ Rules:
 - A holder releases a share only after an in-person mutual scan (§7.1) with the recovering person and an explicit confirmation ("Sam asked for your recovery share. Only continue if you're with Sam right now.").
 - The reconstructed `rs` leads to a pending root action (§8.1): 72 h wait, all devices notified, veto possible.
 
+**As implemented** (`enclave-slip39`, `client/social.rs`):
+
+- `enclave-slip39` is a port of the SLIP-0039 reference (`shamir-mnemonic` 0.3, MIT; word list and license in `LICENSES/`): Feistel encryption of the master secret with PBKDF2-HMAC-SHA256, two-level GF(256) Shamir with the HMAC digest share, 10-bit words and the RS1024 checksum. Its tests replay vectors the reference produced from a deterministic byte stream and must reproduce the **same words**, including two-level groups, a passphrase and the non-extendable variant; they also check that too few, too many, mistyped or mixed shares are refused.
+- `give_recovery_shares(holders, threshold)` splits `rs` (one group, extendable, iteration exponent 1) and sends each accepted contact its share as `Content::RecoveryShare` (kind 17). Holders keep it in their sealed store (`Event::RecoveryShareReceived`). The app chooses 3–5 friends with `⌊n/2⌋ + 1` needed.
+- **Release differs from the spec**: there is no in-person scan and confirmation step yet. The holder's conversation shows "You hold part of Sam's recovery" and **Show it** reveals the words on their screen (they cross to the UI process only while shown), with the instruction to show them only to Sam, in person.
+- The new device's **Restore** screen takes the 24 words *or* the friends' shares, plus the backup file (read by the UI, not the vault); `words_from_shares` rebuilds the words and the ordinary restore follows, so the 72-hour guard applies. Settings has **Save a backup** (an encrypted file in Downloads).
+- Test `social_recovery`: 2 of 3 shares rebuild the exact words, one share is not enough, and the restored account has the same root.
+- Not done: the in-person release step, changing the recovery words when a holder should lose their share (a new split keeps old shares valid), and server-blob backups.
+
 ### 8.4 Lost words and all devices, no social recovery
 
 The account cannot be recovered. The user creates a new identity. Onboarding says so plainly: "If you lose your recovery words and all your devices, you'll need to start a new account."

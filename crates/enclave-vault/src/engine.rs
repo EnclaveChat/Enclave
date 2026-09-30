@@ -151,6 +151,9 @@ struct Engine {
     meet_name: String,
     meet_error: String,
     meet_done: String,
+    restore_error: String,
+    /// The contact whose recovery share is on screen (only while shown).
+    reveal_share: Option<[u8; 64]>,
     out: mpsc::UnboundedSender<Out>,
 }
 
@@ -404,6 +407,8 @@ pub async fn run_with(
         meet_name: String::new(),
         meet_error: String::new(),
         meet_done: String::new(),
+        restore_error: String::new(),
+        reveal_share: None,
         out,
     };
     // Reopen an existing profile.
@@ -566,6 +571,95 @@ impl Engine {
                     }
                     Err(err) => self.status = format!("Couldn't set up your address: {err}"),
                 }
+            }
+            Cmd::SaveBackup => {
+                if let Some(c) = self.client.as_mut() {
+                    match c.export_backup() {
+                        Ok(b) if b.len() <= 15 * 1024 * 1024 => {
+                            let day = chrono::Local::now().format("%Y-%m-%d");
+                            let _ = self
+                                .out
+                                .send(Out::File(format!("Enclave backup {day}.enclave"), b));
+                        }
+                        Ok(_) => {
+                            self.status = "Your backup is too large to save from here yet.".into()
+                        }
+                        Err(_) => self.status = "Couldn't make a backup.".into(),
+                    }
+                }
+            }
+            Cmd::Restore(secrets, archive) if self.client.is_none() => {
+                self.restore_error.clear();
+                self.busy = true;
+                self.push();
+                let secrets: Vec<&str> = secrets
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let words = if secrets.len() == 1 {
+                    Ok(secrets[0].to_string())
+                } else {
+                    enclave_core::words_from_shares(&secrets)
+                };
+                let restored = match words {
+                    Ok(w) => {
+                        Client::restore(
+                            &w,
+                            &archive,
+                            self.options(None),
+                            Arc::clone(&self.transport),
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                match restored {
+                    Ok(mut c) => {
+                        if let Some(p) = self.kt.clone() {
+                            c.set_kt_policy(p);
+                        }
+                        self.client = Some(c);
+                        self.status = "Your account is back on this device. Contacts will accept it after 72 hours unless one of your other devices stops it.".into();
+                    }
+                    Err(_) => {
+                        self.restore_error = if secrets.len() > 1 {
+                            "Those shares don't fit together, or there aren't enough of them. Check each one, or ask one more friend.".into()
+                        } else {
+                            "The recovery words or the backup file don't match. Check the words, and that the file is your Enclave backup.".into()
+                        };
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::Restore(..) => {}
+            Cmd::GiveShares(ids, threshold) => {
+                self.busy = true;
+                self.push();
+                let roots: Vec<[u8; 64]> = ids.iter().filter_map(|i| self.root_of(i)).collect();
+                if let Some(c) = self.client.as_mut() {
+                    let t = u8::try_from(threshold).unwrap_or(u8::MAX);
+                    match c.give_recovery_shares(&roots, t).await {
+                        Ok(()) => {
+                            self.picked.clear();
+                            self.status = format!(
+                                "Your recovery is shared. Any {t} of these {} people can help you get your account back.",
+                                roots.len()
+                            );
+                        }
+                        Err(_) => {
+                            self.status = "Couldn't share your recovery. Choose at least two people you talk to, and check your connection.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::RevealShare(id) => {
+                self.reveal_share = if id.is_empty() {
+                    None
+                } else {
+                    self.root_of(&id)
+                };
             }
             Cmd::Select(id) => {
                 self.selected = self.root_of(&id);
@@ -1322,6 +1416,7 @@ impl Engine {
             meet_name: self.meet_name.clone(),
             meet_error: self.meet_error.clone(),
             meet_done: self.meet_done.clone(),
+            restore_error: self.restore_error.clone(),
             busy: self.busy,
             ..Default::default()
         };
@@ -1361,6 +1456,36 @@ impl Engine {
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.joining = c.joining().into_iter().map(|(_, n)| n).collect();
+        s.friends = c
+            .contacts()
+            .into_iter()
+            .filter(|ct| ct.state == ContactState::Accepted)
+            .map(|ct| Pick {
+                id: hex_id(&ct.root),
+                name: ct.name.clone(),
+                tint: tint_for(&ct.root),
+                selected: self.picked.contains(&ct.root),
+            })
+            .collect();
+        if let Some((t, holders)) = c.recovery_holders() {
+            s.share_threshold = u32::from(t);
+            s.share_holders = holders
+                .iter()
+                .map(|r| {
+                    c.contact(r)
+                        .map(|ct| ct.name.clone())
+                        .unwrap_or_else(|| "Someone".into())
+                })
+                .collect();
+        }
+        if let Some(sel) = self.selected {
+            s.holds_share = c.holds_recovery_share(&sel);
+            if self.reveal_share == Some(sel)
+                && let Some(share) = c.recovery_share_for(&sel)
+            {
+                s.shown_share = share.to_string();
+            }
+        }
         s.kt_split = c
             .kt_alert()
             .map(|a| {

@@ -253,6 +253,8 @@ export component Field inherits Rectangle {
     border-width: input.has-focus ? Tokens.icon-focus-ring-width : 1px;
     border-color: input.has-focus ? Tokens.focus-ring : Tokens.text-muted;
     background: Tokens.surface;
+    // Long text scrolls inside the field instead of spilling past it.
+    clip: true;
     accessible-role: text-input;
     accessible-label: root.placeholder;
     accessible-value: root.text;

@@ -205,6 +205,12 @@ fn fixture() -> Snapshot {
         username_problem: String::new(),
         kt_split: String::new(),
         joining: Vec::new(),
+        restore_error: String::new(),
+        friends: Vec::new(),
+        share_holders: Vec::new(),
+        share_threshold: 0,
+        holds_share: false,
+        shown_share: String::new(),
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
@@ -546,6 +552,58 @@ fn main() -> Result<(), slint::PlatformError> {
         split.kt_split = "enclave.example".into();
         view::apply(&ui, &split);
         shot("28-kt-split-phone", phone);
+
+        // Recovery with friends: choosing, holding, restoring.
+        let mut friends = data.clone();
+        friends.friends = vec![
+            Pick {
+                id: "a1".into(),
+                name: "Sam Okafor".into(),
+                tint: 0,
+                selected: true,
+            },
+            Pick {
+                id: "a2".into(),
+                name: "Priya Raman".into(),
+                tint: 1,
+                selected: true,
+            },
+            Pick {
+                id: "a3".into(),
+                name: "Lucía Fernández".into(),
+                tint: 2,
+                selected: true,
+            },
+            Pick {
+                id: "a4".into(),
+                name: "Tomasz".into(),
+                tint: 3,
+                selected: false,
+            },
+        ];
+        view::apply(&ui, &friends);
+        ui.set_sheet(Sheet::Friends);
+        shot("32-friends-phone", phone);
+        let mut holder = data.clone();
+        holder.holds_share = true;
+        view::apply(&ui, &holder);
+        ui.set_sheet(Sheet::None);
+        shot("33-holds-share", desktop);
+        holder.shown_share = "academic acid acrobat romp academic hunting clay dream luck fumes bishop order ancestor lunar beard evoke aluminum cinema legs roster spider laser alarm spirit parcel bulb sidewalk".into();
+        view::apply(&ui, &holder);
+        ui.set_sheet(Sheet::Share);
+        shot("34-show-share-phone", phone);
+        ui.set_sheet(Sheet::None);
+        view::apply(&ui, &Snapshot::default());
+        ui.set_screen(Screen::Restore);
+        ui.set_restore_s1(
+            "academic acid acrobat romp academic hunting clay dream luck fumes".into(),
+        );
+        ui.set_restore_file("/home/robin/Downloads/Enclave backup 2026-09-12.enclave".into());
+        shot("35-restore-phone", phone);
+        ui.set_restore_s1("".into());
+        ui.set_restore_file("".into());
+        view::apply(&ui, &data);
         let mut meet = data.clone();
         meet.meet_code = "enclave:meet#AQCDAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4_QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1-f4A".into();
         view::apply(&ui, &meet);

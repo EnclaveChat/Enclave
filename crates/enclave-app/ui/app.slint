@@ -75,8 +75,8 @@ export struct MessageRow {
     poll-ours: bool,
 }
 
-export enum Screen { welcome, name, setting-up, join, locked, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll }
+export enum Screen { welcome, name, setting-up, join, locked, main, restore }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -423,6 +423,24 @@ export component AppWindow inherits Window {
     in property <string> username-problem;
     in property <string> kt-split;
     in property <string> joining;
+    in property <string> restore-error;
+    in property <[PickRow]> friends;
+    in property <int> friends-chosen;
+    in property <[string]> share-holders;
+    in property <int> share-threshold;
+    in property <bool> holds-share;
+    in property <string> shown-share;
+    in-out property <string> restore-words;
+    in-out property <string> restore-s1;
+    in-out property <string> restore-s2;
+    in-out property <string> restore-s3;
+    in-out property <string> restore-s4;
+    in-out property <string> restore-s5;
+    in-out property <string> restore-file;
+    callback restore(string, string, string, string, string, string, string);
+    callback save-backup();
+    callback give-shares(int);
+    callback reveal-share(string);
     callback new-group-invite(string);
     callback stop-recovery();
     callback meet-scan(string);
@@ -516,6 +534,52 @@ export component AppWindow inherits Window {
                     spacing: Tokens.space-s;
                     PrimaryButton { text: "Get started"; clicked => { root.get-started(); } }
                     if root.can-join: QuietButton { text: "I already have Enclave"; clicked => { root.start-join(); } }
+                }
+                if root.can-join: HorizontalLayout {
+                    alignment: start;
+                    QuietButton { text: "Restore from a backup"; clicked => { root.screen = Screen.restore; } }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- restore
+    if root.screen == Screen.restore: Flickable {
+        VerticalLayout {
+            alignment: start;
+            padding: Tokens.space-l;
+            HorizontalLayout {
+                alignment: center;
+                VerticalLayout {
+                    width: min(480px, root.width - 2 * Tokens.space-l);
+                    spacing: Tokens.space-m;
+                    ScreenTitle { text: "Bring your account back"; }
+                    Secondary { text: "You need your backup file, and either your 24 recovery words or enough shares from the friends who hold them."; }
+                    Field { placeholder: "Your 24 recovery words"; mono: true; text <=> root.restore-words; }
+                    Caption { text: "Or paste the shares your friends showed you, one in each box:"; wrap: word-wrap; }
+                    Field { placeholder: "Share 1"; mono: true; text <=> root.restore-s1; }
+                    Field { placeholder: "Share 2"; mono: true; text <=> root.restore-s2; }
+                    Field { placeholder: "Share 3 (if needed)"; mono: true; text <=> root.restore-s3; }
+                    Field { placeholder: "Share 4 (if needed)"; mono: true; text <=> root.restore-s4; }
+                    Field { placeholder: "Share 5 (if needed)"; mono: true; text <=> root.restore-s5; }
+                    Field { placeholder: "Path to your backup file"; mono: true; text <=> root.restore-file; }
+                    if root.restore-error != "": Text {
+                        text: root.restore-error;
+                        color: Tokens.danger;
+                        font-size: Tokens.type-secondary;
+                        wrap: word-wrap;
+                    }
+                    Secondary { text: "Your contacts accept this device after 72 hours, unless one of your other devices stops it. That wait protects you if someone else has your words."; }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: Tokens.space-s;
+                        PrimaryButton {
+                            text: root.busy ? "Restoring…" : "Restore";
+                            enabled: root.restore-file != "" && (root.restore-words != "" || (root.restore-s1 != "" && root.restore-s2 != "")) && !root.busy;
+                            clicked => { root.restore(root.restore-words, root.restore-s1, root.restore-s2, root.restore-s3, root.restore-s4, root.restore-s5, root.restore-file); }
+                        }
+                        QuietButton { text: "Back"; clicked => { root.screen = Screen.welcome; } }
+                    }
                 }
             }
         }
@@ -991,6 +1055,19 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                if root.holds-share && root.current.kind == 0 && root.current.state == 2: HorizontalLayout {
+                    padding-left: Tokens.space-m;
+                    padding-right: Tokens.space-m;
+                    Notice {
+                        title: "You hold part of " + root.current.name + "'s recovery";
+                        text: "If they lose every device, meet them and show it. Only to them, and only in person.";
+                        kind: 0;
+                        HorizontalLayout {
+                            alignment: start;
+                            QuietButton { text: "Show it"; clicked => { root.reveal-share(root.current-id); root.open-sheet(Sheet.share); } }
+                        }
+                    }
+                }
                 if root.current.state == 2 && root.file-note != "": Caption {
                     text: root.file-note;
                     horizontal-alignment: center;
@@ -1442,6 +1519,67 @@ export component AppWindow inherits Window {
             spacing: Tokens.space-s;
             QuietButton { text: "Lock now"; outlined: true; clicked => { root.sheet = Sheet.none; root.lock-now(); } }
             QuietButton { text: "Remove passphrase"; danger: true; clicked => { root.set-passphrase(""); } }
+        }
+        Body { text: "Backup"; font-weight: 600; }
+        Secondary { text: "An encrypted copy of your contacts and messages, saved to your Downloads. Only your recovery words open it."; }
+        HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Save a backup"; outlined: true; clicked => { root.save-backup(); } }
+        }
+        Body { text: "Recovery with friends"; font-weight: 600; }
+        Secondary {
+            text: root.share-threshold > 0
+                ? "Any " + root.share-threshold + " of the " + root.share-holders.length + " people you chose can help you get your account back if you lose your words and every device. None of them can do it alone."
+                : "Give a few people you trust each a share of your recovery. If you lose your words and every device, meeting enough of them gets your account back. None of them can do it alone.";
+        }
+        HorizontalLayout {
+            alignment: start;
+            QuietButton { text: root.share-threshold > 0 ? "Choose again" : "Choose friends"; outlined: true; clicked => { root.open-sheet(Sheet.friends); } }
+        }
+    }
+
+    if root.sheet == Sheet.friends: SheetFrame {
+        property <int> chosen: root.friends-chosen;
+        title: "Recovery with friends";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Choose 3 to 5 people you trust and can meet. Each gets a share by message; they only show it to you in person."; }
+        for p in root.friends: Rectangle {
+            height: 56px;
+            border-radius: Tokens.radius-control;
+            background: p.selected ? Tokens.bubble-in : transparent;
+            accessible-role: checkbox;
+            accessible-checked: p.selected;
+            accessible-label: p.name;
+            accessible-action-default => { root.toggle-pick(p.id); }
+            TouchArea { clicked => { root.toggle-pick(p.id); } }
+            HorizontalLayout {
+                padding-left: Tokens.space-s;
+                padding-right: Tokens.space-s;
+                spacing: Tokens.space-sm;
+                VerticalLayout { alignment: center; Avatar { initials: p.initials; tint: p.tint; size: 36px; } }
+                Body { text: p.name; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                Text { text: p.selected ? "Chosen" : ""; font-size: Tokens.type-caption; color: Tokens.pine; vertical-alignment: center; }
+            }
+        }
+        if root.friends.length < 2: Secondary { text: "You need at least two conversations with people you trust first."; }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Sharing…" : (chosen >= 2 ? "Share with " + chosen + " (" + (floor(chosen / 2) + 1) + " needed)" : "Share");
+                enabled: chosen >= 2 && !root.busy;
+                clicked => { root.give-shares(floor(chosen / 2) + 1); root.sheet = Sheet.none; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.share: SheetFrame {
+        title: "Part of " + root.current.name + "'s recovery";
+        close => { root.reveal-share(""); root.sheet = Sheet.none; }
+        Secondary { text: "Show this only to " + root.current.name + ", in person. Anyone who collects enough of these can take over their account."; }
+        Code { text: root.shown-share; }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton { text: "Done"; clicked => { root.reveal-share(""); root.sheet = Sheet.none; } }
         }
     }
 

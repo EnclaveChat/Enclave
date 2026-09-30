@@ -1372,3 +1372,60 @@ async fn push_wakes() {
     net.advance(3 * enclave_server::PUSH_WINDOW_SECS);
     assert!(due(&net).is_empty());
 }
+
+/// Social recovery (03 §8.3): Ada splits her recovery among three
+/// contacts, two of whom can rebuild it. After she loses everything, two
+/// shares give back her recovery words, and with her backup she restores.
+#[tokio::test(flavor = "multi_thread")]
+async fn social_recovery() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Ben", S2), ("Cy", S1), ("Dee", S2)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap(),
+        );
+    }
+    let words = cs[0].1.join(" ");
+    let [mut ada, mut ben, mut cy, mut dee] =
+        <[Client; 4]>::try_from(cs.into_iter().map(|c| c.0).collect::<Vec<_>>())
+            .ok()
+            .unwrap();
+    for other in [&mut ben, &mut cy, &mut dee] {
+        connect(&mut ada, other).await;
+    }
+    let holders = [ben.root(), cy.root(), dee.root()];
+    assert!(
+        ada.give_recovery_shares(&holders, 4).await.is_err(),
+        "threshold over count"
+    );
+    ada.give_recovery_shares(&holders, 2).await.unwrap();
+    assert_eq!(ada.recovery_holders(), Some((2, holders.to_vec())));
+    for h in [&mut ben, &mut cy, &mut dee] {
+        let ev = h.sync().await.unwrap();
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, Event::RecoveryShareReceived { .. }))
+        );
+        assert!(h.holds_recovery_share(&ada.root()));
+    }
+    assert!(!ben.holds_recovery_share(&cy.root()));
+    let archive = ada.export_backup().unwrap();
+    let root = ada.root();
+    drop(ada);
+
+    // In person, Ben and Dee each show Ada their share.
+    let b = ben.recovery_share_for(&root).unwrap();
+    let d = dee.recovery_share_for(&root).unwrap();
+    assert!(
+        enclave_core::words_from_shares(&[b.as_str()]).is_err(),
+        "one isn't enough"
+    );
+    let rebuilt = enclave_core::words_from_shares(&[b.as_str(), d.as_str()]).unwrap();
+    assert_eq!(rebuilt, words);
+    let restored = Client::restore(&rebuilt, &archive, memory(), Arc::new(net.clone()))
+        .await
+        .unwrap();
+    assert_eq!(restored.root(), root);
+}

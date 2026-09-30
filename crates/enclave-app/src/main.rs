@@ -149,6 +149,58 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::NewInvite(1));
     });
     let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_restore(move |words, s1, s2, s3, s4, s5, path| {
+        // The backup is read here, in the UI process: the vault never
+        // touches the person's files.
+        let archive = match std::fs::read(path.trim()) {
+            Ok(b) if b.len() as u64 <= MAX_FILE => b,
+            Ok(_) => {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_restore_error("That file is too large to be an Enclave backup.".into());
+                }
+                return;
+            }
+            Err(e) => {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_restore_error(format!("Couldn't open that file: {e}").into());
+                }
+                return;
+            }
+        };
+        let secrets: Vec<String> = if words.trim().is_empty() {
+            [s1, s2, s3, s4, s5]
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            vec![words.trim().to_string()]
+        };
+        let _ = t.send(Cmd::Restore(secrets, archive));
+    });
+    let t = tx.clone();
+    ui.on_save_backup(move || {
+        let _ = t.send(Cmd::SaveBackup);
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_give_shares(move |threshold| {
+        let Some(ui) = w.upgrade() else { return };
+        use slint::Model;
+        let ids: Vec<String> = ui
+            .get_friends()
+            .iter()
+            .filter(|p| p.selected)
+            .map(|p| p.id.to_string())
+            .collect();
+        let _ = t.send(Cmd::GiveShares(ids, u32::try_from(threshold).unwrap_or(2)));
+    });
+    let t = tx.clone();
+    ui.on_reveal_share(move |id| {
+        let _ = t.send(Cmd::RevealShare(id.to_string()));
+    });
+    let t = tx.clone();
     ui.on_create_poll(move |id, q, a, b, c, d| {
         let options = [a, b, c, d]
             .iter()

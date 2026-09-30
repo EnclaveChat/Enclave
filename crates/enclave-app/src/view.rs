@@ -230,6 +230,15 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_username_problem(s.username_problem.clone().into());
     ui.set_kt_split(s.kt_split.clone().into());
     ui.set_joining(s.joining.join(", ").into());
+    ui.set_restore_error(s.restore_error.clone().into());
+    ui.set_friends(ModelRc::from(Rc::new(VecModel::from(
+        s.friends.iter().map(pick_row).collect::<Vec<_>>(),
+    ))));
+    ui.set_friends_chosen(s.friends.iter().filter(|p| p.selected).count() as i32);
+    ui.set_share_holders(strings(&s.share_holders));
+    ui.set_share_threshold(s.share_threshold as i32);
+    ui.set_holds_share(s.holds_share);
+    ui.set_shown_share(s.shown_share.clone().into());
     ui.set_unlock_error(s.unlock_error.clone().into());
     ui.set_can_lock(s.can_lock);
     ui.set_invites(s.invites as i32);
