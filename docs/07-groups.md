@@ -1,6 +1,6 @@
 # Groups (up to 100 members)
 
-Status: Draft (M0) · Normative
+Status: Implemented in `enclave-proto::group` (M7) · Normative
 
 Source: PLAN.md §7 (D6). Crate: `enclave-proto` (MAC vectors, exporter rekey, frontier). Derivations: `02b-key-schedule.md` §8. Layouts: `08-envelope.md` §7 (message unit) and §8 (rekey unit). There is no MLS.
 
@@ -191,9 +191,21 @@ A poll close carries `tally_hash = H512(E("enclave/v1/proto/poll-tally-hash") �
 | Rekey entry not found in bucket or next | Ask the sender after 60 s |
 | Group exceeds 100 members | Refuse the add with "Groups can have up to 100 people." |
 
+## Implementation notes (M7)
+
+`crates/enclave-proto/src/group.rs`, tests in `crates/enclave-proto/tests/group.rs`. Where this section and the text above differ, this section describes the code.
+
+1. **Stable member indices.** Removing a member leaves a tombstone slot (`active = false`) that a later joiner can reuse. Indices never shift, so MAC-vector positions computed from the sender's state stay valid while an update is in flight.
+2. **Exporter key.** `K_exp` is derived from the pairwise session's PQ root history instead of retained DR root snapshots (open question 3): the sender uses the newest root of the recipient's sending direction (`Session::export_for_peer`), and the recipient looks up the same root by its epoch in its own history of 16 (`Session::export_from_peer`). Every root comes from ML-KEM-1024 steps seeded by the handshake, so the key is post-quantum and heals with each PQ round trip. The entry carries the epoch as a `u32`.
+3. **Header protection** (resolves `08-envelope.md` I-14). The sender identity, state hash and causal frontier are encrypted under a KMAC256 keystream keyed by the epoch's header key and a per-unit 32 B nonce. The MAC vector (over `unit[0..920] ‖ unit[2504..]`) authenticates them. The server sees only the epoch number and the unit kind.
+4. **Rekey units.** Layout: clear header 16 (kind Group, subkind 1, bucket, announce epoch) ‖ nonce 32 ‖ encrypted sender 40 (member, device, generation, flags, target epoch) ‖ common blob 192 (sealed under `kb`, AD = header with the bucket byte zeroed) ‖ 174 × 80 B entries ‖ random padding. Entries are shuffled within each bucket.
+5. **New epochs.** A rotation that starts an epoch is announced under the previous epoch, which current members hold; a removed member can read the header but finds no entry. A joiner never gets the previous epoch: its welcome (sent pairwise) carries the state, the new epoch secret, and the welcoming admin's current chain seed and MAC key for the joiner.
+6. **Own-account messages** are marked `own_account` and not MAC-checked (there is no entry for the sender's own account); the client shows them only after own-device sync confirms them.
+7. **Not implemented yet:** the pre-rekey `ForcePQStep` (§5.2), On-the-record signatures, polls, invite links and join requests, hosting moves, and group persistence in `enclave-core`.
+
 ## Open questions
 
 1. Own-device messages are not covered by the MAC vector (§3). The fix chosen here (confirm through own-device sync) delays display of one's own messages sent from another device by up to 60 s. An alternative is to reserve one MAC-vector entry for the sender's own account, which requires 100 entries (1,600 B) and changes the group envelope budget.
 2. In Off-the-record groups PLAN §7 says poll closes are "signed by the poll's creator". A signature would make the creator's poll results non-deniable, so this spec uses the MAC vector there and a signature only in On-the-record groups.
-3. The exporter key uses retained root-key snapshots (§5.3). A dedicated exporter chain per pair would avoid retaining superseded root keys; to be decided with the M7 formal model.
+3. Resolved in M7: the exporter uses the PQ root history, which is already retained (implementation note 2). The formal model must still confirm it.
 4. Group-scoped request capabilities (§9) are a new object not named in PLAN; they let a joiner reach members without PoW. Their abuse limits (per group, per day) need to be set.

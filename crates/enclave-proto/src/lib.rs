@@ -7,6 +7,7 @@ pub mod codec;
 pub mod envelope;
 pub mod eqxdh;
 pub mod error;
+pub mod group;
 pub mod identity;
 pub mod labels;
 pub mod manifest;

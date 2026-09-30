@@ -69,6 +69,41 @@ pub const ALL: &[&str] = &[
     BOND_SEAL_WORDS,
 ];
 
+/// Group: exporter key from a pairwise session.
+pub const GRP_EXPORT: &str = "enclave/v1/proto/grp-export";
+/// Group: sender chain step.
+pub const GRP_CHAIN: &str = "enclave/v1/proto/grp-chain";
+/// Group: MAC-vector entry.
+pub const GRP_MAC: &str = "enclave/v1/proto/grp-mac";
+/// Group: MAC-vector entry of an admin state update.
+pub const GRP_ADMIN_MAC: &str = "enclave/v1/proto/grp-admin-mac";
+/// Group: routing-header keystream.
+pub const GRP_HEADER: &str = "enclave/v1/proto/grp-header";
+/// Group: bucket key.
+pub const GRP_BUCKET: &str = "enclave/v1/proto/grp-bucket";
+/// Group: bucket index of a device.
+pub const GRP_BUCKET_INDEX: &str = "enclave/v1/proto/grp-bucket-index";
+/// Group: rekey entry pad.
+pub const GRP_REKEY_PAD: &str = "enclave/v1/proto/grp-rekey-pad";
+/// Group: rekey entry check value.
+pub const GRP_REKEY_CHECK: &str = "enclave/v1/proto/grp-rekey-check";
+/// Group: state hash chain.
+pub const GRP_STATE: &str = "enclave/v1/proto/grp-state";
+/// Group: message identifier.
+pub const GRP_MSG_ID: &str = "enclave/v1/proto/grp-msg-id";
+/// Group: mailbox address for a day.
+pub const NET_GRP_MAILBOX: &str = "enclave/v1/net/grp-mailbox";
+/// Group: rekey bucket mailbox for a day.
+pub const NET_GRP_REKEY_MAILBOX: &str = "enclave/v1/net/grp-rekey-mailbox";
+/// Group: write key.
+pub const NET_GRP_WRITE_KEY: &str = "enclave/v1/net/grp-write-key";
+/// Group: write token for a mailbox address.
+pub const NET_GRP_WRITE_TOKEN: &str = "enclave/v1/net/grp-write-token";
+/// Group: read key.
+pub const NET_GRP_READ_KEY: &str = "enclave/v1/net/grp-read-key";
+/// Group: read credential for a mailbox address.
+pub const NET_GRP_READ_CRED: &str = "enclave/v1/net/grp-read-cred";
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -1,0 +1,1251 @@
+//! Groups of up to 100 members (`docs/07-groups.md`).
+//!
+//! * Each member device sends on a **sender chain**. Chain seeds and MAC keys
+//!   are distributed by a **rekey broadcast**: always exactly three units, one
+//!   per bucket, each entry wrapped under a key exported from the pairwise
+//!   Lockstep session with that recipient device. No MLS.
+//! * Every message carries a **MAC vector**: one 16-byte tag per other member
+//!   account, always 99 entries. Insiders cannot forge each other's messages
+//!   and no signature proves authorship to outsiders (deniable, post-quantum).
+//! * Every message carries the sender's **state hash** and **causal frontier**
+//!   so forks and withheld messages show up. Both, and the sender's identity,
+//!   travel encrypted under the epoch's header key, authenticated by the MAC
+//!   vector; the server sees only the epoch number.
+//!
+//! Group envelope (14,336 B, offsets from `enclave_wire::group`):
+//!
+//! ```text
+//!   0  16  clear: version, kind=Group, subkind 0, 0, epoch u32, 0^8
+//!  16  32  nonce
+//!  48  40  enc: member, device, generation, flags, counter u32, 0^32
+//!  88  32  enc: state hash
+//! 120 800  enc: causal frontier (100 × 8)
+//! 920 1584 MAC vector (99 × 16) over H512(unit[0..920] ‖ unit[2504..])
+//! 2504 1024 capsule (random)
+//! 3528 ... body: EnclaveSeal(gmk, AD = unit[0..920], padded content)
+//! ```
+
+use crate::codec::{Reader, Writer};
+use crate::error::{ProtoError, Result};
+use crate::labels;
+use crate::ratchet::Session;
+use enclave_crypto::hash::sha3_512_parts;
+use enclave_crypto::kmac::{Kmac256, kmac256, kmac256_parts};
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::seal::{self, SealKey};
+use enclave_wire::{ENVELOPE_LEN, EnvelopeKind, group as off, pad_content, unpad_content};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
+
+/// Maximum member accounts.
+pub const MAX_MEMBERS: usize = 100;
+/// MAC-vector entries (every member but the sender).
+pub const MAC_ENTRIES: usize = MAX_MEMBERS - 1;
+/// Rekey units per rotation.
+pub const BUCKETS: usize = 3;
+/// Entries per rekey unit.
+pub const ENTRIES_PER_BUCKET: usize = 174;
+/// Rekey entry size.
+pub const ENTRY_LEN: usize = 80;
+/// A sender rotates after this many messages in one generation.
+pub const ROTATE_AFTER_MESSAGES: u32 = 200;
+/// ... or after this long.
+pub const ROTATE_AFTER_SECS: u64 = 86_400;
+/// Skipped group message keys kept per sender device and generation.
+pub const MAX_SKIP: u32 = 1000;
+/// Message flag: this message is a state update (admin MAC label).
+pub const FLAG_STATE_UPDATE: u8 = 0x01;
+/// Rekey flag: the rotation starts a new epoch.
+const REKEY_NEW_EPOCH: u8 = 0x01;
+
+const VERSION: u8 = 1;
+const SUB_MESSAGE: u8 = 0;
+const SUB_REKEY: u8 = 1;
+const NONCE: usize = 16;
+const ENC: usize = 48;
+const SENDER_ENC_LEN: usize = 40;
+const COMMON: usize = 88;
+const COMMON_PT_LEN: usize = 128;
+const COMMON_LEN: usize = COMMON_PT_LEN + seal::OVERHEAD;
+const ENTRIES: usize = COMMON + COMMON_LEN;
+const _: () = assert!(ENTRIES + ENTRIES_PER_BUCKET * ENTRY_LEN <= ENVELOPE_LEN);
+const _: () = assert!(off::MACS == 920 && off::CAPSULE == 2504);
+const _: () = assert!(BUCKETS * ENTRIES_PER_BUCKET >= MAX_MEMBERS * crate::manifest::MAX_DEVICES);
+
+/// Identifier of one group message (8 bytes).
+pub type MsgId = [u8; 8];
+
+type Key = [u8; 32];
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// A member slot. Indices never shift: someone who leaves or is removed
+/// leaves a tombstone (`active = false`) that a later joiner may reuse, so
+/// MAC-vector positions stay valid while an update is in flight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// Root public key.
+    pub root: [u8; 64],
+    /// Admin.
+    pub admin: bool,
+    /// When they joined (for last-admin promotion).
+    pub joined: u64,
+    /// Still a member.
+    pub active: bool,
+}
+
+impl Member {
+    /// A new active member.
+    pub fn new(root: [u8; 64], admin: bool, joined: u64) -> Self {
+        Self {
+            root,
+            admin,
+            joined,
+            active: true,
+        }
+    }
+}
+
+/// Group state. Every version names its parent, so versions form a hash chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupState {
+    /// Random group identifier.
+    pub group_id: [u8; 32],
+    /// Epoch this state belongs to.
+    pub epoch: u32,
+    /// Hash of the previous state (zero for the first).
+    pub parent: [u8; 32],
+    /// Name.
+    pub name: String,
+    /// Server hosting the group mailbox.
+    pub host: [u8; 16],
+    /// Only admins can send.
+    pub admins_only: bool,
+    /// Members; a member's index is its position.
+    pub members: Vec<Member>,
+}
+
+impl GroupState {
+    /// Canonical encoding.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1)
+            .fixed(&self.group_id)
+            .u32(self.epoch)
+            .fixed(&self.parent);
+        w.bytes(self.name.as_bytes())
+            .fixed(&self.host)
+            .u8(u8::from(self.admins_only));
+        w.u8(self.members.len() as u8);
+        for m in &self.members {
+            w.fixed(&m.root)
+                .u8(u8::from(m.admin))
+                .u64(m.joined)
+                .u8(u8::from(m.active));
+        }
+        w.finish()
+    }
+
+    /// Strict decoding.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let group_id = r.array()?;
+        let epoch = r.u32()?;
+        let parent = r.array()?;
+        let name = String::from_utf8(r.bytes(256)?.to_vec()).map_err(|_| ProtoError::Decode)?;
+        let host = r.array()?;
+        let admins_only = r.u8()? == 1;
+        let n = r.u8()? as usize;
+        if n == 0 || n > MAX_MEMBERS {
+            return Err(ProtoError::Decode);
+        }
+        let mut members = Vec::with_capacity(n);
+        for _ in 0..n {
+            members.push(Member {
+                root: r.array()?,
+                admin: r.u8()? == 1,
+                joined: r.u64()?,
+                active: r.u8()? == 1,
+            });
+        }
+        r.end()?;
+        let s = Self {
+            group_id,
+            epoch,
+            parent,
+            name,
+            host,
+            admins_only,
+            members,
+        };
+        s.check()?;
+        Ok(s)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.members.is_empty() || self.members.len() > MAX_MEMBERS {
+            return Err(ProtoError::Limit);
+        }
+        let active: Vec<&[u8; 64]> = self
+            .members
+            .iter()
+            .filter(|m| m.active)
+            .map(|m| &m.root)
+            .collect();
+        let unique: HashSet<&[u8; 64]> = active.iter().copied().collect();
+        if active.is_empty() || unique.len() != active.len() {
+            return Err(ProtoError::Decode);
+        }
+        Ok(())
+    }
+
+    /// `state_hash = KMAC256(group_id, encode(state), "grp-state")`; the
+    /// encoding includes the parent hash, so this chains.
+    pub fn hash(&self) -> [u8; 32] {
+        kmac256(&self.group_id, &self.encode(), labels::GRP_STATE)
+    }
+
+    /// Index of an active member.
+    pub fn index_of(&self, root: &[u8; 64]) -> Option<u8> {
+        self.members
+            .iter()
+            .position(|m| m.active && &m.root == root)
+            .map(|i| i as u8)
+    }
+
+    /// Active members with their indices.
+    pub fn active(&self) -> impl Iterator<Item = (u8, &Member)> {
+        self.members
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.active)
+            .map(|(i, m)| (i as u8, m))
+    }
+
+    /// Add a member, reusing a tombstone slot if there is one.
+    pub fn add(&mut self, root: [u8; 64], admin: bool, joined: u64) -> Result<u8> {
+        if self.index_of(&root).is_some() {
+            return Err(ProtoError::Decode);
+        }
+        if let Some(i) = self.members.iter().position(|m| !m.active) {
+            self.members[i] = Member::new(root, admin, joined);
+            return Ok(i as u8);
+        }
+        if self.members.len() >= MAX_MEMBERS {
+            return Err(ProtoError::Limit);
+        }
+        self.members.push(Member::new(root, admin, joined));
+        Ok((self.members.len() - 1) as u8)
+    }
+
+    /// Remove (tombstone) a member.
+    pub fn remove(&mut self, index: u8) {
+        if let Some(m) = self.members.get_mut(index as usize) {
+            m.active = false;
+            m.admin = false;
+        }
+    }
+
+    /// A child state: `f` edits a copy whose parent is this state.
+    pub fn child(&self, f: impl FnOnce(&mut GroupState)) -> Result<GroupState> {
+        let mut next = self.clone();
+        next.parent = self.hash();
+        f(&mut next);
+        next.check()?;
+        if next.group_id != self.group_id {
+            return Err(ProtoError::Decode);
+        }
+        // With no admin left, the longest-standing member is promoted.
+        if !next.members.iter().any(|m| m.active && m.admin) {
+            let oldest = next
+                .members
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.active)
+                .min_by(|(_, a), (_, b)| (a.joined, a.root).cmp(&(b.joined, b.root)));
+            if let Some((i, _)) = oldest {
+                next.members[i].admin = true;
+            }
+        }
+        Ok(next)
+    }
+
+    /// Whether `next` is a valid update posted by member `author`: same group,
+    /// parent is this state, and the author is an admin here (or the update
+    /// only removes the author, i.e. they leave).
+    pub fn accepts(&self, next: &GroupState, author: u8) -> bool {
+        if next.group_id != self.group_id || next.parent != self.hash() || next.check().is_err() {
+            return false;
+        }
+        let Some(a) = self.members.get(author as usize).filter(|m| m.active) else {
+            return false;
+        };
+        if a.admin {
+            return true;
+        }
+        // A non-admin may only leave (automatic admin promotion aside).
+        let mut expected = self.clone();
+        expected.remove(author);
+        let strip = |s: &GroupState| {
+            s.members
+                .iter()
+                .map(|m| (m.root, m.joined, m.active))
+                .collect::<Vec<_>>()
+        };
+        next.name == self.name
+            && next.host == self.host
+            && next.admins_only == self.admins_only
+            && next.epoch == self.epoch
+            && strip(next) == strip(&expected)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keys derived from the epoch secret
+// ---------------------------------------------------------------------------
+
+fn header_key(es: &Key) -> Key {
+    kmac256(es, b"", labels::GRP_HEADER)
+}
+
+fn bucket_key(es: &Key) -> Key {
+    kmac256(es, b"", labels::GRP_BUCKET)
+}
+
+fn bucket_of(es: &Key, device_id: &[u8; 16]) -> usize {
+    let b: [u8; 2] = kmac256(&bucket_key(es), device_id, labels::GRP_BUCKET_INDEX);
+    u16::from_be_bytes(b) as usize % BUCKETS
+}
+
+/// Group mailbox address for day `d` under an epoch secret.
+pub fn mailbox(es: &Key, day: u32) -> [u8; 32] {
+    kmac256(es, &day.to_be_bytes(), labels::NET_GRP_MAILBOX)
+}
+
+/// Rekey sub-mailbox of bucket `b` for day `d`.
+pub fn rekey_mailbox(es: &Key, day: u32, b: u8) -> [u8; 32] {
+    kmac256_parts(
+        &bucket_key(es),
+        &[&day.to_be_bytes(), &[b]],
+        labels::NET_GRP_REKEY_MAILBOX,
+    )
+}
+
+/// Write token for a group mailbox address (multi-use for that address).
+pub fn write_token(es: &Key, addr: &[u8; 32]) -> [u8; 32] {
+    let k: Key = kmac256(es, b"", labels::NET_GRP_WRITE_KEY);
+    kmac256(&k, addr, labels::NET_GRP_WRITE_TOKEN)
+}
+
+/// Read credential secret for a group mailbox address.
+pub fn read_secret(es: &Key, addr: &[u8; 32]) -> [u8; 32] {
+    let k: Key = kmac256(es, b"", labels::NET_GRP_READ_KEY);
+    kmac256(&k, addr, labels::NET_GRP_READ_CRED)
+}
+
+fn keystream(es: &Key, nonce: &[u8], out: &mut [u8]) {
+    let mut k = Kmac256::new(&header_key(es), labels::GRP_HEADER.as_bytes());
+    k.update_framed(nonce);
+    let mut x = k.finalize_xof();
+    let mut ks = vec![0u8; out.len()];
+    x.read(&mut ks);
+    for (o, k) in out.iter_mut().zip(ks) {
+        *o ^= k;
+    }
+}
+
+fn msg_id(
+    group_id: &[u8; 32],
+    epoch: u32,
+    member: u8,
+    device: u8,
+    generation: u8,
+    counter: u32,
+) -> MsgId {
+    let mut w = Writer::new();
+    w.fixed(group_id)
+        .u32(epoch)
+        .u8(member)
+        .u8(device)
+        .u8(generation)
+        .u32(counter);
+    kmac256(group_id, w.as_slice(), labels::GRP_MSG_ID)
+}
+
+fn export_context(
+    group_id: &[u8; 32],
+    epoch: u32,
+    member: u8,
+    device: u8,
+    generation: u8,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.fixed(group_id)
+        .u32(epoch)
+        .u8(member)
+        .u8(device)
+        .u8(generation);
+    w.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Chains
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Chain {
+    cs: Key,
+    n: u32,
+}
+
+impl Chain {
+    fn step(&mut self) -> (u32, Key) {
+        let out: [u8; 64] = kmac256(&self.cs, b"", labels::GRP_CHAIN);
+        let n = self.n;
+        self.cs.copy_from_slice(&out[..32]);
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&out[32..]);
+        self.n += 1;
+        (n, mk)
+    }
+}
+
+#[derive(Clone)]
+struct MyChain {
+    epoch: u32,
+    generation: u8,
+    /// Seed of this generation, kept only so a welcome can hand the chain to
+    /// a joiner who cannot read the rekey that started the epoch.
+    seed: Key,
+    chain: Chain,
+    /// MAC keys indexed by member index (ours unused).
+    mac_keys: Vec<Key>,
+    created_at: u64,
+}
+
+#[derive(Clone)]
+struct RecvChain {
+    epoch: u32,
+    chain: Chain,
+    skipped: BTreeMap<u32, Key>,
+    /// `mac_key[sender → our account]`.
+    mac_key: Key,
+}
+
+/// One member device that should receive our rekey.
+pub struct RekeyTarget<'a> {
+    /// Member index.
+    pub member: u8,
+    /// Device index within that member's manifest.
+    pub device: u8,
+    /// Device identifier (for the bucket).
+    pub device_id: [u8; 16],
+    /// Our pairwise session with that device.
+    pub session: &'a Session,
+}
+
+/// A decrypted group message.
+#[derive(Clone, Debug)]
+pub struct GroupMessage {
+    /// Sender member index.
+    pub member: u8,
+    /// Sender device index.
+    pub device: u8,
+    /// Message identifier.
+    pub id: MsgId,
+    /// The sender's state hash.
+    pub state_hash: [u8; 32],
+    /// The sender's causal frontier (one id per member index; zero = none).
+    pub frontier: Vec<MsgId>,
+    /// Flags (`FLAG_STATE_UPDATE`).
+    pub flags: u8,
+    /// Sent by another device of our own account. The MAC vector cannot
+    /// authenticate these; show them only after own-device sync confirms the
+    /// id (`07-groups.md` §3).
+    pub own_account: bool,
+    /// Content.
+    pub content: Vec<u8>,
+}
+
+/// Header of a rekey unit, readable by current members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RekeySender {
+    /// Member index of the rotating device.
+    pub member: u8,
+    /// Its device index.
+    pub device: u8,
+    /// New generation.
+    pub generation: u8,
+    /// Epoch the rekey was announced under.
+    pub epoch: u32,
+    /// Epoch the new chain belongs to.
+    pub target_epoch: u32,
+}
+
+/// Result of processing a rekey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RekeyOutcome {
+    /// Installed the sender's new chain (and the new epoch, if any).
+    Installed {
+        /// New epoch if the rotation started one.
+        new_epoch: Option<u32>,
+    },
+    /// No entry for this device in this unit: try the next bucket.
+    NotForUs,
+}
+
+// ---------------------------------------------------------------------------
+// Group
+// ---------------------------------------------------------------------------
+
+/// One device's view of a group.
+pub struct Group {
+    /// Current state.
+    pub state: GroupState,
+    /// Our member index.
+    pub me: u8,
+    /// Our device index.
+    pub my_device: u8,
+    epochs: BTreeMap<u32, Key>,
+    mine: Option<MyChain>,
+    recv: HashMap<(u8, u8, u8), RecvChain>,
+    frontier: Vec<MsgId>,
+    seen: VecDeque<MsgId>,
+    seen_set: HashSet<MsgId>,
+}
+
+impl Group {
+    /// Create a group with ourselves as the only member and admin.
+    pub fn create(
+        name: &str,
+        my_root: [u8; 64],
+        host: [u8; 16],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Self> {
+        let state = GroupState {
+            group_id: rng.array("group/id")?,
+            epoch: 0,
+            parent: [0; 32],
+            name: name.to_string(),
+            host,
+            admins_only: false,
+            members: vec![Member::new(my_root, true, now)],
+        };
+        let es: Key = rng.array("group/epoch-secret")?;
+        Ok(Self::with(state, 0, 0, BTreeMap::from([(0, es)])))
+    }
+
+    fn with(state: GroupState, me: u8, my_device: u8, epochs: BTreeMap<u32, Key>) -> Self {
+        Self {
+            state,
+            me,
+            my_device,
+            epochs,
+            mine: None,
+            recv: HashMap::new(),
+            frontier: vec![[0; 8]; MAX_MEMBERS],
+            seen: VecDeque::new(),
+            seen_set: HashSet::new(),
+        }
+    }
+
+    /// Current epoch secret.
+    fn epoch_secret(&self) -> Result<Key> {
+        self.epochs
+            .get(&self.state.epoch)
+            .copied()
+            .ok_or(ProtoError::Missing)
+    }
+
+    /// Today's mailbox address for the current epoch.
+    pub fn mailbox(&self, day: u32) -> Result<[u8; 32]> {
+        Ok(mailbox(&self.epoch_secret()?, day))
+    }
+
+    /// Mailbox of every held epoch for `day` (readers poll all of them).
+    pub fn mailboxes(&self, day: u32) -> Vec<(u32, [u8; 32])> {
+        self.epochs
+            .iter()
+            .map(|(e, es)| (*e, mailbox(es, day)))
+            .collect()
+    }
+
+    /// Write token and read-credential secret for an address of epoch `e`.
+    pub fn mailbox_auth(&self, e: u32, addr: &[u8; 32]) -> Result<([u8; 32], [u8; 32])> {
+        let es = self.epochs.get(&e).ok_or(ProtoError::Missing)?;
+        Ok((write_token(es, addr), read_secret(es, addr)))
+    }
+
+    /// The bucket and rekey mailbox this device reads for epoch `e`.
+    pub fn my_rekey_mailbox(
+        &self,
+        e: u32,
+        device_id: &[u8; 16],
+        day: u32,
+    ) -> Result<(u8, [u8; 32])> {
+        let es = self.epochs.get(&e).ok_or(ProtoError::Missing)?;
+        let b = bucket_of(es, device_id) as u8;
+        Ok((b, rekey_mailbox(es, day, b)))
+    }
+
+    /// Rekey mailbox of bucket `b` for epoch `e` (for writers and overflow).
+    pub fn rekey_mailbox(&self, e: u32, day: u32, b: u8) -> Result<[u8; 32]> {
+        Ok(rekey_mailbox(
+            self.epochs.get(&e).ok_or(ProtoError::Missing)?,
+            day,
+            b,
+        ))
+    }
+
+    /// Our causal frontier.
+    pub fn frontier(&self) -> &[MsgId] {
+        &self.frontier
+    }
+
+    /// Whether we must rotate before sending: no chain for the current
+    /// epoch, or the chain is too old or too long.
+    pub fn needs_rotation(&self, now: u64) -> bool {
+        match &self.mine {
+            None => true,
+            Some(m) => {
+                m.epoch != self.state.epoch
+                    || m.chain.n >= ROTATE_AFTER_MESSAGES
+                    || now.saturating_sub(m.created_at) >= ROTATE_AFTER_SECS
+                    || m.mac_keys.len() < self.state.members.len()
+            }
+        }
+    }
+
+    /// Install a new state (after checking it with [`GroupState::accepts`]).
+    /// A new epoch needs its secret first (from a rekey or a welcome).
+    pub fn apply_state(&mut self, next: GroupState) -> Result<()> {
+        if next.epoch != self.state.epoch && !self.epochs.contains_key(&next.epoch) {
+            return Err(ProtoError::Missing);
+        }
+        let my_root = self
+            .state
+            .members
+            .get(self.me as usize)
+            .map(|m| m.root)
+            .ok_or(ProtoError::Missing)?;
+        let me = next.index_of(&my_root).ok_or(ProtoError::NoSession)?;
+        // Member indices can shift; frontiers and receive chains are per index.
+        if me != self.me || next.members.len() != self.state.members.len() {
+            self.recv.retain(|_, c| c.epoch >= next.epoch);
+        }
+        self.me = me;
+        self.state = next;
+        // Keep the current and previous epoch only.
+        let keep = self.state.epoch.saturating_sub(1);
+        self.epochs.retain(|e, _| *e >= keep);
+        Ok(())
+    }
+
+    /// Start a new epoch locally (the rotating admin does this after
+    /// `child()`), returning its secret for the rekey.
+    pub fn new_epoch(&mut self, rng: &mut HedgedRng) -> Result<(u32, Key)> {
+        let e = self.epochs.keys().max().copied().unwrap_or(0) + 1;
+        let es: Key = rng.array("group/epoch-secret")?;
+        self.epochs.insert(e, es);
+        Ok((e, es))
+    }
+
+    // ------------------------------------------------------------------
+    // Messages
+    // ------------------------------------------------------------------
+
+    /// Seal `content` for the group mailbox.
+    pub fn seal(&mut self, content: &[u8], flags: u8, rng: &mut HedgedRng) -> Result<Vec<u8>> {
+        let es = self.epoch_secret()?;
+        let state_hash = self.state.hash();
+        let members = self.state.members.len();
+        let mine = self.mine.as_mut().ok_or(ProtoError::NoSession)?;
+        if mine.epoch != self.state.epoch || mine.mac_keys.len() < members {
+            return Err(ProtoError::NoSession);
+        }
+        let (n, gmk) = mine.chain.step();
+        let generation = mine.generation;
+        let mac_keys = mine.mac_keys.clone();
+
+        let mut unit = vec![0u8; ENVELOPE_LEN];
+        unit[0] = VERSION;
+        unit[1] = EnvelopeKind::Group as u8;
+        unit[2] = SUB_MESSAGE;
+        unit[4..8].copy_from_slice(&self.state.epoch.to_be_bytes());
+        rng.fill("group/nonce", &mut unit[NONCE..ENC])?;
+        let e = &mut unit[ENC..ENC + SENDER_ENC_LEN];
+        e[0] = self.me;
+        e[1] = self.my_device;
+        e[2] = generation;
+        e[3] = flags;
+        e[4..8].copy_from_slice(&n.to_be_bytes());
+        unit[off::STATE..off::FRONTIER].copy_from_slice(&state_hash);
+        for (i, id) in self.frontier.iter().enumerate() {
+            unit[off::FRONTIER + 8 * i..off::FRONTIER + 8 * i + 8].copy_from_slice(id);
+        }
+        let nonce: [u8; 32] = unit[NONCE..ENC]
+            .try_into()
+            .map_err(|_| ProtoError::Decode)?;
+        keystream(&es, &nonce, &mut unit[ENC..off::MACS]);
+        rng.fill("group/capsule", &mut unit[off::CAPSULE..off::BODY])?;
+
+        let mut pad = |b: &mut [u8]| {
+            if rng.fill("group/padding", b).is_err() {
+                b.fill(0);
+            }
+        };
+        let framed = Zeroizing::new(pad_content(content, off::CONTENT_CAPACITY, &mut pad)?);
+        let body = seal::seal(&SealKey::from_bytes(gmk), &unit[..off::MACS], &framed, rng)?;
+        if body.len() != off::BODY_LEN {
+            return Err(ProtoError::Decode);
+        }
+        unit[off::BODY..].copy_from_slice(&body);
+
+        let h = sha3_512_parts(&[&unit[..off::MACS], &unit[off::CAPSULE..]]);
+        let label = if flags & FLAG_STATE_UPDATE != 0 {
+            labels::GRP_ADMIN_MAC
+        } else {
+            labels::GRP_MAC
+        };
+        for p in 0..MAC_ENTRIES {
+            let target = if p < self.me as usize { p } else { p + 1 };
+            let slot = &mut unit[off::MACS + 16 * p..off::MACS + 16 * p + 16];
+            if target < members && self.state.members[target].active {
+                let tag: [u8; 16] = kmac256(&mac_keys[target], &h, label);
+                slot.copy_from_slice(&tag);
+            } else {
+                rng.fill("group/mac-fill", slot)?;
+            }
+        }
+        let id = msg_id(
+            &self.state.group_id,
+            self.state.epoch,
+            self.me,
+            self.my_device,
+            generation,
+            n,
+        );
+        self.frontier[self.me as usize] = id;
+        self.remember(id);
+        Ok(unit)
+    }
+
+    fn remember(&mut self, id: MsgId) {
+        if self.seen_set.insert(id) {
+            self.seen.push_back(id);
+            while self.seen.len() > 20_000 {
+                if let Some(old) = self.seen.pop_front() {
+                    self.seen_set.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Open a group message. State is committed only after the MAC and the
+    /// body authenticate.
+    pub fn open(&mut self, unit: &[u8]) -> Result<GroupMessage> {
+        if unit.len() != ENVELOPE_LEN
+            || unit[0] != VERSION
+            || unit[1] != EnvelopeKind::Group as u8
+            || unit[2] != SUB_MESSAGE
+        {
+            return Err(ProtoError::Decode);
+        }
+        let epoch = u32::from_be_bytes(unit[4..8].try_into().map_err(|_| ProtoError::Decode)?);
+        let es = *self.epochs.get(&epoch).ok_or(ProtoError::Missing)?;
+        let mut hdr = unit[..off::MACS].to_vec();
+        let nonce: [u8; 32] = unit[NONCE..ENC]
+            .try_into()
+            .map_err(|_| ProtoError::Decode)?;
+        keystream(&es, &nonce, &mut hdr[ENC..off::MACS]);
+        let (member, device, generation, flags) =
+            (hdr[ENC], hdr[ENC + 1], hdr[ENC + 2], hdr[ENC + 3]);
+        let counter = u32::from_be_bytes(
+            hdr[ENC + 4..ENC + 8]
+                .try_into()
+                .map_err(|_| ProtoError::Decode)?,
+        );
+        let own_account = member == self.me;
+        if own_account && device == self.my_device {
+            return Err(ProtoError::Counter); // our own message echoed back
+        }
+        let key = (member, device, generation);
+        let mut rc = self.recv.get(&key).cloned().ok_or(ProtoError::Missing)?;
+        if rc.epoch != epoch {
+            return Err(ProtoError::Missing);
+        }
+
+        // MAC first (constant time), unless it is from our own account.
+        if !own_account {
+            let h = sha3_512_parts(&[&unit[..off::MACS], &unit[off::CAPSULE..]]);
+            let p = if (self.me as usize) < member as usize {
+                self.me as usize
+            } else {
+                self.me as usize - 1
+            };
+            let label = if flags & FLAG_STATE_UPDATE != 0 {
+                labels::GRP_ADMIN_MAC
+            } else {
+                labels::GRP_MAC
+            };
+            let want: [u8; 16] = kmac256(&rc.mac_key, &h, label);
+            let got = &unit[off::MACS + 16 * p..off::MACS + 16 * p + 16];
+            if !bool::from(want.ct_eq(got)) {
+                return Err(ProtoError::Crypto);
+            }
+        }
+
+        let gmk = if counter < rc.chain.n {
+            rc.skipped.remove(&counter).ok_or(ProtoError::Counter)?
+        } else {
+            if counter - rc.chain.n > MAX_SKIP {
+                return Err(ProtoError::Counter);
+            }
+            loop {
+                let (n, mk) = rc.chain.step();
+                if n == counter {
+                    break mk;
+                }
+                rc.skipped.insert(n, mk);
+            }
+        };
+        while rc.skipped.len() > MAX_SKIP as usize {
+            if let Some(k) = rc.skipped.keys().next().copied() {
+                rc.skipped.remove(&k);
+            }
+        }
+        let framed = Zeroizing::new(seal::open(
+            &SealKey::from_bytes(gmk),
+            &unit[..off::MACS],
+            &unit[off::BODY..],
+        )?);
+        let content = unpad_content(&framed)?.to_vec();
+        let id = msg_id(
+            &self.state.group_id,
+            epoch,
+            member,
+            device,
+            generation,
+            counter,
+        );
+        if self.seen_set.contains(&id) {
+            return Err(ProtoError::Counter);
+        }
+        // Commit.
+        self.recv.insert(key, rc);
+        self.remember(id);
+        if (member as usize) < MAX_MEMBERS {
+            self.frontier[member as usize] = id;
+        }
+        let mut state_hash = [0u8; 32];
+        state_hash.copy_from_slice(&hdr[off::STATE..off::FRONTIER]);
+        let frontier = hdr[off::FRONTIER..off::MACS]
+            .chunks(8)
+            .map(|c| {
+                let mut id = [0u8; 8];
+                id.copy_from_slice(c);
+                id
+            })
+            .collect();
+        Ok(GroupMessage {
+            member,
+            device,
+            id,
+            state_hash,
+            frontier,
+            flags,
+            own_account,
+            content,
+        })
+    }
+
+    /// Frontier entries of `msg` that name messages we have not seen: fetch
+    /// them, and warn if they stay missing (`07-groups.md` §7.4).
+    pub fn missing(&self, msg: &GroupMessage) -> Vec<(u8, MsgId)> {
+        msg.frontier
+            .iter()
+            .enumerate()
+            .filter(|(i, id)| {
+                **id != [0; 8] && *i != self.me as usize && !self.seen_set.contains(*id)
+            })
+            .map(|(i, id)| (i as u8, *id))
+            .collect()
+    }
+
+    // ------------------------------------------------------------------
+    // Rekey
+    // ------------------------------------------------------------------
+
+    /// Rotate our sender chain and build the three rekey units for
+    /// `targets` (every device of every other member, and our own other
+    /// devices). With `new_epoch`, the rotation also hands out that epoch's
+    /// secret; the units are announced under the current epoch so current
+    /// members can read them, and the new state must already name the
+    /// epoch. Returns the units, indexed by bucket.
+    pub fn rotate(
+        &mut self,
+        targets: &[RekeyTarget<'_>],
+        new_epoch: Option<(u32, Key)>,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Vec<Vec<u8>>> {
+        // A rotation that starts an epoch is announced under the previous one,
+        // which current members hold; joiners get the chain in the welcome.
+        let target_epoch = new_epoch.map_or(self.state.epoch, |(e, _)| e);
+        let announce = match new_epoch {
+            Some((e, _)) => self
+                .epochs
+                .range(..e)
+                .next_back()
+                .map(|(k, _)| *k)
+                .ok_or(ProtoError::Missing)?,
+            None => self.state.epoch,
+        };
+        let es = *self.epochs.get(&announce).ok_or(ProtoError::Missing)?;
+        let generation = self
+            .mine
+            .as_ref()
+            .map_or(0, |m| m.generation.wrapping_add(1));
+        let members = self.state.members.len();
+        if targets.len() > BUCKETS * ENTRIES_PER_BUCKET {
+            return Err(ProtoError::Limit);
+        }
+
+        let cs0: Key = rng.array("group/chain-seed")?;
+        let mut mac_keys = Vec::with_capacity(members);
+        for _ in 0..members {
+            mac_keys.push(rng.array::<32>("group/mac-key")?);
+        }
+        let kb: Key = rng.array("group/rekey-kb")?;
+
+        // Header shared by the three units (bucket byte differs).
+        let mut header = vec![0u8; COMMON];
+        header[0] = VERSION;
+        header[1] = EnvelopeKind::Group as u8;
+        header[2] = SUB_REKEY;
+        header[4..8].copy_from_slice(&announce.to_be_bytes());
+        rng.fill("group/nonce", &mut header[NONCE..ENC])?;
+        header[ENC] = self.me;
+        header[ENC + 1] = self.my_device;
+        header[ENC + 2] = generation;
+        header[ENC + 3] = if new_epoch.is_some() {
+            REKEY_NEW_EPOCH
+        } else {
+            0
+        };
+        header[ENC + 4..ENC + 8].copy_from_slice(&target_epoch.to_be_bytes());
+        let nonce: [u8; 32] = header[NONCE..ENC]
+            .try_into()
+            .map_err(|_| ProtoError::Decode)?;
+        keystream(&es, &nonce, &mut header[ENC..COMMON]);
+
+        let mut common_pt = Zeroizing::new(vec![0u8; COMMON_PT_LEN]);
+        common_pt[..32].copy_from_slice(&cs0);
+        common_pt[32] = generation;
+        common_pt[33] = if new_epoch.is_some() {
+            REKEY_NEW_EPOCH
+        } else {
+            0
+        };
+        match new_epoch {
+            Some((e, s)) => {
+                common_pt[34..66].copy_from_slice(&s);
+                common_pt[66..70].copy_from_slice(&e.to_be_bytes());
+            }
+            None => rng.fill("group/rekey-fill", &mut common_pt[34..66])?,
+        }
+        common_pt[70..102].copy_from_slice(&self.state.hash());
+        // The header's bucket byte is not covered: AD is the header with it zeroed.
+        let common = seal::seal(&SealKey::from_bytes(kb), &header, &common_pt, rng)?;
+
+        // Entries into buckets (overflow to the next bucket).
+        let ctx = export_context(
+            &self.state.group_id,
+            target_epoch,
+            self.me,
+            self.my_device,
+            generation,
+        );
+        let mut buckets: Vec<Vec<[u8; ENTRY_LEN]>> = vec![Vec::new(); BUCKETS];
+        for t in targets {
+            let (e, kexp) = t.session.export_for_peer(&ctx);
+            let pad: [u8; 64] = kmac256(&kexp, b"", labels::GRP_REKEY_PAD);
+            let mut ct = [0u8; 64];
+            ct[..32].copy_from_slice(&kb);
+            if t.member != self.me {
+                let mk = mac_keys.get(t.member as usize).ok_or(ProtoError::Limit)?;
+                ct[32..].copy_from_slice(mk);
+            }
+            for (c, p) in ct.iter_mut().zip(pad) {
+                *c ^= p;
+            }
+            let chk: [u8; 12] = kmac256(&kexp, &ct, labels::GRP_REKEY_CHECK);
+            let mut entry = [0u8; ENTRY_LEN];
+            entry[..4].copy_from_slice(&e.to_be_bytes());
+            entry[4..16].copy_from_slice(&chk);
+            entry[16..].copy_from_slice(&ct);
+            let mut b = bucket_of(&es, &t.device_id);
+            while buckets[b].len() >= ENTRIES_PER_BUCKET {
+                b = (b + 1) % BUCKETS;
+            }
+            buckets[b].push(entry);
+        }
+
+        let mut units = Vec::with_capacity(BUCKETS);
+        for (b, entries) in buckets.iter_mut().enumerate() {
+            // Shuffle so entry position reveals nothing about the target.
+            for i in (1..entries.len()).rev() {
+                let r: [u8; 4] = rng.array("group/shuffle")?;
+                entries.swap(i, u32::from_be_bytes(r) as usize % (i + 1));
+            }
+            let mut unit = vec![0u8; ENVELOPE_LEN];
+            rng.fill("group/rekey-padding", &mut unit)?;
+            unit[..COMMON].copy_from_slice(&header);
+            unit[3] = b as u8;
+            unit[COMMON..ENTRIES].copy_from_slice(&common);
+            for (i, e) in entries.iter().enumerate() {
+                unit[ENTRIES + ENTRY_LEN * i..ENTRIES + ENTRY_LEN * (i + 1)].copy_from_slice(e);
+            }
+            units.push(unit);
+        }
+
+        if let Some((e, s)) = new_epoch {
+            self.epochs.insert(e, s);
+        }
+        self.mine = Some(MyChain {
+            epoch: target_epoch,
+            generation,
+            seed: cs0,
+            chain: Chain { cs: cs0, n: 0 },
+            mac_keys,
+            created_at: now,
+        });
+        Ok(units)
+    }
+
+    /// Read who sent a rekey unit (so the caller can pick the pairwise
+    /// session) and which bucket it is.
+    pub fn rekey_sender(&self, unit: &[u8]) -> Result<(RekeySender, u8)> {
+        if unit.len() != ENVELOPE_LEN
+            || unit[0] != VERSION
+            || unit[1] != EnvelopeKind::Group as u8
+            || unit[2] != SUB_REKEY
+        {
+            return Err(ProtoError::Decode);
+        }
+        let epoch = u32::from_be_bytes(unit[4..8].try_into().map_err(|_| ProtoError::Decode)?);
+        let es = self.epochs.get(&epoch).ok_or(ProtoError::Missing)?;
+        let nonce: [u8; 32] = unit[NONCE..ENC]
+            .try_into()
+            .map_err(|_| ProtoError::Decode)?;
+        let mut h = unit[ENC..ENC + 8].to_vec();
+        keystream(es, &nonce, &mut h);
+        let target_epoch = u32::from_be_bytes(h[4..8].try_into().map_err(|_| ProtoError::Decode)?);
+        let valid = if h[3] & REKEY_NEW_EPOCH != 0 {
+            target_epoch > epoch
+        } else {
+            target_epoch == epoch
+        };
+        if !valid {
+            return Err(ProtoError::Decode);
+        }
+        Ok((
+            RekeySender {
+                member: h[0],
+                device: h[1],
+                generation: h[2],
+                epoch,
+                target_epoch,
+            },
+            unit[3],
+        ))
+    }
+
+    /// Apply a rekey unit using our pairwise session with its sender.
+    pub fn apply_rekey(&mut self, unit: &[u8], session: &Session) -> Result<RekeyOutcome> {
+        let (sender, _) = self.rekey_sender(unit)?;
+        let mut header = unit[..COMMON].to_vec();
+        header[3] = 0;
+        let candidates = [sender.target_epoch];
+        for i in 0..ENTRIES_PER_BUCKET {
+            let entry = &unit[ENTRIES + ENTRY_LEN * i..ENTRIES + ENTRY_LEN * (i + 1)];
+            let e = u32::from_be_bytes(entry[..4].try_into().map_err(|_| ProtoError::Decode)?);
+            for target_epoch in &candidates {
+                let ctx = export_context(
+                    &self.state.group_id,
+                    *target_epoch,
+                    sender.member,
+                    sender.device,
+                    sender.generation,
+                );
+                let Some(kexp) = session.export_from_peer(e, &ctx) else {
+                    continue;
+                };
+                let chk: [u8; 12] = kmac256(&kexp, &entry[16..], labels::GRP_REKEY_CHECK);
+                if !bool::from(chk.ct_eq(&entry[4..16])) {
+                    continue;
+                }
+                let pad: [u8; 64] = kmac256(&kexp, b"", labels::GRP_REKEY_PAD);
+                let mut pt = Zeroizing::new([0u8; 64]);
+                for (j, (c, p)) in entry[16..].iter().zip(pad).enumerate() {
+                    pt[j] = c ^ p;
+                }
+                let kb: Key = pt[..32].try_into().map_err(|_| ProtoError::Decode)?;
+                let mac_key: Key = pt[32..].try_into().map_err(|_| ProtoError::Decode)?;
+                let common = Zeroizing::new(seal::open(
+                    &SealKey::from_bytes(kb),
+                    &header,
+                    &unit[COMMON..ENTRIES],
+                )?);
+                let cs0: Key = common[..32].try_into().map_err(|_| ProtoError::Decode)?;
+                if common[32] != sender.generation {
+                    return Err(ProtoError::Decode);
+                }
+                let new_epoch = if common[33] & REKEY_NEW_EPOCH != 0 {
+                    let s: Key = common[34..66].try_into().map_err(|_| ProtoError::Decode)?;
+                    let e = u32::from_be_bytes(
+                        common[66..70].try_into().map_err(|_| ProtoError::Decode)?,
+                    );
+                    if e != *target_epoch {
+                        return Err(ProtoError::Decode);
+                    }
+                    self.epochs.insert(e, s);
+                    Some(e)
+                } else {
+                    None
+                };
+                self.recv.insert(
+                    (sender.member, sender.device, sender.generation),
+                    RecvChain {
+                        epoch: *target_epoch,
+                        chain: Chain { cs: cs0, n: 0 },
+                        skipped: BTreeMap::new(),
+                        mac_key,
+                    },
+                );
+                // Older generations of this sender stay for late messages
+                // until the next rotation after this one.
+                let keep = sender.generation.wrapping_sub(1);
+                self.recv.retain(|(m, d, g), _| {
+                    !(*m == sender.member && *d == sender.device)
+                        || *g == sender.generation
+                        || *g == keep
+                });
+                return Ok(RekeyOutcome::Installed { new_epoch });
+            }
+        }
+        Ok(RekeyOutcome::NotForUs)
+    }
+
+    // ------------------------------------------------------------------
+    // Joining
+    // ------------------------------------------------------------------
+
+    /// Welcome for a new member (sent over the pairwise session after the
+    /// state update that adds them and the new epoch): the state and the
+    /// current epoch secret. Earlier epochs are never shared.
+    /// It also carries our current chain (seed and the MAC key for the
+    /// joiner), because the rekey that started the epoch was announced under
+    /// the previous epoch, which the joiner must not get.
+    pub fn welcome(&self, joiner: u8) -> Result<Zeroizing<Vec<u8>>> {
+        let mine = self
+            .mine
+            .as_ref()
+            .filter(|m| m.epoch == self.state.epoch)
+            .ok_or(ProtoError::NoSession)?;
+        let mac = mine
+            .mac_keys
+            .get(joiner as usize)
+            .ok_or(ProtoError::Limit)?;
+        let mut w = Writer::new();
+        w.u8(1)
+            .bytes(&self.state.encode())
+            .u32(self.state.epoch)
+            .fixed(&self.epoch_secret()?);
+        w.u8(self.me)
+            .u8(self.my_device)
+            .u8(mine.generation)
+            .fixed(&mine.seed)
+            .fixed(mac);
+        Ok(Zeroizing::new(w.finish()))
+    }
+
+    /// Join from a welcome.
+    pub fn join(welcome: &[u8], my_root: &[u8; 64], my_device: u8) -> Result<Self> {
+        let mut r = Reader::new(welcome);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let state = GroupState::decode(r.bytes(64 * 1024)?)?;
+        let e = r.u32()?;
+        let es: Key = r.array()?;
+        let (am, ad, ag) = (r.u8()?, r.u8()?, r.u8()?);
+        let seed: Key = r.array()?;
+        let mac_key: Key = r.array()?;
+        r.end()?;
+        if e != state.epoch {
+            return Err(ProtoError::Decode);
+        }
+        let me = state.index_of(my_root).ok_or(ProtoError::NoSession)?;
+        let mut g = Self::with(state, me, my_device, BTreeMap::from([(e, es)]));
+        g.recv.insert(
+            (am, ad, ag),
+            RecvChain {
+                epoch: e,
+                chain: Chain { cs: seed, n: 0 },
+                skipped: BTreeMap::new(),
+                mac_key,
+            },
+        );
+        Ok(g)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn state_chain_and_admin_rules() {
+        let mut rng = HedgedRng::new().unwrap();
+        let mut g = Group::create("Book club", [1; 64], [9; 16], 100, &mut rng).unwrap();
+        let s1 = g
+            .state
+            .child(|s| {
+                s.add([2; 64], false, 200).unwrap();
+            })
+            .unwrap();
+        assert!(g.state.accepts(&s1, 0), "admin adds");
+        assert!(!g.state.accepts(&s1, 1), "non-member cannot");
+        g.apply_state(s1.clone()).unwrap();
+        // Member 1 leaving is allowed; member 1 renaming is not.
+        let leave = s1.child(|s| s.remove(1));
+        assert!(s1.accepts(&leave.unwrap(), 1));
+        let rename = s1.child(|s| s.name = "Mine now".into()).unwrap();
+        assert!(!s1.accepts(&rename, 1));
+        // Wrong parent is rejected.
+        let mut orphan = rename.clone();
+        orphan.parent = [7; 32];
+        assert!(!s1.accepts(&orphan, 0));
+        // Last admin leaves: the longest-standing member is promoted.
+        let s2 = s1.child(|s| s.remove(0)).unwrap();
+        assert!(s2.members[1].admin, "promoted");
+        assert!(!s2.members[0].active);
+        assert_eq!(s2.index_of(&[1; 64]), None);
+        // A joiner reuses the tombstone slot.
+        let s3 = s2
+            .child(|s| assert_eq!(s.add([3; 64], false, 300).unwrap(), 0))
+            .unwrap();
+        assert_eq!(s3.index_of(&[3; 64]), Some(0));
+        assert_eq!(GroupState::decode(&s2.encode()).unwrap(), s2);
+        assert_ne!(s1.hash(), s2.hash());
+    }
+}

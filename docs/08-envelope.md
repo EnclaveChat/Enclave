@@ -245,9 +245,9 @@ The AD of the slot header and of the body is `hdr16 ‖ initial block` (8,553 B)
 
 Sum: 1 + 1 + 1 + 1 + 4 + 1 + 8 + 56 + 1,568 + 208 + 1,568 + 5,120 = **8,537** (`INITIAL_BLOCK_LEN = 4 + 4 + 9 + 56 + 1,568 + 208 + 1,568 + 5,120`).
 
-## 7. Group stored envelope: 14,336 B (reserved constant layout)
+## 7. Group stored envelope: 14,336 B
 
-Groups are not implemented. `enclave_wire::group` reserves this constant layout so that the size arithmetic is checked now:
+Implemented in `enclave-proto::group` (M7). The sender header (bytes 16–88), state hash and frontier are encrypted under the epoch header key and authenticated by the MAC vector (`07-groups.md`, implementation note 3). Layout from `enclave_wire::group`:
 
 | Offset | Length | Field |
 |---|---|---|
@@ -371,4 +371,4 @@ Run-time checks and tests: `WireUnit::decode` and `PollRequest::decode` reject a
 1. Op codes (§2.2) are provisional; PLAN's op list (group writes, blob allocation with Privacy Pass, inbox registration with PoW, push registration, capabilities, deletion, KT writes and queries) is not implemented.
 2. The envelope header's kind byte tells the server whether it stores a direct or request envelope. The server already knows this from the inbox type, so nothing new leaks today; it would matter if request and account inboxes were ever merged.
 3. The vault-key object has its own size (98 directory chunks in the simulator), and directory objects of different kinds have different chunk counts. They cross the network inside uniform units, but a fetch sequence of a given length reveals the object kind. Padding every directory object to a common chunk count is open.
-4. The group layout (§7) keeps the state hash and frontier outside the body seal, as in PLAN §8. The M0 draft moved them inside the seal (I-14). This must be settled before groups are implemented.
+4. Settled in M7: the state hash and frontier stay in PLAN §8's positions but are encrypted under the epoch header key and covered by the MAC vector (I-14).

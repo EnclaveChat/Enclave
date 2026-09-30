@@ -943,6 +943,30 @@ fn get_hist(r: &mut Reader<'_>) -> Result<VecDeque<(u32, Key)>> {
 }
 
 impl Session {
+    /// Group exporter, sender side (`07-groups.md` §5.3): a key bound to
+    /// `context` and to the newest PQ root of the **peer's** sending direction,
+    /// which the peer still holds. Returns that root's epoch, which the peer
+    /// needs to find it, and the key. Both halves of every root are
+    /// ML-KEM-1024 steps seeded by the handshake, so the key is post-quantum
+    /// and heals with each PQ round trip.
+    pub fn export_for_peer(&self, context: &[u8]) -> (u32, [u8; 32]) {
+        let (e, root) = self
+            .pq
+            .in_hist
+            .back()
+            .copied()
+            .unwrap_or((self.pq.e_in, self.pq.in_root));
+        (e, kmac32(&root, &[context], labels::GRP_EXPORT))
+    }
+
+    /// Group exporter, receiver side: the key the peer derived with
+    /// [`Session::export_for_peer`] for our sending-direction epoch `e`, if we
+    /// still hold that root (the last 16 epochs).
+    pub fn export_from_peer(&self, e: u32, context: &[u8]) -> Option<[u8; 32]> {
+        PqState::root_at(&self.pq.out_hist, e)
+            .map(|root| kmac32(&root, &[context], labels::GRP_EXPORT))
+    }
+
     /// Delete skipped message keys held longer than `max_age` seconds. Keys
     /// are stamped with `now` the first time this runs after they were
     /// skipped, so call it regularly (the client does on every sync).
