@@ -170,7 +170,28 @@ fn clock(at: u64) -> String {
 }
 
 /// How a stored message reads in the conversation.
-fn display(m: &enclave_core::Message) -> Msg {
+/// Media type from a file name (what the sender says; receivers never open
+/// files by it).
+fn mime_for(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Edits are allowed for 24 hours (`docs/16-features.md`).
+const EDIT_WINDOW: u64 = 24 * 3600;
+
+fn display(m: &enclave_core::Message, now: u64) -> Msg {
     let mut text = if m.deleted {
         "This message was deleted.".to_string()
     } else if let Some(a) = &m.attachment {
@@ -211,6 +232,18 @@ fn display(m: &enclave_core::Message) -> Msg {
         time,
         status,
         sender: String::new(),
+        seq: m.seq,
+        can_edit: m.outgoing
+            && !m.deleted
+            && m.attachment.is_none()
+            && now.saturating_sub(m.at) < EDIT_WINDOW,
+        deleted: m.deleted,
+        file: m
+            .attachment
+            .as_ref()
+            .filter(|_| !m.deleted)
+            .map(|a| a.name.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -507,6 +540,79 @@ impl Engine {
                             self.effect(Effect::UsernameClaimed);
                         }
                         Err(err) => self.username_error = username_error(&err),
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::React(id, seq, emoji) => {
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
+                    && c.react(&root, seq, &emoji).await.is_err()
+                {
+                    self.status = "Couldn't send the reaction. Check your connection.".into();
+                }
+            }
+            Cmd::Edit(id, seq, text) => {
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
+                    && c.edit_message(&root, seq, text.trim()).await.is_err()
+                {
+                    self.status = "Couldn't edit that message. Edits work for 24 hours.".into();
+                }
+            }
+            Cmd::Delete(id, seq) => {
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
+                    && c.delete_for_everyone(&root, seq).await.is_err()
+                {
+                    self.status = "Couldn't delete that message. Check your connection.".into();
+                }
+            }
+            Cmd::Timer(id, secs) => {
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
+                    && c.set_timer(&root, secs).await.is_err()
+                {
+                    self.status = "Couldn't change the timer. Check your connection.".into();
+                }
+            }
+            Cmd::SendFile(id, name, bytes, caption) => {
+                self.busy = true;
+                self.push();
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
+                    match c
+                        .send_attachment(&root, &name, mime_for(&name), &bytes, caption.trim())
+                        .await
+                    {
+                        Ok(_) => self.effect(Effect::FileSent),
+                        Err(CoreError::TooLong) => {
+                            self.status = "That file is too large to send.".into();
+                        }
+                        Err(_) => {
+                            self.status = "Couldn't send the file. Check your connection.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::SaveFile(id, seq) => {
+                self.busy = true;
+                self.push();
+                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
+                    let name = c
+                        .messages(&root)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.attachment)
+                        .map(|a| a.name)
+                        .unwrap_or_else(|| "file".into());
+                    match c.fetch_attachment(&root, seq).await {
+                        Ok(bytes) if bytes.len() <= 15 * 1024 * 1024 => {
+                            let _ = self.out.send(Out::File(name, bytes));
+                        }
+                        Ok(_) => {
+                            self.status = "That file is too large to save from here yet.".into()
+                        }
+                        Err(_) => {
+                            self.status =
+                                "Couldn't download the file. Check your connection.".into();
+                        }
                     }
                 }
                 self.busy = false;
@@ -861,6 +967,7 @@ impl Engine {
         let Some(c) = self.client.as_ref() else {
             return s;
         };
+        let now = c.now();
         s.my_name = c.name().to_string();
         s.my_link = c.card().to_link();
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
@@ -888,7 +995,7 @@ impl Engine {
                 name: ct.name.clone(),
                 preview: last
                     .map(|m| {
-                        let t = display(m).text;
+                        let t = display(m, now).text;
                         if m.outgoing { format!("You: {t}") } else { t }
                     })
                     .unwrap_or_default(),
@@ -907,7 +1014,8 @@ impl Engine {
             };
             if self.selected == Some(ct.root) {
                 s.current = Some(row.clone());
-                s.messages = msgs.iter().map(display).collect();
+                s.timer = ct.timer;
+                s.messages = msgs.iter().map(|m| display(m, now)).collect();
                 let digits: String = c
                     .security_code(&ct.root)
                     .chars()
@@ -955,6 +1063,7 @@ impl Engine {
                         time: clock(m.at),
                         status: if m.delivered { 1 } else { 0 },
                         sender: m.from_name.clone(),
+                        ..Default::default()
                     })
                     .collect();
             }

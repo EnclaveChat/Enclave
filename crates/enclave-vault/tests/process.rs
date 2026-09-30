@@ -80,6 +80,51 @@ async fn vault_process_serves_the_ui() {
         .unwrap();
     next_snapshot(&mut rd, |s| s.recovery_words.is_empty()).await;
 
+    // Accept Sam's request, send a file, then save it back: the bytes cross
+    // the process boundary both ways.
+    let sam = s.requests[0].id.clone();
+    frame::write_frame(&mut wr, &send(Cmd::Accept(sam.clone())))
+        .await
+        .unwrap();
+    frame::write_frame(&mut wr, &send(Cmd::Select(sam.clone())))
+        .await
+        .unwrap();
+    let file: Vec<u8> = (0..70_000u32).map(|i| (i * 7) as u8).collect();
+    frame::write_frame(
+        &mut wr,
+        &send(Cmd::SendFile(
+            sam.clone(),
+            "notes.txt".into(),
+            file.clone(),
+            "for you".into(),
+        )),
+    )
+    .await
+    .unwrap();
+    let s = next_snapshot(&mut rd, |s| {
+        s.messages.iter().any(|m| m.file == "notes.txt")
+    })
+    .await;
+    let seq = s
+        .messages
+        .iter()
+        .find(|m| m.file == "notes.txt")
+        .unwrap()
+        .seq;
+    frame::write_frame(&mut wr, &send(Cmd::SaveFile(sam, seq)))
+        .await
+        .unwrap();
+    let saved = loop {
+        let body = tokio::time::timeout(Duration::from_secs(120), frame::read_frame(&mut rd))
+            .await
+            .unwrap()
+            .unwrap();
+        if let Out::File(name, bytes) = Out::decode(&body).unwrap() {
+            break (name, bytes);
+        }
+    };
+    assert_eq!(saved, ("notes.txt".to_string(), file));
+
     // The UI goes away: the vault exits, reporting its hardening.
     drop(rd);
     drop(wr);

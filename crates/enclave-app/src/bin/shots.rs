@@ -42,12 +42,19 @@ fn fixture() -> Snapshot {
         kind: 0,
         members: 0,
     };
-    let msg = |text: &str, outgoing: bool, time: &str, status: i32| Msg {
-        text: text.into(),
-        outgoing,
-        time: time.into(),
-        status,
-        sender: String::new(),
+    let seq = std::cell::Cell::new(0u64);
+    let msg = |text: &str, outgoing: bool, time: &str, status: i32| {
+        seq.set(seq.get() + 1);
+        Msg {
+            text: text.into(),
+            outgoing,
+            time: time.into(),
+            status,
+            sender: String::new(),
+            seq: seq.get(),
+            can_edit: outgoing,
+            ..Default::default()
+        }
     };
     let words = "absurd amount arctic brisk canyon cedar civil cluster dove eager ember fabric glide harbor ivory jungle kettle lunar meadow noble orbit pepper quartz ridge";
     Snapshot {
@@ -193,6 +200,7 @@ fn fixture() -> Snapshot {
         meet_name: String::new(),
         meet_error: String::new(),
         meet_done: String::new(),
+        timer: 0,
     }
 }
 
@@ -219,6 +227,7 @@ fn group_fixture(base: &Snapshot) -> Snapshot {
         time: time.into(),
         status: 1,
         sender: sender.into(),
+        ..Default::default()
     };
     g.messages = vec![
         m(
@@ -328,6 +337,7 @@ fn main() -> Result<(), slint::PlatformError> {
             time: "13:20".into(),
             status: 2,
             sender: String::new(),
+            ..Default::default()
         }];
         view::apply(&ui, &request);
         shot("06-request", desktop);
@@ -340,6 +350,7 @@ fn main() -> Result<(), slint::PlatformError> {
             time: "09:12".into(),
             status: 2,
             sender: String::new(),
+            ..Default::default()
         }];
         view::apply(&ui, &pending);
         shot("07-pending", phone);
@@ -416,6 +427,20 @@ fn main() -> Result<(), slint::PlatformError> {
         meet.meet_done = "Sam Okafor".into();
         view::apply(&ui, &meet);
         shot("20-meet-done-phone", phone);
+        // A selected message with its actions, and the timer sheet.
+        view::apply(&ui, &data);
+        ui.set_sheet(Sheet::None);
+        if let Some(m) = data.messages.iter().rev().find(|m| m.outgoing) {
+            ui.set_selected_seq(m.seq.to_string().into());
+        }
+        shot("21-message-actions", desktop);
+        ui.set_selected_seq("".into());
+        let mut timed = data.clone();
+        timed.timer = 86_400;
+        view::apply(&ui, &timed);
+        ui.set_sheet(Sheet::Timer);
+        shot("22-timer-phone", phone);
+        view::apply(&ui, &data);
         view::apply(&ui, &data);
         ui.set_sheet(Sheet::Settings);
         ui.set_sheet(Sheet::Recovery);

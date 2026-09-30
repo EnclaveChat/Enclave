@@ -79,6 +79,14 @@ pub struct Msg {
     pub status: i32,
     /// Sender name (incoming group messages).
     pub sender: String,
+    /// Position in the conversation (for actions on it).
+    pub seq: u64,
+    /// Ours, text, not deleted, and less than 24 hours old.
+    pub can_edit: bool,
+    /// Deleted by its author.
+    pub deleted: bool,
+    /// Attached file name, or empty.
+    pub file: String,
 }
 
 /// Everything the window shows.
@@ -143,6 +151,8 @@ pub struct Snapshot {
     pub meet_error: String,
     /// Name of the person we just met (confirmed), or empty.
     pub meet_done: String,
+    /// Disappearing timer of the open conversation, seconds (0 off).
+    pub timer: u32,
 }
 
 /// UI → vault.
@@ -197,6 +207,18 @@ pub enum Cmd {
     /// Include the recovery words in snapshots (only while the recovery
     /// sheet is open), or stop.
     RevealWords(bool),
+    /// React to a message: conversation, seq, emoji (empty removes).
+    React(String, u64, String),
+    /// Edit one of our messages: conversation, seq, new text.
+    Edit(String, u64, String),
+    /// Delete one of our messages for everyone: conversation, seq.
+    Delete(String, u64),
+    /// Disappearing timer for a conversation, seconds (0 off).
+    Timer(String, u32),
+    /// Send a file: conversation, name, bytes, caption.
+    SendFile(String, String, Vec<u8>, String),
+    /// Download an attachment to hand to the UI: conversation, seq.
+    SaveFile(String, u64),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -208,6 +230,8 @@ pub enum Effect {
     GroupCreated,
     /// Clear the username field.
     UsernameClaimed,
+    /// Close the attach sheet and clear it.
+    FileSent,
     /// Close the device-removal confirmation.
     RemovalDone,
 }
@@ -219,6 +243,8 @@ pub enum Out {
     Snapshot(Box<Snapshot>),
     /// A one-off reset.
     Effect(Effect),
+    /// A downloaded attachment for the UI to save: name, bytes.
+    File(String, Vec<u8>),
 }
 
 fn put_row(w: &mut Writer, r: &Row) {
@@ -294,7 +320,11 @@ impl Snapshot {
                 .bool(m.outgoing)
                 .str(&m.time)
                 .i32(m.status)
-                .str(&m.sender);
+                .str(&m.sender)
+                .u64(m.seq)
+                .bool(m.can_edit)
+                .bool(m.deleted)
+                .str(&m.file);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -331,7 +361,8 @@ impl Snapshot {
             .str(&self.meet_words)
             .str(&self.meet_name)
             .str(&self.meet_error)
-            .str(&self.meet_done);
+            .str(&self.meet_done)
+            .u32(self.timer);
         w.0
     }
 
@@ -356,6 +387,10 @@ impl Snapshot {
                     time: r.str()?,
                     status: r.i32()?,
                     sender: r.str()?,
+                    seq: r.u64()?,
+                    can_edit: r.bool()?,
+                    deleted: r.bool()?,
+                    file: r.str()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -418,6 +453,7 @@ impl Snapshot {
             meet_name: r.str()?,
             meet_error: r.str()?,
             meet_done: r.str()?,
+            timer: r.u32()?,
         };
         r.end()?;
         Ok(s)
@@ -453,6 +489,12 @@ impl Cmd {
             Cmd::Meet(b) => w.u8(22).bool(*b),
             Cmd::MeetScan(s) => w.u8(23).str(s),
             Cmd::MeetConfirm => w.u8(24),
+            Cmd::React(c, s, e) => w.u8(25).str(c).u64(*s).str(e),
+            Cmd::Edit(c, s, t) => w.u8(26).str(c).u64(*s).str(t),
+            Cmd::Delete(c, s) => w.u8(27).str(c).u64(*s),
+            Cmd::Timer(c, t) => w.u8(28).str(c).u32(*t),
+            Cmd::SendFile(c, n, b, cap) => w.u8(29).str(c).str(n).bytes(b).str(cap),
+            Cmd::SaveFile(c, s) => w.u8(30).str(c).u64(*s),
         };
         w.0
     }
@@ -485,6 +527,12 @@ impl Cmd {
             22 => Cmd::Meet(r.bool()?),
             23 => Cmd::MeetScan(r.str()?),
             24 => Cmd::MeetConfirm,
+            25 => Cmd::React(r.str()?, r.u64()?, r.str()?),
+            26 => Cmd::Edit(r.str()?, r.u64()?, r.str()?),
+            27 => Cmd::Delete(r.str()?, r.u64()?),
+            28 => Cmd::Timer(r.str()?, r.u32()?),
+            29 => Cmd::SendFile(r.str()?, r.str()?, r.bytes()?, r.str()?),
+            30 => Cmd::SaveFile(r.str()?, r.u64()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -497,6 +545,11 @@ impl Out {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Out::Snapshot(s) => [&[1u8][..], &s.encode()].concat(),
+            Out::File(name, bytes) => {
+                let mut w = Writer::default();
+                w.u8(3).str(name).bytes(bytes);
+                w.0
+            }
             Out::Effect(e) => vec![
                 2,
                 match e {
@@ -504,6 +557,7 @@ impl Out {
                     Effect::GroupCreated => 2,
                     Effect::UsernameClaimed => 3,
                     Effect::RemovalDone => 4,
+                    Effect::FileSent => 5,
                 },
             ],
         }
@@ -518,8 +572,15 @@ impl Out {
                 2 => Effect::GroupCreated,
                 3 => Effect::UsernameClaimed,
                 4 => Effect::RemovalDone,
+                5 => Effect::FileSent,
                 _ => return Err(IpcError::Malformed),
             })),
+            [3, ..] => {
+                let mut r = Reader(&b[1..]);
+                let o = Out::File(r.str()?, r.bytes()?);
+                r.end()?;
+                Ok(o)
+            }
             _ => Err(IpcError::Malformed),
         }
     }

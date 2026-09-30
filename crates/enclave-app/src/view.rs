@@ -111,6 +111,10 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             time: m.time.clone().into(),
             status: m.status,
             sender: m.sender.clone().into(),
+            seq: m.seq.to_string().into(),
+            can_edit: m.can_edit,
+            deleted: m.deleted,
+            file: m.file.clone().into(),
         })
         .collect();
     ui.set_messages(ModelRc::from(Rc::new(VecModel::from(msgs))));
@@ -159,6 +163,7 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     }
     ui.set_join_words(s.join_words.clone().into());
     ui.set_recovery_alert(s.recovery_alert.clone().into());
+    ui.set_timer(s.timer as i32);
     if ui.get_meet_code().as_str() != s.meet_code {
         ui.set_meet_code(s.meet_code.clone().into());
         if !s.meet_code.is_empty() {
@@ -188,5 +193,10 @@ pub fn apply_effect(ui: &AppWindow, e: Effect) {
         }
         Effect::UsernameClaimed => ui.set_username_input("".into()),
         Effect::RemovalDone => ui.set_confirm_remove("".into()),
+        Effect::FileSent => {
+            ui.set_sheet(Sheet::None);
+            ui.set_attach_path("".into());
+            ui.set_attach_caption("".into());
+        }
     }
 }

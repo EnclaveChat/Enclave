@@ -6,6 +6,8 @@ use crate::{IpcError, Result};
 pub const MAX_STR: usize = 64 * 1024;
 /// Most items in one list.
 pub const MAX_ITEMS: usize = 100_000;
+/// Largest byte field (a file crossing between the processes).
+pub const MAX_BYTES: usize = 15 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Writer(pub Vec<u8>);
@@ -27,6 +29,18 @@ impl Writer {
 
     pub fn i32(&mut self, v: i32) -> &mut Self {
         self.0.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn u64(&mut self, v: u64) -> &mut Self {
+        self.0.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    /// Callers keep `b` within [`MAX_BYTES`] (the decoder refuses more).
+    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        self.u32(b.len() as u32);
+        self.0.extend_from_slice(b);
         self
     }
 
@@ -85,6 +99,21 @@ impl<'a> Reader<'a> {
     pub fn i32(&mut self) -> Result<i32> {
         let b = self.take(4)?;
         Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub fn u64(&mut self) -> Result<u64> {
+        let b = self.take(8)?;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(b);
+        Ok(u64::from_be_bytes(a))
+    }
+
+    pub fn bytes(&mut self) -> Result<Vec<u8>> {
+        let n = self.u32()? as usize;
+        if n > MAX_BYTES {
+            return Err(IpcError::Malformed);
+        }
+        Ok(self.take(n)?.to_vec())
     }
 
     pub fn str(&mut self) -> Result<String> {

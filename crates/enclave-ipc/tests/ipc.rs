@@ -30,6 +30,10 @@ fn snapshot() -> Snapshot {
             time: "14:03".into(),
             status: 1,
             sender: String::new(),
+            seq: u64::MAX - 3,
+            can_edit: true,
+            deleted: false,
+            file: "photo.jpg".into(),
         }],
         code_groups: vec!["12345".into(); 12],
         status: "ok".into(),
@@ -65,6 +69,7 @@ fn snapshot() -> Snapshot {
         meet_name: "Sam".into(),
         meet_error: String::new(),
         meet_done: String::new(),
+        timer: 3600,
     }
 }
 
@@ -94,6 +99,12 @@ fn cmds() -> Vec<Cmd> {
         Cmd::Meet(true),
         Cmd::MeetScan("enclave:meet#x".into()),
         Cmd::MeetConfirm,
+        Cmd::React("ab".into(), 3, "👍".into()),
+        Cmd::Edit("ab".into(), 4, "fixed".into()),
+        Cmd::Delete("ab".into(), 5),
+        Cmd::Timer("ab".into(), 86_400),
+        Cmd::SendFile("ab".into(), "a.txt".into(), vec![7; 1000], "look".into()),
+        Cmd::SaveFile("ab".into(), 6),
     ]
 }
 
@@ -114,6 +125,8 @@ fn round_trips() {
         Out::Effect(Effect::GroupCreated),
         Out::Effect(Effect::UsernameClaimed),
         Out::Effect(Effect::RemovalDone),
+        Out::Effect(Effect::FileSent),
+        Out::File("a.txt".into(), vec![1, 2, 3]),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);
     }

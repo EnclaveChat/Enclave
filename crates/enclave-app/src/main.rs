@@ -15,6 +15,49 @@ use enclave_vault::Mode;
 use slint::ComponentHandle;
 use std::time::Duration;
 
+/// Largest file sent from here (it crosses to the vault in one message).
+const MAX_FILE: u64 = 15 * 1024 * 1024;
+
+/// Write a downloaded attachment into the Downloads folder without
+/// overwriting anything. The name is the sender's, so only its last
+/// component is used.
+fn save_download(name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = [home.join("Downloads"), home]
+        .into_iter()
+        .find(|d| d.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let base = std::path::Path::new(name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && !n.is_empty())
+        .unwrap_or_else(|| "file".into());
+    for i in 0..1000 {
+        let candidate = if i == 0 {
+            dir.join(&base)
+        } else {
+            dir.join(format!("{i} {base}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(bytes)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many files with that name"))
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let args: Vec<String> = std::env::args().collect();
     let mode = Mode::from_args(&args);
@@ -28,9 +71,23 @@ fn main() -> Result<(), slint::PlatformError> {
         .name("enclave-ui-feed".into())
         .spawn(move || {
             while let Some(o) = out.blocking_recv() {
+                // Files are written here, in the UI process: the vault can't
+                // reach anything outside its profile.
+                let o = match o {
+                    Out::File(name, bytes) => {
+                        let note = match save_download(&name, &bytes) {
+                            Ok(path) => format!("Saved to {}", path.display()),
+                            Err(e) => format!("Couldn't save {name}: {e}"),
+                        };
+                        let _ = w.upgrade_in_event_loop(move |ui| ui.set_file_note(note.into()));
+                        continue;
+                    }
+                    other => other,
+                };
                 let _ = w.upgrade_in_event_loop(move |ui| match o {
                     Out::Snapshot(s) => view::apply(&ui, &s),
                     Out::Effect(e) => view::apply_effect(&ui, e),
+                    Out::File(..) => {}
                 });
             }
         })
@@ -119,6 +176,65 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_open_sheet(move |s| {
         if let Some(ui) = w.upgrade() {
             ui.set_sheet(s);
+        }
+    });
+    let t = tx.clone();
+    ui.on_react(move |id, seq, emoji| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::React(id.to_string(), seq, emoji.to_string()));
+        }
+    });
+    let t = tx.clone();
+    ui.on_edit_message(move |id, seq, text| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::Edit(id.to_string(), seq, text.to_string()));
+        }
+    });
+    let t = tx.clone();
+    ui.on_delete_message(move |id, seq| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::Delete(id.to_string(), seq));
+        }
+    });
+    let t = tx.clone();
+    ui.on_set_timer(move |id, secs| {
+        let _ = t.send(Cmd::Timer(id.to_string(), secs.max(0) as u32));
+    });
+    let t = tx.clone();
+    ui.on_save_file(move |id, seq| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::SaveFile(id.to_string(), seq));
+        }
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_send_file(move |id, path, caption| {
+        let path = std::path::PathBuf::from(path.trim());
+        let result = std::fs::metadata(&path).and_then(|m| {
+            if m.len() > MAX_FILE {
+                Err(std::io::Error::other("larger than 15 MB"))
+            } else {
+                std::fs::read(&path)
+            }
+        });
+        match result {
+            Ok(bytes) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into());
+                let _ = t.send(Cmd::SendFile(
+                    id.to_string(),
+                    name,
+                    bytes,
+                    caption.to_string(),
+                ));
+            }
+            Err(e) => {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_attach_error(format!("Couldn't read that file: {e}.").into());
+                }
+            }
         }
     });
     let t = tx.clone();

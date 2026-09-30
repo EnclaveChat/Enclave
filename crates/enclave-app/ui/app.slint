@@ -4,6 +4,8 @@
 import "fonts/AtkinsonHyperlegibleNext-Regular.ttf";
 import "fonts/AtkinsonHyperlegibleNext-SemiBold.ttf";
 import "fonts/AtkinsonHyperlegibleMono-Regular.ttf";
+// Emoji (reactions, and emoji people type): Noto Emoji, monochrome outlines.
+import "fonts/NotoEmoji-Regular.ttf";
 import { Tokens } from "tokens.slint";
 import {
     Body, Secondary, Caption, Title, ScreenTitle, Code, Seal, SealState, PrimaryButton,
@@ -52,10 +54,15 @@ export struct MessageRow {
     time: string,
     status: int,
     sender: string,
+    // Position in the conversation (decimal), for actions on it.
+    seq: string,
+    can-edit: bool,
+    deleted: bool,
+    file: string,
 }
 
 export enum Screen { welcome, name, setting-up, join, main }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -79,16 +86,22 @@ component DeliveryMark inherits Rectangle {
 component Bubble inherits HorizontalLayout {
     in property <MessageRow> msg;
     in property <length> bubble-max;
+    in property <bool> selected;
+    callback tapped();
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
         background: root.msg.outgoing ? Tokens.bubble-out : Tokens.bubble-in;
+        border-width: root.selected ? 2px : 0px;
+        border-color: Tokens.focus-ring;
+        TouchArea { clicked => { root.tapped(); } }
         border-top-left-radius: Tokens.radius-bubble;
         border-top-right-radius: Tokens.radius-bubble;
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
         accessible-label: (root.msg.outgoing ? "You: " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
             padding-right: Tokens.space-sm;
@@ -326,6 +339,19 @@ export component AppWindow inherits Window {
     in property <string> recovery-alert;
     callback stop-recovery();
     callback meet-scan(string);
+    callback react(string, string, string);
+    callback edit-message(string, string, string);
+    callback delete-message(string, string);
+    callback set-timer(string, int);
+    callback send-file(string, string, string);
+    callback save-file(string, string);
+    in property <int> timer;
+    in-out property <string> selected-seq;
+    in-out property <string> editing-seq;
+    in-out property <string> attach-path;
+    in-out property <string> attach-caption;
+    in-out property <string> attach-error;
+    in-out property <string> file-note;
     callback meet-confirm();
     in property <string> meet-code;
     in property <image> meet-qr;
@@ -610,7 +636,17 @@ export component AppWindow inherits Window {
                                         ? root.current.members + " people · Off the record"
                                         : (root.current.met ? "Met in person" : root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
                                     vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
                                 }
+                            }
+                        }
+                        if root.current.state == 2 && root.current.kind == 0: VerticalLayout {
+                            alignment: center;
+                            IconButton {
+                                icon: Icons.timer;
+                                label: root.timer > 0 ? "Disappearing messages: on" : "Disappearing messages: off";
+                                clicked => { root.open-sheet(Sheet.timer); }
                             }
                         }
                         if root.current.state == 2 && root.current.kind == 0: VerticalLayout {
@@ -641,6 +677,12 @@ export component AppWindow inherits Window {
                         for m in root.messages: Bubble {
                             msg: m;
                             bubble-max: min(480px, root.width * 0.7);
+                            selected: root.selected-seq == m.seq;
+                            tapped => {
+                                if root.current.state == 2 && root.current.kind == 0 && !m.deleted {
+                                    root.selected-seq = root.selected-seq == m.seq ? "" : m.seq;
+                                }
+                            }
                         }
                     }
                 }
@@ -670,24 +712,120 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                // Actions on the selected message.
+                if root.current.state == 2 && root.selected-seq != "": Rectangle {
+                    background: Tokens.surface;
+                    Rectangle { y: 0; height: 1px; background: Tokens.hairline; }
+                    HorizontalLayout {
+                        padding-left: Tokens.space-m;
+                        padding-right: Tokens.space-m;
+                        padding-top: Tokens.space-s;
+                        spacing: Tokens.space-xs;
+                        for e in ["👍", "❤", "😂", "😮", "😢", "🙏"]: Rectangle {
+                            width: Tokens.space-touch-target-min;
+                            height: Tokens.space-touch-target-min;
+                            border-radius: Tokens.radius-control;
+                            background: react-touch.has-hover ? Tokens.bubble-in : transparent;
+                            accessible-role: button;
+                            accessible-label: "React " + e;
+                            accessible-action-default => {
+                                root.react(root.current-id, root.selected-seq, e);
+                                root.selected-seq = "";
+                            }
+                            Text {
+                                text: e;
+                                font-size: 24px;
+                                color: Tokens.text;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            react-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.react(root.current-id, root.selected-seq, e);
+                                    root.selected-seq = "";
+                                }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        for m in root.messages: HorizontalLayout {
+                            spacing: Tokens.space-xs;
+                            if m.seq == root.selected-seq && m.can-edit: QuietButton {
+                                text: "Edit";
+                                clicked => {
+                                    root.editing-seq = m.seq;
+                                    root.draft = m.text;
+                                    root.selected-seq = "";
+                                }
+                            }
+                            if m.seq == root.selected-seq && m.outgoing && !m.deleted: QuietButton {
+                                text: "Delete";
+                                danger: true;
+                                accessible-label: "Delete for everyone";
+                                clicked => {
+                                    root.delete-message(root.current-id, m.seq);
+                                    root.selected-seq = "";
+                                }
+                            }
+                            if m.seq == root.selected-seq && m.file != "": QuietButton {
+                                text: "Save";
+                                accessible-label: "Save " + m.file;
+                                clicked => {
+                                    root.save-file(root.current-id, m.seq);
+                                    root.selected-seq = "";
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.current.state == 2 && root.file-note != "": Caption {
+                    text: root.file-note;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
                 if root.current.state == 2: Rectangle {
                     HorizontalLayout {
                         padding: Tokens.space-m;
                         spacing: Tokens.space-s;
+                        if root.current.kind == 0 && root.editing-seq == "": IconButton {
+                            icon: Icons.attach;
+                            label: "Send a file";
+                            clicked => { root.attach-error = ""; root.open-sheet(Sheet.attach); }
+                        }
                         composer := Field {
-                            placeholder: "Message";
+                            placeholder: root.editing-seq != "" ? "Edit your message" : "Message";
                             text <=> root.draft;
                             horizontal-stretch: 1;
                             accepted => {
-                                if root.draft != "" { root.send(root.current-id, root.draft); root.draft = ""; }
+                                if root.draft != "" {
+                                    if root.editing-seq != "" {
+                                        root.edit-message(root.current-id, root.editing-seq, root.draft);
+                                        root.editing-seq = "";
+                                    } else {
+                                        root.send(root.current-id, root.draft);
+                                    }
+                                    root.draft = "";
+                                }
                             }
+                        }
+                        if root.editing-seq != "": QuietButton {
+                            text: "Cancel";
+                            clicked => { root.editing-seq = ""; root.draft = ""; }
                         }
                         IconButton {
                             icon: Icons.send;
-                            label: "Send";
+                            label: root.editing-seq != "" ? "Save edit" : "Send";
                             filled: true;
                             clicked => {
-                                if root.draft != "" { root.send(root.current-id, root.draft); root.draft = ""; }
+                                if root.draft != "" {
+                                    if root.editing-seq != "" {
+                                        root.edit-message(root.current-id, root.editing-seq, root.draft);
+                                        root.editing-seq = "";
+                                    } else {
+                                        root.send(root.current-id, root.draft);
+                                    }
+                                    root.draft = "";
+                                }
                             }
                         }
                     }
@@ -780,6 +918,67 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             alignment: start;
             QuietButton { text: "Together right now? Meet in person"; outlined: true; clicked => { root.open-sheet(Sheet.meet); } }
+        }
+    }
+
+    if root.sheet == Sheet.timer: SheetFrame {
+        title: "Disappearing messages";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "New messages in this conversation disappear from both phones this long after they're read. Anyone can still take a screenshot."; }
+        for option in [
+            { label: "Off", secs: 0 },
+            { label: "5 minutes", secs: 300 },
+            { label: "1 hour", secs: 3600 },
+            { label: "1 day", secs: 86400 },
+            { label: "1 week", secs: 604800 },
+        ]: Rectangle {
+            height: Tokens.space-touch-target-min;
+            border-radius: Tokens.radius-control;
+            border-width: root.timer == option.secs ? 2px : 1px;
+            border-color: root.timer == option.secs ? Tokens.pine : Tokens.hairline;
+            accessible-role: radio-button;
+            accessible-checked: root.timer == option.secs;
+            accessible-label: option.label;
+            accessible-action-default => { root.set-timer(root.current-id, option.secs); }
+            TouchArea { clicked => { root.set-timer(root.current-id, option.secs); } }
+            HorizontalLayout {
+                padding-left: Tokens.space-m;
+                spacing: Tokens.space-sm;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 10px;
+                        border-width: 2px;
+                        border-color: root.timer == option.secs ? Tokens.pine : Tokens.text-muted;
+                        if root.timer == option.secs: Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Tokens.pine; }
+                    }
+                }
+                Body { text: option.label; vertical-alignment: center; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.attach: SheetFrame {
+        title: "Send a file";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Files are sealed before they leave this device and padded so their size doesn't give them away. " + root.current.name + " downloads them only when they choose to."; }
+        Field { placeholder: "Path to the file"; mono: true; text <=> root.attach-path; }
+        Field { placeholder: "Add a caption (optional)"; text <=> root.attach-caption; }
+        if root.attach-error != "": Text {
+            text: root.attach-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Sending…" : "Send";
+                enabled: root.attach-path != "" && !root.busy;
+                clicked => { root.send-file(root.current-id, root.attach-path, root.attach-caption); }
+            }
         }
     }
 
