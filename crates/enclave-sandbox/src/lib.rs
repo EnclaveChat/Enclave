@@ -56,6 +56,7 @@ pub enum Profile {
 
 /// Harden the running process. Call first thing.
 pub fn process() -> Report {
+    #[allow(unused_mut)]
     let mut r = Report {
         filesystem: "off",
         network: "in-process",

@@ -4,7 +4,15 @@
 //! inside it, and starts `enclave-vault` from next to its own executable with
 //! a fresh 32-byte token on the child's stdin. The first connection must
 //! present that token and (where the kernel reports it) be the child's pid;
-//! the socket is then unlinked, so nothing else can connect. Commands and outputs cross as [`enclave_ipc`] frames. If the vault
+//! the socket is then unlinked, so nothing else can connect.
+//!
+//! On Windows the UI instead creates a named pipe `\\.\pipe\enclave-<random>`
+//! as its first and only instance, refusing remote clients, before it
+//! starts the vault; the vault connects and presents the token the same
+//! way. (The kernel's client process id is not checked there yet: that
+//! needs the Win32 API, which this crate's no-`unsafe` rule keeps out.)
+//!
+//! Commands and outputs cross as [`enclave_ipc`] frames. If the vault
 //! exits, the UI shows that instead of pretending to work.
 
 use enclave_ipc::{Cmd, Out, Snapshot};
@@ -93,22 +101,7 @@ pub fn spawn_process(bin: &std::path::Path, mode: &Mode) -> std::io::Result<Chan
                     {
                         return Err(enclave_ipc::IpcError::Unauthenticated);
                     }
-                    let (mut rd, mut wr) = tokio::io::split(stream);
-                    frame::check_token(&mut rd, &token).await?;
-                    loop {
-                        tokio::select! {
-                            cmd = cmd_rx.recv() => {
-                                let Some(cmd) = cmd else { return Ok(()) };
-                                frame::write_frame(&mut wr, &cmd.encode()).await?;
-                            }
-                            body = frame::read_frame(&mut rd) => {
-                                let out = Out::decode(&body?)?;
-                                if out_tx.send(out).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
+                    relay(stream, &token, &mut cmd_rx, &out_tx).await
                 }
                 .await;
                 let _ = std::fs::remove_file(&sock);
@@ -126,8 +119,126 @@ pub fn spawn_process(bin: &std::path::Path, mode: &Mode) -> std::io::Result<Chan
     Ok((cmd_tx, out_rx))
 }
 
+/// Check the vault's token, then carry commands to it and outputs back
+/// until either side goes away.
+async fn relay<S>(
+    stream: S,
+    token: &[u8; enclave_ipc::frame::TOKEN_LEN],
+    cmd_rx: &mut mpsc::UnboundedReceiver<Cmd>,
+    out_tx: &mpsc::UnboundedSender<Out>,
+) -> enclave_ipc::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
+    use enclave_ipc::frame;
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    frame::check_token(&mut rd, token).await?;
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { return Ok(()) };
+                frame::write_frame(&mut wr, &cmd.encode()).await?;
+            }
+            body = frame::read_frame(&mut rd) => {
+                let out = Out::decode(&body?)?;
+                if out_tx.send(out).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Start the vault binary at `bin` as a separate process (Windows: over a
+/// named pipe).
+#[cfg(windows)]
+pub fn spawn_process(bin: &std::path::Path, mode: &Mode) -> std::io::Result<Channels> {
+    use enclave_ipc::frame;
+    use std::io::Write;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let mut rng = enclave_crypto::rng::HedgedRng::new().map_err(std::io::Error::other)?;
+    let token: [u8; frame::TOKEN_LEN] = rng
+        .array("app/vault-token")
+        .map_err(std::io::Error::other)?;
+    let nonce: [u8; 16] = rng.array("app/vault-dir").map_err(std::io::Error::other)?;
+    let hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let pipe = format!(r"\\.\pipe\enclave-{hex}");
+    let bin = bin.to_path_buf();
+    let args = mode.to_args();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<Out>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::io::Result<()>>();
+    std::thread::Builder::new()
+        .name("enclave-vault-link".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                // The pipe exists, as its only instance, before the vault
+                // starts; nothing remote can open it.
+                let server = match ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .reject_remote_clients(true)
+                    .max_instances(1)
+                    .create(&pipe)
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let mut child = match std::process::Command::new(&bin)
+                    .arg("--connect")
+                    .arg(&pipe)
+                    .args(&args)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = writeln!(stdin, "{}", frame::token_hex(&token));
+                }
+                let _ = ready_tx.send(Ok(()));
+                let result: enclave_ipc::Result<()> = async {
+                    tokio::time::timeout(std::time::Duration::from_secs(30), server.connect())
+                        .await
+                        .map_err(|_| std::io::Error::other("vault did not connect"))??;
+                    relay(server, &token, &mut cmd_rx, &out_tx).await
+                }
+                .await;
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Err(e) = result {
+                    let _ = out_tx.send(Out::Snapshot(Box::new(Snapshot {
+                        status: format!("Enclave's vault stopped ({e}). Restart Enclave."),
+                        ..Default::default()
+                    })));
+                }
+            });
+        })?;
+    ready_rx
+        .recv()
+        .map_err(|_| std::io::Error::other("the vault launcher stopped"))??;
+    Ok((cmd_tx, out_rx))
+}
+
 /// Start the vault binary at `bin` as a separate process.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn spawn_process(_: &std::path::Path, _: &Mode) -> std::io::Result<Channels> {
     Err(std::io::Error::other("not supported on this platform yet"))
 }
