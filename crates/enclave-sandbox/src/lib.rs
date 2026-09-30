@@ -39,6 +39,9 @@ pub struct Report {
     pub network: &'static str,
     /// System-call filter: "filtered", "unavailable", "error" or "off".
     pub syscalls: &'static str,
+    /// Where pictures are decoded: "mediad" (a separate confined process)
+    /// or "in-process".
+    pub media: &'static str,
 }
 
 /// Which system calls a process keeps.
@@ -57,6 +60,7 @@ pub fn process() -> Report {
         filesystem: "off",
         network: "in-process",
         syscalls: "off",
+        media: "in-process",
         ..Report::default()
     };
     #[cfg(unix)]
@@ -78,6 +82,29 @@ pub fn process() -> Report {
         r.no_new_privs = rustix::thread::set_no_new_privs(true).is_ok();
     }
     r
+}
+
+/// Cap the address space at `bytes` (Unix), so a picture that decodes to
+/// more than it claimed fails an allocation instead of exhausting memory.
+/// Returns whether the limit took effect.
+pub fn memory_limit(bytes: u64) -> bool {
+    #[cfg(unix)]
+    {
+        use rustix::process::{Resource, Rlimit, setrlimit};
+        setrlimit(
+            Resource::As,
+            Rlimit {
+                current: Some(bytes),
+                maximum: Some(bytes),
+            },
+        )
+        .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = bytes;
+        false
+    }
 }
 
 /// Install the seccomp filter for `profile` (Linux) on every thread of the

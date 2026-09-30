@@ -342,6 +342,70 @@ fn main() -> Result<(), slint::PlatformError> {
         shot("05-conversation", desktop);
         shot("05-conversation-phone", phone);
 
+        // A picture from Sam, with its preview (as mediad would send it).
+        let mut pic = data.clone();
+        let id = pic
+            .current
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        pic.messages.push(Msg {
+            text: "The view from the café".into(),
+            outgoing: false,
+            time: "14:05".into(),
+            status: 2,
+            seq: 900,
+            file: "harbour.jpg".into(),
+            image: true,
+            ..Default::default()
+        });
+        view::apply(&ui, &pic);
+        let (w, h) = (480u32, 320u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // Evening sky over water, a low sun, and a pier.
+                let (r, g, b) = if y < 190 {
+                    let t = y as f32 / 190.0;
+                    (
+                        (236.0 - 60.0 * t) as u8,
+                        (196.0 - 70.0 * t) as u8,
+                        (150.0 - 20.0 * t) as u8,
+                    )
+                } else {
+                    let t = (y - 190) as f32 / 130.0;
+                    (
+                        (70.0 - 30.0 * t) as u8,
+                        (98.0 - 30.0 * t) as u8,
+                        (110.0 - 20.0 * t) as u8,
+                    )
+                };
+                let (dx, dy) = (x as f32 - 330.0, y as f32 - 170.0);
+                let sun = dx * dx + dy * dy < 30.0 * 30.0;
+                let pier = y > 205 && y < 214 && x < 260;
+                let px_ = if sun {
+                    (250, 214, 150)
+                } else if pier {
+                    (40, 36, 34)
+                } else {
+                    (r, g, b)
+                };
+                px.extend_from_slice(&[px_.0, px_.1, px_.2, 255]);
+            }
+        }
+        view::apply_preview(
+            &ui,
+            view::Preview {
+                conversation: id,
+                seq: 900,
+                width: w,
+                height: h,
+                pixels: px,
+            },
+        );
+        shot("05-picture", desktop);
+        view::apply(&ui, &data);
+
         let mut request = data.clone();
         request.current = Some(data.requests[0].clone());
         request.messages = vec![Msg {

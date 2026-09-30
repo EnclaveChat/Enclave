@@ -34,6 +34,7 @@ fn snapshot() -> Snapshot {
             can_edit: true,
             deleted: false,
             file: "photo.jpg".into(),
+            image: true,
         }],
         code_groups: vec!["12345".into(); 12],
         status: "ok".into(),
@@ -148,6 +149,13 @@ fn round_trips() {
         Out::Effect(Effect::PassphraseChanged),
         Out::File("a.txt".into(), vec![1, 2, 3]),
         Out::Invite("enclave:add#AAAA".into()),
+        Out::Preview(enclave_ipc::Preview {
+            conversation: "ab".into(),
+            seq: 3,
+            width: 2,
+            height: 1,
+            pixels: vec![1; 8],
+        }),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);
     }
@@ -244,4 +252,84 @@ fn net_messages_round_trip_and_refuse_garbage() {
         assert_eq!(NetReply::decode(&r.encode()).unwrap(), r);
     }
     assert!(NetReply::decode(&[0, 0, 0, 1, 9]).is_err());
+}
+
+#[test]
+fn media_messages_round_trip_and_check_sizes() {
+    use enclave_ipc::media::{MediaOp, MediaOut, MediaReply, MediaRequest};
+    for r in [
+        MediaRequest {
+            id: 1,
+            op: MediaOp::Sanitize,
+            bytes: vec![0xff, 0xd8, 0xff],
+        },
+        MediaRequest {
+            id: 2,
+            op: MediaOp::Thumbnail(560),
+            bytes: vec![7; 1000],
+        },
+    ] {
+        assert_eq!(MediaRequest::decode(&r.encode()).unwrap(), r);
+    }
+    for r in [
+        MediaReply {
+            id: 1,
+            result: Ok(MediaOut::Sanitized {
+                png: true,
+                width: 3,
+                height: 4,
+                bytes: vec![1, 2, 3],
+            }),
+        },
+        MediaReply {
+            id: 2,
+            result: Ok(MediaOut::Rgba {
+                width: 2,
+                height: 2,
+                pixels: vec![9; 16],
+            }),
+        },
+        MediaReply {
+            id: 3,
+            result: Err("damaged".into()),
+        },
+    ] {
+        assert_eq!(MediaReply::decode(&r.encode()).unwrap(), r);
+    }
+    // Pixels that don't match the stated size are refused.
+    let lying = MediaReply {
+        id: 4,
+        result: Ok(MediaOut::Rgba {
+            width: 100,
+            height: 100,
+            pixels: vec![0; 16],
+        }),
+    };
+    assert!(MediaReply::decode(&lying.encode()).is_err());
+    let bad_preview = Out::Preview(enclave_ipc::Preview {
+        conversation: "ab".into(),
+        seq: 1,
+        width: 50,
+        height: 50,
+        pixels: vec![0; 4],
+    });
+    assert!(Out::decode(&bad_preview.encode()).is_err());
+    // Sizes whose product overflows are refused, not a panic.
+    let huge = Out::Preview(enclave_ipc::Preview {
+        conversation: "ab".into(),
+        seq: 1,
+        width: u32::MAX,
+        height: u32::MAX,
+        pixels: vec![0; 4],
+    });
+    assert!(Out::decode(&huge.encode()).is_err());
+    let huge = MediaReply {
+        id: 5,
+        result: Ok(MediaOut::Rgba {
+            width: u32::MAX,
+            height: u32::MAX,
+            pixels: vec![0; 4],
+        }),
+    };
+    assert!(MediaReply::decode(&huge.encode()).is_err());
 }

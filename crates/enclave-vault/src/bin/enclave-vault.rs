@@ -65,10 +65,16 @@ fn run(
     rt.block_on(async {
         match tokio::net::UnixStream::connect(socket).await {
             Ok(s) => {
-                // The network lives in netd; start it while we still may.
+                // The network lives in netd and pictures in mediad; start
+                // them while we still may.
                 let net = start_netd(&mode);
                 if net.is_some() {
                     report.network = "netd";
+                }
+                let media = enclave_vault::media::mediad_binary()
+                    .and_then(|b| enclave_vault::media::Media::spawn(&b).ok());
+                if media.is_some() {
+                    report.media = "mediad";
                 }
                 // From here on only the profile is reachable, and (with
                 // netd) no TCP connection can be opened.
@@ -83,7 +89,8 @@ fn run(
                     _ => enclave_vault::harden::Profile::Vault,
                 };
                 report.syscalls = enclave_vault::harden::syscalls(profile, false);
-                enclave_vault::serve_with(mode, net, s, &token)
+                let helpers = enclave_vault::Helpers { net, media };
+                enclave_vault::serve_with(mode, helpers, s, &token)
                     .await
                     .is_ok()
             }

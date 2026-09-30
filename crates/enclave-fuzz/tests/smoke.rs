@@ -9,6 +9,20 @@ use enclave_fuzz::{TARGETS, Xorshift, mutate};
 fn samples() -> Vec<Vec<u8>> {
     let mut rng = HedgedRng::new().unwrap();
     let mut out = vec![Vec::new(), vec![0; 72], vec![0xff; 200]];
+    // Small pictures for the media target.
+    let mut png_bytes = Vec::new();
+    {
+        let mut e = png::Encoder::new(&mut png_bytes, 6, 4);
+        e.set_color(png::ColorType::Rgba);
+        let mut w = e.write_header().unwrap();
+        w.write_image_data(&[90; 6 * 4 * 4]).unwrap();
+    }
+    out.push(png_bytes);
+    let mut jpeg = Vec::new();
+    jpeg_encoder::Encoder::new(&mut jpeg, 80)
+        .encode(&[120; 8 * 8 * 3], 8, 8, jpeg_encoder::ColorType::Rgb)
+        .unwrap();
+    out.push(jpeg);
     // Content, cards, attachments.
     use enclave_core::content::Content;
     out.push(

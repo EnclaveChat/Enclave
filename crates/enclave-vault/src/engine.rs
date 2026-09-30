@@ -100,8 +100,25 @@ struct Demo {
     replies: usize,
 }
 
+/// Processes the vault hands work to (`docs/15-client.md` §1.1a).
+#[derive(Default)]
+pub struct Helpers {
+    /// netd, for the network in server mode.
+    pub net: Option<Arc<dyn Transport>>,
+    /// mediad, for pictures (in-process decoding when absent).
+    pub media: Option<crate::media::Media>,
+}
+
+/// Longest side of a preview sent to the UI.
+const PREVIEW_SIDE: u16 = 560;
+/// Largest attachment downloaded on its own for a preview.
+const PREVIEW_MAX_BYTES: u64 = 16 << 20;
+
 struct Engine {
     mode: Mode,
+    media: crate::media::Media,
+    /// Previews already sent to the UI (conversation, message position).
+    previews: std::collections::HashSet<(String, u64)>,
     transport: Arc<dyn Transport>,
     server: ServerId,
     client: Option<Client>,
@@ -176,7 +193,6 @@ fn clock(at: u64) -> String {
         .unwrap_or_default()
 }
 
-/// How a stored message reads in the conversation.
 /// Media type from a file name (what the sender says; receivers never open
 /// files by it).
 fn mime_for(name: &str) -> &'static str {
@@ -198,9 +214,13 @@ fn mime_for(name: &str) -> &'static str {
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
 
+/// How a stored message reads in the conversation.
 fn display(m: &enclave_core::Message, now: u64) -> Msg {
     let mut text = if m.deleted {
         "This message was deleted.".to_string()
+    } else if m.attachment.as_ref().is_some_and(is_picture) {
+        // The UI shows the picture (or its name until it arrives).
+        m.text.clone()
     } else if let Some(a) = &m.attachment {
         let kind = if a.mime.starts_with("image/") {
             "Photo"
@@ -251,7 +271,24 @@ fn display(m: &enclave_core::Message, now: u64) -> Msg {
             .filter(|_| !m.deleted)
             .map(|a| a.name.clone())
             .unwrap_or_default(),
+        image: m
+            .attachment
+            .as_ref()
+            .is_some_and(|a| !m.deleted && is_picture(a)),
     }
+}
+
+/// An attachment we'd preview: a JPEG or PNG (by its stated type; the bytes
+/// are checked again before decoding) of a size worth fetching on its own.
+fn is_picture(a: &enclave_core::files::Attachment) -> bool {
+    matches!(a.mime.as_str(), "image/jpeg" | "image/png") && a.size <= PREVIEW_MAX_BYTES
+}
+
+/// `name` with its extension replaced by `ext`.
+fn with_extension(name: &str, ext: &str) -> String {
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let stem = if stem.is_empty() { "picture" } else { stem };
+    format!("{stem}.{ext}")
 }
 
 fn link_error(e: &CoreError) -> String {
@@ -293,14 +330,14 @@ fn username_error(e: &CoreError) -> String {
 
 /// Run the engine until the command channel closes.
 pub async fn run(mode: Mode, rx: mpsc::UnboundedReceiver<Cmd>, out: mpsc::UnboundedSender<Out>) {
-    run_with(mode, None, rx, out).await;
+    run_with(mode, Helpers::default(), rx, out).await;
 }
 
 /// [`run`], reaching the server in server mode through `net` (netd) instead
 /// of opening connections from this process.
 pub async fn run_with(
     mode: Mode,
-    net: Option<Arc<dyn Transport>>,
+    helpers: Helpers,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     out: mpsc::UnboundedSender<Out>,
 ) {
@@ -324,7 +361,7 @@ pub async fn run_with(
                 .as_ref()
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|b| enclave_core::KtPolicy::decode(&b).ok());
-            let t: Arc<dyn Transport> = match net {
+            let t: Arc<dyn Transport> = match helpers.net {
                 Some(t) => t,
                 None => Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
             };
@@ -333,6 +370,10 @@ pub async fn run_with(
     };
     let mut e = Engine {
         mode,
+        media: helpers
+            .media
+            .unwrap_or_else(crate::media::Media::in_process),
+        previews: std::collections::HashSet::new(),
         transport,
         server,
         client: None,
@@ -387,11 +428,13 @@ pub async fn run_with(
                 let Some(cmd) = cmd else { return };
                 e.handle(cmd).await;
                 e.push();
+                e.load_previews().await;
             }
             _ = tick.tick() => {
                 if e.client.is_some() {
                     e.sync().await;
                     e.push();
+                    e.load_previews().await;
                 } else if e.joining.is_some() {
                     e.poll_join().await;
                     e.push();
@@ -450,6 +493,50 @@ impl Engine {
             .into_iter()
             .map(|c| c.root)
             .find(|r| hex_id(r) == id)
+    }
+
+    /// Send the UI previews of pictures in the open conversation: fetched
+    /// (people we accepted only, never message requests), decoded by
+    /// mediad, a few per pass.
+    async fn load_previews(&mut self) {
+        let (Some(root), Some(c)) = (self.selected, self.client.as_mut()) else {
+            return;
+        };
+        if c.contact(&root).map(|ct| ct.state) != Some(enclave_core::ContactState::Accepted) {
+            return;
+        }
+        let id = hex_id(&root);
+        let Ok(msgs) = c.messages(&root) else {
+            return;
+        };
+        let want: Vec<u64> = msgs
+            .iter()
+            .rev()
+            .filter(|m| !m.deleted && m.attachment.as_ref().is_some_and(is_picture))
+            .map(|m| m.seq)
+            .filter(|s| !self.previews.contains(&(id.clone(), *s)))
+            .take(4)
+            .collect();
+        for seq in want {
+            // A download that fails is tried again next time; a picture
+            // that doesn't decode is not.
+            let Ok(bytes) = c.fetch_attachment(&root, seq).await else {
+                continue;
+            };
+            self.previews.insert((id.clone(), seq));
+            if enclave_media::detect(&bytes).is_none() {
+                continue;
+            }
+            if let Ok(t) = self.media.thumbnail(bytes, PREVIEW_SIDE).await {
+                let _ = self.out.send(Out::Preview(enclave_ipc::Preview {
+                    conversation: id.clone(),
+                    seq,
+                    width: t.width,
+                    height: t.height,
+                    pixels: t.pixels,
+                }));
+            }
+        }
     }
 
     async fn handle(&mut self, cmd: Cmd) {
@@ -608,9 +695,32 @@ impl Engine {
             Cmd::SendFile(id, name, bytes, caption) => {
                 self.busy = true;
                 self.push();
+                // Pictures are re-encoded first: what leaves is new pixels
+                // only, never the original file's metadata (GPS, camera).
+                let (name, mime, bytes) = if enclave_media::detect(&bytes).is_some() {
+                    match self.media.sanitize(bytes).await {
+                        Ok(s) => (
+                            with_extension(&name, s.format.extension()),
+                            s.format.mime(),
+                            s.bytes,
+                        ),
+                        Err(_) => {
+                            self.status = "Enclave couldn't read that picture, so it wasn't sent. Try another file.".into();
+                            self.busy = false;
+                            return;
+                        }
+                    }
+                } else {
+                    // Not a JPEG or PNG, whatever its name says.
+                    let mime = match mime_for(&name) {
+                        "image/jpeg" | "image/png" => "application/octet-stream",
+                        m => m,
+                    };
+                    (name, mime, bytes)
+                };
                 if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
                     match c
-                        .send_attachment(&root, &name, mime_for(&name), &bytes, caption.trim())
+                        .send_attachment(&root, &name, mime, &bytes, caption.trim())
                         .await
                     {
                         Ok(_) => self.effect(Effect::FileSent),

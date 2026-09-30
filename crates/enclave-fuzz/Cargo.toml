@@ -19,7 +19,12 @@ enclave-proto = { path = "../enclave-proto" }
 enclave-rpc = { path = "../enclave-rpc" }
 enclave-kt = { path = "../enclave-kt" }
 enclave-ipc = { path = "../enclave-ipc" }
+enclave-media = { path = "../enclave-media" }
 enclave-server = { path = "../enclave-server" }
 enclave-core = { path = "../enclave-core" }
 enclave-calls = { path = "../enclave-calls" }
 enclave-relay = { path = "../enclave-relay" }
+
+[dev-dependencies]
+png = "0.18"
+jpeg-encoder = "0.7"

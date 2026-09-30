@@ -59,6 +59,10 @@ export struct MessageRow {
     can-edit: bool,
     deleted: bool,
     file: string,
+    // A picture: its preview comes separately (decoded by mediad).
+    picture: bool,
+    has-image: bool,
+    image: image,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main }
@@ -100,7 +104,7 @@ component Bubble inherits HorizontalLayout {
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
-        accessible-label: (root.msg.outgoing ? "You: " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + root.msg.text + ", " + root.msg.time;
         accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
@@ -114,7 +118,28 @@ component Bubble inherits HorizontalLayout {
                 font-weight: 600;
                 color: Tokens.pine;
             }
-            Text {
+            if root.msg.has-image: Rectangle {
+                // Natural size, narrowed to the bubble, aspect kept.
+                width: min(root.bubble-max - 2 * Tokens.space-sm, root.msg.image.width * 1px);
+                height: self.width * root.msg.image.height / max(1, root.msg.image.width);
+                border-radius: Tokens.radius-control;
+                clip: true;
+                Image {
+                    source: root.msg.image;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: fill;
+                    accessible-role: image;
+                    accessible-label: "Picture: " + root.msg.file;
+                }
+            }
+            if root.msg.picture && !root.msg.has-image: Text {
+                text: "Photo: " + root.msg.file;
+                font-size: Tokens.type-body;
+                color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                wrap: word-wrap;
+            }
+            if root.msg.text != "": Text {
                 text: root.msg.text;
                 font-size: Tokens.type-body;
                 color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;

@@ -96,6 +96,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let _ = w.upgrade_in_event_loop(move |ui| match o {
                     Out::Snapshot(s) => view::apply(&ui, &s),
                     Out::Effect(e) => view::apply_effect(&ui, e),
+                    Out::Preview(p) => view::apply_preview(&ui, p),
                     Out::File(..) | Out::Invite(_) => {}
                 });
             }

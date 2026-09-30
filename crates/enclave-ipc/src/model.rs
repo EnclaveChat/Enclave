@@ -87,6 +87,8 @@ pub struct Msg {
     pub deleted: bool,
     /// Attached file name, or empty.
     pub file: String,
+    /// The attachment is a picture the vault will send a preview of.
+    pub image: bool,
 }
 
 /// Everything the window shows.
@@ -290,6 +292,23 @@ pub enum Out {
     File(String, Vec<u8>),
     /// A new invite link, for the UI to copy.
     Invite(String),
+    /// A picture's preview: conversation, message position, RGBA pixels.
+    Preview(Preview),
+}
+
+/// A picture's preview, decoded by `mediad`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    /// Conversation id.
+    pub conversation: String,
+    /// Message position.
+    pub seq: u64,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+    /// `width × height × 4` bytes of RGBA.
+    pub pixels: Vec<u8>,
 }
 
 fn put_row(w: &mut Writer, r: &Row) {
@@ -369,7 +388,8 @@ impl Snapshot {
                 .u64(m.seq)
                 .bool(m.can_edit)
                 .bool(m.deleted)
-                .str(&m.file);
+                .str(&m.file)
+                .bool(m.image);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -451,6 +471,7 @@ impl Snapshot {
                     can_edit: r.bool()?,
                     deleted: r.bool()?,
                     file: r.str()?,
+                    image: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -654,6 +675,16 @@ impl Out {
                 w.u8(4).str(link);
                 w.0
             }
+            Out::Preview(p) => {
+                let mut w = Writer::default();
+                w.u8(5)
+                    .str(&p.conversation)
+                    .u64(p.seq)
+                    .u32(p.width)
+                    .u32(p.height)
+                    .bytes(&p.pixels);
+                w.0
+            }
             Out::Effect(e) => vec![
                 2,
                 match e {
@@ -694,6 +725,21 @@ impl Out {
                 let o = Out::Invite(r.str()?);
                 r.end()?;
                 Ok(o)
+            }
+            [5, ..] => {
+                let mut r = Reader(&b[1..]);
+                let p = Preview {
+                    conversation: r.str()?,
+                    seq: r.u64()?,
+                    width: r.u32()?,
+                    height: r.u32()?,
+                    pixels: r.bytes()?,
+                };
+                r.end()?;
+                if crate::rgba_len(p.width, p.height) != Some(p.pixels.len()) {
+                    return Err(IpcError::Malformed);
+                }
+                Ok(Out::Preview(p))
             }
             _ => Err(IpcError::Malformed),
         }

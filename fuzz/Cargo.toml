@@ -70,3 +70,9 @@ name = "ipc"
 path = "fuzz_targets/ipc.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "media"
+path = "fuzz_targets/media.rs"
+test = false
+doc = false

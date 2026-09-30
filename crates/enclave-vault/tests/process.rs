@@ -302,6 +302,9 @@ async fn sandboxed_vault_keeps_its_profile() {
     if cfg!(target_os = "linux") && netd.exists() {
         assert!(report.contains("network: \"netd\""), "{report}");
     }
+    if netd.with_file_name("enclave-mediad").exists() {
+        assert!(report.contains("media: \"mediad\""), "{report}");
+    }
     if cfg!(target_os = "linux") {
         assert!(report.contains("syscalls: \"filtered\""), "{report}");
     }

@@ -66,6 +66,10 @@ distribution and linking with Slint). See [`CONTRIBUTING.md`](CONTRIBUTING.md)
 for the sign-off every commit needs, and [`SECURITY.md`](SECURITY.md) to report
 a vulnerability.
 
+Third-party notices are in [`LICENSES/`](LICENSES/). This software is based in
+part on the work of the Independent JPEG Group (the JPEG encoder's forward DCT,
+via the `jpeg-encoder` crate).
+
 ## Try the desktop app
 
 ```sh

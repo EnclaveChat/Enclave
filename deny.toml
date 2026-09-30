@@ -47,6 +47,14 @@ allow = [
     # third-party code. Tracked in legal/ADDITIONAL-PERMISSIONS.md.
     "LGPL-3.0-only",
 ]
+# Per-crate exceptions: allowed for that crate only.
+exceptions = [
+    # jpeg-encoder's forward DCT is ported from the IJG code (via mozjpeg).
+    # The IJG license is free and GPL-compatible; binaries must say "this
+    # software is based in part on the work of the Independent JPEG Group"
+    # (README "Acknowledgements", and LICENSES/IJG-jpeg-encoder.txt).
+    { allow = ["IJG"], crate = "jpeg-encoder" },
+]
 
 [bans]
 multiple-versions = "warn"

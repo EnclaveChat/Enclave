@@ -1,0 +1,25 @@
+[package]
+name = "enclave-mediad"
+description = "The Enclave media process: re-encodes and decodes pictures in a sandbox, and holds no keys."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-mediad"
+path = "src/main.rs"
+
+[dependencies]
+enclave-ipc = { path = "../enclave-ipc" }
+enclave-media = { path = "../enclave-media" }
+enclave-sandbox = { path = "../enclave-sandbox" }
+
+[dev-dependencies]
+png = "0.18"

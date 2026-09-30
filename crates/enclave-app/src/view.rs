@@ -2,9 +2,48 @@
 //! the UI thread.
 
 use crate::{AppWindow, ContactRow, DeviceRow, MessageRow, PickRow, Screen, Sheet};
-pub use enclave_ipc::{Device, Effect, Msg, Pick, Row, Snapshot};
-use slint::{Color, Image, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
+pub use enclave_ipc::{Device, Effect, Msg, Pick, Preview, Row, Snapshot};
+use slint::{
+    Color, Image, Model, ModelRc, Rgb8Pixel, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
+};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+
+thread_local! {
+    /// Picture previews by (conversation, message position), for this run
+    /// of the UI. Pixels only: mediad already decoded them.
+    static PREVIEWS: RefCell<HashMap<(String, u64), Image>> = RefCell::new(HashMap::new());
+}
+
+fn preview(conversation: &str, seq: u64) -> Option<Image> {
+    PREVIEWS.with(|p| p.borrow().get(&(conversation.to_string(), seq)).cloned())
+}
+
+/// Keep a preview and show it if its conversation is open.
+pub fn apply_preview(ui: &AppWindow, p: Preview) {
+    let img = Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        &p.pixels, p.width, p.height,
+    ));
+    PREVIEWS.with(|c| {
+        c.borrow_mut()
+            .insert((p.conversation.clone(), p.seq), img.clone())
+    });
+    if ui.get_current_id().as_str() != p.conversation {
+        return;
+    }
+    let model = ui.get_messages();
+    let seq = p.seq.to_string();
+    for i in 0..model.row_count() {
+        if let Some(mut r) = model.row_data(i)
+            && r.seq == seq
+        {
+            r.image = img.clone();
+            r.has_image = true;
+            model.set_row_data(i, r);
+        }
+    }
+}
 
 /// Contact art tints: muted, each at least 7:1 against the Paper initials.
 const TINTS: [(u8, u8, u8); enclave_ipc::TINT_COUNT] = [
@@ -112,10 +151,19 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
         }
         None => ui.set_current_id(SharedString::new()),
     }
+    let conversation = s.current.as_ref().map(|c| c.id.clone()).unwrap_or_default();
     let msgs: Vec<MessageRow> = s
         .messages
         .iter()
-        .map(|m| MessageRow {
+        .map(|m| {
+            let img = if m.image {
+                preview(&conversation, m.seq)
+            } else {
+                None
+            };
+            (m, img)
+        })
+        .map(|(m, img)| MessageRow {
             text: m.text.clone().into(),
             outgoing: m.outgoing,
             time: m.time.clone().into(),
@@ -125,6 +173,9 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             can_edit: m.can_edit,
             deleted: m.deleted,
             file: m.file.clone().into(),
+            picture: m.image,
+            has_image: img.is_some(),
+            image: img.unwrap_or_default(),
         })
         .collect();
     ui.set_messages(ModelRc::from(Rc::new(VecModel::from(msgs))));

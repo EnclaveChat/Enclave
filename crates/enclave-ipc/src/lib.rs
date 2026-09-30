@@ -20,10 +20,18 @@
 
 mod codec;
 pub mod frame;
+pub mod media;
 mod model;
 pub mod net;
 
 pub use model::*;
+
+/// Bytes of `width × height` RGBA, if that doesn't overflow.
+pub(crate) fn rgba_len(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
+}
 
 /// Errors.
 #[derive(Debug, thiserror::Error)]

@@ -13,9 +13,10 @@
 
 pub mod engine;
 pub mod harden;
+pub mod media;
 pub mod netd;
 
-pub use engine::{Mode, spawn};
+pub use engine::{Helpers, Mode, spawn};
 
 use enclave_ipc::frame::{self, TOKEN_LEN};
 use enclave_ipc::{Cmd, Out};
@@ -30,13 +31,14 @@ pub async fn serve<S>(mode: Mode, stream: S, token: &[u8; TOKEN_LEN]) -> enclave
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    serve_with(mode, None, stream, token).await
+    serve_with(mode, Helpers::default(), stream, token).await
 }
 
-/// [`serve`], with the network reached through `net` (see [`netd`]).
+/// [`serve`], with the network and pictures handled by helper processes
+/// (see [`netd`] and [`media`]).
 pub async fn serve_with<S>(
     mode: Mode,
-    net: Option<std::sync::Arc<dyn enclave_net::transport::Transport>>,
+    helpers: Helpers,
     stream: S,
     token: &[u8; TOKEN_LEN],
 ) -> enclave_ipc::Result<()>
@@ -62,7 +64,7 @@ where
             }
         }
     });
-    engine::run_with(mode, net, cmd_rx, out_tx).await;
+    engine::run_with(mode, helpers, cmd_rx, out_tx).await;
     reader.abort();
     let _ = writer.await;
     Ok(())

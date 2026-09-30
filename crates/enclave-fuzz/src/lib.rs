@@ -151,6 +151,13 @@ fn ipc(d: &[u8]) {
     let _ = enclave_ipc::Snapshot::decode(d);
     let _ = enclave_ipc::net::NetRequest::decode(d);
     let _ = enclave_ipc::net::NetReply::decode(d);
+    let _ = enclave_ipc::media::MediaRequest::decode(d);
+    let _ = enclave_ipc::media::MediaReply::decode(d);
+}
+
+/// What mediad decodes: every byte string a peer can send as a picture.
+fn media(d: &[u8]) {
+    let _ = enclave_media::thumbnail(d, 64);
 }
 
 /// Every target.
@@ -158,6 +165,7 @@ pub const TARGETS: &[Target] = &[
     ("wire", wire),
     ("proto", proto),
     ("rpc", rpc),
+    ("media", media),
     ("content", content),
     ("calls", calls),
     ("server", server),
