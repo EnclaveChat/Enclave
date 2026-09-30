@@ -54,6 +54,11 @@ pub const FLAG_CREATE: u8 = 0x01;
 /// Request flag on `RegisterTokens` with create: make it a request inbox.
 pub const FLAG_REQUEST_INBOX: u8 = 0x02;
 
+/// Request flag on `Write`: a group mailbox. The token is the mailbox's
+/// owner secret; the first write creates the mailbox, later writes must
+/// present the same token, and it is not burned.
+pub const FLAG_GROUP: u8 = 0x04;
+
 /// Maximum payload bytes in one envelope.
 pub const MAX_PAYLOAD: usize = ENVELOPE_LEN - 4;
 /// Data bytes per directory chunk.

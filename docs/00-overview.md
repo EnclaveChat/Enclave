@@ -244,5 +244,6 @@ The code is normative where it and these documents disagree; each document lists
 | M4 network | `enclave-net` | Transport trait, dev TCP, Tor (arti) behind `tor`, cover scheduler. Nym not integrated; nothing measured on a live network (`docs/spikes/m4-network.md`). **Gate open.** |
 | M5 client | `enclave-store`, `enclave-core` | Sealed store, shred keyring, backups, client engine (accounts, contacts, requests, messaging, refills, restart, erase). Device linking, restore, the 72 h veto and the process split are not done. |
 | M6 app | `enclave-design`, `enclave-app` | Desktop MVP in Slint: onboarding, message requests, 1:1 chat, contact codes and invite links, security-code check, privacy profile choice, recovery words. Runs as an offline demo or against a dev server. Screenshots render headlessly (`enclave-shots`, `docs/screenshots/`). Not done: Android/iOS packaging, images, voice notes, disappearing messages, push, app lock, the screen-reader audit. |
-| M7–M12 | — | Not started. |
+| M7 groups | `enclave-proto::group`, `enclave-core` | MAC vectors, three-unit rekeys over pairwise exporters, encrypted routing headers, state hash chain with admin rules, removal with a new epoch, welcomes, group introductions between strangers, persistence. Tested with 3 real clients and a 100 × 5 rotation. Not done: adding members later, invite links, polls, the pre-rekey PQ step, the group UI. |
+| M8–M12 | — | Not started. |
 

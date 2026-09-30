@@ -1,5 +1,6 @@
 //! Encodings of client records kept in the sealed store.
 
+use crate::card::ContactCard;
 use crate::client::{Contact, ContactState, Message};
 use crate::content::Token;
 use enclave_crypto::rng::HedgedRng;
@@ -111,6 +112,8 @@ pub(crate) fn encode_contact(c: &Contact) -> Result<Vec<u8>> {
         .u32(c.received_since_refill)
         .u32(c.unread)
         .u64(c.added_at);
+    w.bytes(&c.card.as_ref().map(ContactCard::encode).unwrap_or_default());
+    w.u8(u8::from(c.group_only));
     Ok(w.finish())
 }
 
@@ -152,6 +155,15 @@ pub(crate) fn decode_contact(b: &[u8]) -> Result<Contact> {
         received_since_refill: r.u32()?,
         unread: r.u32()?,
         added_at: r.u64()?,
+        card: {
+            let b = r.bytes(crate::content::MAX_CARD)?;
+            if b.is_empty() {
+                None
+            } else {
+                Some(ContactCard::decode(b).map_err(|_| ProtoError::Decode)?)
+            }
+        },
+        group_only: r.u8()? == 1,
     };
     r.end()?;
     Ok(c)

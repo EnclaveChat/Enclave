@@ -193,3 +193,111 @@ async fn simultaneous_adds_become_one_conversation() {
         )
     );
 }
+
+async fn connect(a: &mut Client, b: &mut Client) {
+    a.add_contact(&b.card(), "hi").await.unwrap();
+    b.sync().await.unwrap();
+    b.accept(&a.root()).await.unwrap();
+    a.sync().await.unwrap();
+}
+
+async fn settle(clients: &mut [&mut Client], rounds: usize) -> Vec<Vec<Event>> {
+    let mut all = vec![Vec::new(); clients.len()];
+    for _ in 0..rounds {
+        for (i, c) in clients.iter_mut().enumerate() {
+            all[i].extend(c.sync().await.unwrap());
+        }
+    }
+    all
+}
+
+fn group_texts(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupMessage { message, .. } => Some(message.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn group_of_three_where_two_are_strangers() {
+    let net = network();
+    let (mut a, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Cy")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    connect(&mut a, &mut c).await;
+
+    let gid = a.create_group("Trip", &[b.root(), c.root()]).await.unwrap();
+    let ev = settle(&mut [&mut b, &mut c], 1).await;
+    assert!(ev[0].contains(&Event::GroupJoined {
+        group_id: gid,
+        name: "Trip".into()
+    }));
+    assert!(ev[1].contains(&Event::GroupJoined {
+        group_id: gid,
+        name: "Trip".into()
+    }));
+    // B and C introduce themselves through the group; no message requests.
+    let ev = settle(&mut [&mut a, &mut b, &mut c], 3).await;
+    assert!(
+        ev.iter()
+            .flatten()
+            .all(|e| !matches!(e, Event::Request { .. }))
+    );
+    assert!(
+        b.contacts().iter().all(|x| x.root != c.root()),
+        "group-only contacts stay out of the list"
+    );
+    assert_eq!(b.groups()[0].members.len(), 2);
+
+    a.send_group_text(&gid, "Train at 9?").await.unwrap();
+    b.send_group_text(&gid, "Works for me").await.unwrap();
+    c.send_group_text(&gid, "Same").await.unwrap();
+    let ev = settle(&mut [&mut a, &mut b, &mut c], 3).await;
+    let mut got_a = group_texts(&ev[0]);
+    let mut got_b = group_texts(&ev[1]);
+    let mut got_c = group_texts(&ev[2]);
+    got_a.sort();
+    got_b.sort();
+    got_c.sort();
+    assert_eq!(got_a, vec!["Same", "Works for me"]);
+    assert_eq!(got_b, vec!["Same", "Train at 9?"]);
+    assert_eq!(got_c, vec!["Train at 9?", "Works for me"]);
+    let hist = b.group_messages(&gid).unwrap();
+    assert_eq!(hist.len(), 3);
+    assert!(
+        hist.iter()
+            .any(|m| m.from == Some(c.root()) && m.from_name == "Cy")
+    );
+
+    // The server holds only fixed-size units.
+    net.with_server(&S1, |s| {
+        assert!(
+            s.stored_lengths()
+                .iter()
+                .all(|l| *l == enclave_wire::ENVELOPE_LEN)
+        )
+    });
+
+    // A removes C. B keeps talking with A; C hears nothing more.
+    a.remove_group_member(&gid, &c.root()).await.unwrap();
+    let ev = settle(&mut [&mut b, &mut c], 2).await;
+    assert!(ev[0].contains(&Event::GroupChanged { group_id: gid }));
+    assert_eq!(b.groups()[0].members.len(), 1);
+    b.send_group_text(&gid, "Just us").await.unwrap();
+    let ev = settle(&mut [&mut a, &mut b, &mut c], 2).await;
+    assert_eq!(group_texts(&ev[0]), vec!["Just us"]);
+    assert!(
+        group_texts(&ev[2]).is_empty(),
+        "removed member reads nothing"
+    );
+}

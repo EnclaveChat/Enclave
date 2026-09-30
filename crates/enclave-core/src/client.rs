@@ -80,6 +80,10 @@ pub struct Contact {
     pub unread: u32,
     /// When the contact was added.
     pub added_at: u64,
+    /// Their card, if they shared it (needed to introduce them into groups).
+    pub(crate) card: Option<ContactCard>,
+    /// Known only through a group: not shown in the conversation list.
+    pub group_only: bool,
 }
 
 impl Contact {
@@ -104,6 +108,9 @@ pub struct Message {
     pub text: String,
 }
 
+mod groups;
+pub use groups::{GroupInfo, GroupMessage};
+
 /// Something the UI should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -127,6 +134,25 @@ pub enum Event {
         root: [u8; 64],
         /// The message.
         message: Message,
+    },
+    /// We were added to a group.
+    GroupJoined {
+        /// Group.
+        group_id: [u8; 32],
+        /// Its name.
+        name: String,
+    },
+    /// A new group message.
+    GroupMessage {
+        /// Group.
+        group_id: [u8; 32],
+        /// The message.
+        message: GroupMessage,
+    },
+    /// Group membership or settings changed.
+    GroupChanged {
+        /// Group.
+        group_id: [u8; 32],
     },
 }
 
@@ -155,6 +181,7 @@ pub struct Client {
     sessions: HashMap<([u8; 64], [u8; 16]), Session>,
     contacts: BTreeMap<[u8; 64], Contact>,
     issuers: HashMap<[u8; 64], TokenIssuer>,
+    groups: BTreeMap<[u8; 32], groups::GroupEntry>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -313,6 +340,7 @@ impl Client {
             sessions: HashMap::new(),
             contacts: BTreeMap::new(),
             issuers: HashMap::new(),
+            groups: BTreeMap::new(),
         };
         Ok((client, words))
     }
@@ -363,6 +391,7 @@ impl Client {
             let b: [u8; 40] = v.as_slice().try_into().map_err(|_| CoreError::NotFound)?;
             issuers.insert(root, TokenIssuer::from_bytes(&b));
         }
+        let groups = groups::load(&store)?;
         Ok(Self {
             store,
             rng: HedgedRng::new()?,
@@ -375,6 +404,7 @@ impl Client {
             sessions,
             contacts,
             issuers,
+            groups,
         })
     }
 
@@ -422,7 +452,11 @@ impl Client {
 
     /// All contacts.
     pub fn contacts(&self) -> Vec<Contact> {
-        self.contacts.values().cloned().collect()
+        self.contacts
+            .values()
+            .filter(|c| !c.group_only)
+            .cloned()
+            .collect()
     }
 
     /// One contact.
@@ -497,6 +531,16 @@ impl Client {
     /// Add someone from their card and send a first message. Fetches and
     /// verifies their manifest, McEliece vault key and a bundle per device.
     pub async fn add_contact(&mut self, card: &ContactCard, text: &str) -> Result<()> {
+        self.add_contact_with(card, text, None).await
+    }
+
+    /// Add a contact, optionally as an introduction through a group.
+    pub(crate) async fn add_contact_with(
+        &mut self,
+        card: &ContactCard,
+        text: &str,
+        group: Option<[u8; 32]>,
+    ) -> Result<()> {
         if card.root == self.account.root_public.0 {
             return Err(LinkError::OwnCode.into());
         }
@@ -548,6 +592,8 @@ impl Client {
             tokens,
             name: self.profile.name.clone(),
             text: text.to_string(),
+            card: self.card().encode(),
+            group,
         }
         .encode()?;
 
@@ -565,6 +611,8 @@ impl Client {
             received_since_refill: 0,
             unread: 0,
             added_at: now,
+            card: Some(card.clone()),
+            group_only: group.is_some(),
         };
         self.contacts.insert(card.root, contact.clone());
         self.save_contact(&contact)?;
@@ -610,6 +658,10 @@ impl Client {
 
     /// Accept a message request: give them our inbox and write tokens.
     pub async fn accept(&mut self, root: &[u8; 64]) -> Result<()> {
+        self.accept_with(root, None).await
+    }
+
+    async fn accept_with(&mut self, root: &[u8; 64], group: Option<[u8; 32]>) -> Result<()> {
         let c = self.contacts.get(root).ok_or(CoreError::NotFound)?;
         if c.state != ContactState::Request {
             return Ok(());
@@ -622,6 +674,8 @@ impl Client {
             tokens,
             name: self.profile.name.clone(),
             text: String::new(),
+            card: self.card().encode(),
+            group,
         };
         self.send_content(root, &hello, now).await?;
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
@@ -780,6 +834,9 @@ impl Client {
             self.save_session(&root, &dev, &s)?;
         }
 
+        let mut group_events = self.sync_groups(now).await?;
+        events.append(&mut group_events);
+
         self.maintain_prekeys(now).await?;
         Ok(events)
     }
@@ -862,11 +919,17 @@ impl Client {
             tokens,
             name,
             text,
+            card,
+            group,
         } = content
         else {
             return Err(ProtoError::Decode.into());
         };
         let root = resp.identity.root;
+        let card = ContactCard::decode(&card).ok().filter(|c| c.root == root);
+        // A group introduction is accepted automatically, but only from a
+        // current member of a group we are in.
+        let introduced_by = group.filter(|g| self.is_group_member(g, &root));
         if root == self.account.root_public.0 {
             return Ok(None);
         }
@@ -897,6 +960,9 @@ impl Client {
                 }
                 c.server = server;
                 c.inbox = Some(inbox);
+                if card.is_some() {
+                    c.card = card.clone();
+                }
                 add_tokens(&mut c.tokens, tokens);
                 let ev = if c.state == ContactState::Pending {
                     c.state = ContactState::Accepted;
@@ -921,23 +987,32 @@ impl Client {
                     received_since_refill: 0,
                     unread: 0,
                     added_at: now,
+                    card: card.clone(),
+                    group_only: introduced_by.is_some(),
                 };
-                (
+                let ev = if introduced_by.is_some() {
+                    None
+                } else {
                     Some(Event::Request {
                         root,
                         name,
                         text: text.clone(),
-                    }),
-                    c,
-                )
+                    })
+                };
+                (ev, c)
             }
         };
         let mut contact = contact;
         if !text.is_empty() {
             contact.unread = contact.unread.saturating_add(1);
         }
+        let auto_accept = contact.state == ContactState::Request && introduced_by.is_some();
         self.contacts.insert(root, contact.clone());
         self.save_contact(&contact)?;
+        if auto_accept {
+            self.accept_with(&root, introduced_by).await?;
+            return Ok(None);
+        }
         if !text.is_empty() {
             let m = self.store_message(&root, false, &text, now)?;
             if event.is_none() {
@@ -973,10 +1048,17 @@ impl Client {
                 tokens,
                 name,
                 text,
+                card,
+                group: _,
             } => {
                 c.server = server;
                 c.inbox = Some(inbox);
                 c.name = sanitize_name(&name);
+                if let Ok(card) = ContactCard::decode(&card)
+                    && card.root == root
+                {
+                    c.card = Some(card);
+                }
                 add_tokens(&mut c.tokens, tokens);
                 if c.state == ContactState::Pending {
                     c.state = ContactState::Accepted;
@@ -992,6 +1074,18 @@ impl Client {
             Content::Tokens(tokens) => {
                 add_tokens(&mut c.tokens, tokens);
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
+                String::new()
+            }
+            Content::GroupWelcome(welcome) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                if let Some(ev) = self.on_group_welcome(&root, &welcome, now)? {
+                    events.push(ev);
+                }
+                String::new()
+            }
+            Content::GroupCards { group_id, cards } => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                self.on_group_cards(&root, &group_id, &cards)?;
                 String::new()
             }
         };

@@ -24,7 +24,7 @@ use enclave_crypto::rng::HedgedRng;
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{
-    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_FOUND, FLAG_MORE,
+    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_FOUND, FLAG_GROUP, FLAG_MORE,
     FLAG_REQUEST_INBOX, Status,
 };
 use enclave_rpc::{ServerKey, ServerSecret};
@@ -72,6 +72,7 @@ struct Inbox {
     owner: [u8; 32],
     read: [u8; 32],
     request: bool,
+    group: bool,
     tokens: HashSet<[u8; 32]>,
     messages: BTreeMap<u64, (Vec<u8>, u64)>,
     next_seq: u64,
@@ -273,6 +274,7 @@ impl Server {
                     owner: owner_hash,
                     read,
                     request: h.flags & FLAG_REQUEST_INBOX != 0,
+                    group: false,
                     tokens: HashSet::new(),
                     messages: BTreeMap::new(),
                     next_seq: 1,
@@ -327,10 +329,13 @@ impl Server {
     }
 
     fn write(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
+        if h.flags & FLAG_GROUP != 0 {
+            return self.write_group(h, env, now);
+        }
         let Some(ib) = self.inboxes.get_mut(&h.mailbox) else {
             return Status::NotFound;
         };
-        if ib.request {
+        if ib.request || ib.group {
             return Status::Denied;
         }
         let th = token_hash(&h.token);
@@ -338,6 +343,30 @@ impl Server {
             return Status::Denied;
         }
         self.stats.tokens_burned += 1;
+        self.store(&h.mailbox, env, now)
+    }
+
+    fn write_group(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
+        let owner_hash = api::credential_hash(&h.token);
+        match self.inboxes.get(&h.mailbox) {
+            None => {
+                let read = api::credential_hash(&api::read_credential(&h.token));
+                self.inboxes.insert(
+                    h.mailbox,
+                    Inbox {
+                        owner: owner_hash,
+                        read,
+                        request: false,
+                        group: true,
+                        tokens: HashSet::new(),
+                        messages: BTreeMap::new(),
+                        next_seq: 1,
+                    },
+                );
+            }
+            Some(ib) if ib.group && ib.owner == owner_hash => {}
+            Some(_) => return Status::Denied,
+        }
         self.store(&h.mailbox, env, now)
     }
 

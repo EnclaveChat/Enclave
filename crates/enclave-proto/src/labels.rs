@@ -99,10 +99,6 @@ pub const NET_GRP_REKEY_MAILBOX: &str = "enclave/v1/net/grp-rekey-mailbox";
 pub const NET_GRP_WRITE_KEY: &str = "enclave/v1/net/grp-write-key";
 /// Group: write token for a mailbox address.
 pub const NET_GRP_WRITE_TOKEN: &str = "enclave/v1/net/grp-write-token";
-/// Group: read key.
-pub const NET_GRP_READ_KEY: &str = "enclave/v1/net/grp-read-key";
-/// Group: read credential for a mailbox address.
-pub const NET_GRP_READ_CRED: &str = "enclave/v1/net/grp-read-cred";
 
 #[cfg(test)]
 mod tests {

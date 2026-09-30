@@ -1,0 +1,909 @@
+//! Groups in the client (`docs/07-groups.md`).
+//!
+//! The crypto lives in `enclave_proto::group`; this module moves it over
+//! the network. The creator sends each member a welcome and the members'
+//! contact cards over their pairwise sessions. Members who are not contacts
+//! reach each other through group introductions, which are accepted
+//! automatically. Each sync polls, for every held epoch and for today and
+//! yesterday, the group mailbox and the three rekey buckets. A sender
+//! rotates before its first send, whenever its chain is due, and whenever a
+//! member it has not yet keyed becomes reachable.
+
+use super::{Client, ContactState, Event, sanitize_name};
+use crate::card::ContactCard;
+use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_TEXT};
+use crate::{CoreError, Result, unix_now};
+use enclave_proto::ProtoError;
+use enclave_proto::codec::{Reader, Writer};
+use enclave_proto::group::{
+    BUCKETS, FLAG_STATE_UPDATE, Group, GroupState, RekeyOutcome, RekeyTarget,
+};
+use enclave_rpc::api::{FLAG_GROUP, Status};
+use enclave_store::Store;
+use enclave_wire::{Op, RequestHeader};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+const NS_GROUPS: &str = "groups";
+/// Units held for later (unknown epoch or generation, sender not reachable yet).
+const MAX_PENDING: usize = 256;
+
+fn msg_ns(gid: &[u8; 32]) -> String {
+    let mut s = String::from("gm/");
+    for b in &gid[..16] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// A group as the UI sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupInfo {
+    /// Group id.
+    pub id: [u8; 32],
+    /// Name.
+    pub name: String,
+    /// Active members other than us: root and display name.
+    pub members: Vec<([u8; 64], String)>,
+    /// We are an admin.
+    pub admin: bool,
+    /// Unread messages.
+    pub unread: u32,
+    /// We are no longer a member.
+    pub left: bool,
+}
+
+/// A stored group message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMessage {
+    /// Position in the conversation.
+    pub seq: u64,
+    /// Sender root (`None` = us).
+    pub from: Option<[u8; 64]>,
+    /// Sender name at the time.
+    pub from_name: String,
+    /// Text.
+    pub text: String,
+    /// Local time.
+    pub at: u64,
+    /// Accepted by the group's server (ours only).
+    pub delivered: bool,
+}
+
+impl GroupMessage {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1).u64(self.seq);
+        match &self.from {
+            Some(r) => w.u8(1).fixed(r),
+            None => w.u8(0),
+        };
+        w.bytes(self.from_name.as_bytes())
+            .bytes(self.text.as_bytes())
+            .u64(self.at)
+            .u8(u8::from(self.delivered));
+        w.finish()
+    }
+
+    fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let seq = r.u64()?;
+        let from = match r.u8()? {
+            0 => None,
+            1 => Some(r.array()?),
+            _ => return Err(ProtoError::Decode),
+        };
+        let s = |r: &mut Reader<'_>| {
+            String::from_utf8(r.bytes(1 << 16)?.to_vec()).map_err(|_| ProtoError::Decode)
+        };
+        let m = Self {
+            seq,
+            from,
+            from_name: s(&mut r)?,
+            text: s(&mut r)?,
+            at: r.u64()?,
+            delivered: r.u8()? == 1,
+        };
+        r.end()?;
+        Ok(m)
+    }
+}
+
+/// Local state of one group.
+pub(crate) struct GroupEntry {
+    pub group: Group,
+    /// Members' cards, by root.
+    pub cards: BTreeMap<[u8; 64], ContactCard>,
+    /// Poll cursors by mailbox address.
+    pub cursors: HashMap<[u8; 32], u64>,
+    /// Units we could not process yet.
+    pub pending: Vec<Vec<u8>>,
+    /// Members our current chain was distributed to.
+    pub keyed: BTreeSet<[u8; 64]>,
+    pub next_seq: u64,
+    pub unread: u32,
+    pub left: bool,
+}
+
+impl GroupEntry {
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1).bytes(&self.group.export());
+        w.u16(self.cards.len() as u16);
+        for c in self.cards.values() {
+            w.bytes(&c.encode());
+        }
+        w.u16(self.cursors.len() as u16);
+        for (a, c) in &self.cursors {
+            w.fixed(a).u64(*c);
+        }
+        w.u16(self.pending.len() as u16);
+        for u in &self.pending {
+            w.bytes(u);
+        }
+        w.u16(self.keyed.len() as u16);
+        for r in &self.keyed {
+            w.fixed(r);
+        }
+        w.u64(self.next_seq)
+            .u32(self.unread)
+            .u8(u8::from(self.left));
+        w.finish()
+    }
+
+    fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let group = Group::import(r.bytes(1 << 22)?)?;
+        let mut cards = BTreeMap::new();
+        for _ in 0..r.u16()? {
+            let c = ContactCard::decode(r.bytes(crate::content::MAX_CARD)?)
+                .map_err(|_| ProtoError::Decode)?;
+            cards.insert(c.root, c);
+        }
+        let mut cursors = HashMap::new();
+        for _ in 0..r.u16()? {
+            cursors.insert(r.array()?, r.u64()?);
+        }
+        let mut pending = Vec::new();
+        for _ in 0..r.u16()? {
+            pending.push(r.bytes(enclave_wire::ENVELOPE_LEN)?.to_vec());
+        }
+        let mut keyed = BTreeSet::new();
+        for _ in 0..r.u16()? {
+            keyed.insert(r.array()?);
+        }
+        let e = Self {
+            group,
+            cards,
+            cursors,
+            pending,
+            keyed,
+            next_seq: r.u64()?,
+            unread: r.u32()?,
+            left: r.u8()? == 1,
+        };
+        r.end()?;
+        Ok(e)
+    }
+}
+
+/// Load every group from the store.
+pub(crate) fn load(store: &Store) -> Result<BTreeMap<[u8; 32], GroupEntry>> {
+    let mut out = BTreeMap::new();
+    for (k, v) in store.scan(NS_GROUPS)? {
+        let id: [u8; 32] = k.as_slice().try_into().map_err(|_| CoreError::NotFound)?;
+        out.insert(id, GroupEntry::decode(&v)?);
+    }
+    Ok(out)
+}
+
+fn day(now: u64) -> u32 {
+    (now / 86_400) as u32
+}
+
+impl Client {
+    // ------------------------------------------------------------------
+    // Queries
+    // ------------------------------------------------------------------
+
+    /// All groups.
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        let me = self.account.root_public.0;
+        self.groups
+            .values()
+            .map(|e| {
+                let st = &e.group.state;
+                GroupInfo {
+                    id: st.group_id,
+                    name: st.name.clone(),
+                    members: st
+                        .active()
+                        .filter(|(_, m)| m.root != me)
+                        .map(|(_, m)| (m.root, self.member_name(e, &m.root)))
+                        .collect(),
+                    admin: st.active().any(|(_, m)| m.root == me && m.admin),
+                    unread: e.unread,
+                    left: e.left,
+                }
+            })
+            .collect()
+    }
+
+    /// Messages of a group, oldest first.
+    pub fn group_messages(&self, gid: &[u8; 32]) -> Result<Vec<GroupMessage>> {
+        let mut v: Vec<GroupMessage> = self
+            .store
+            .scan(&msg_ns(gid))?
+            .into_iter()
+            .filter_map(|(_, b)| GroupMessage::decode(&b).ok())
+            .collect();
+        v.sort_by_key(|m| m.seq);
+        Ok(v)
+    }
+
+    /// Mark a group as read.
+    pub fn mark_group_read(&mut self, gid: &[u8; 32]) -> Result<()> {
+        if let Some(e) = self.groups.get_mut(gid) {
+            e.unread = 0;
+        }
+        self.save_group(gid)
+    }
+
+    fn member_name(&self, e: &GroupEntry, root: &[u8; 64]) -> String {
+        self.contacts
+            .get(root)
+            .map(|c| c.name.clone())
+            .or_else(|| e.cards.get(root).map(|c| sanitize_name(&c.name)))
+            .unwrap_or_else(|| "Unknown".into())
+    }
+
+    pub(crate) fn is_group_member(&self, gid: &[u8; 32], root: &[u8; 64]) -> bool {
+        self.groups
+            .get(gid)
+            .is_some_and(|e| !e.left && e.group.state.index_of(root).is_some())
+    }
+
+    // ------------------------------------------------------------------
+    // Commands
+    // ------------------------------------------------------------------
+
+    /// Create a group with some of our contacts. Each must have accepted us
+    /// and shared their card.
+    pub async fn create_group(&mut self, name: &str, members: &[[u8; 64]]) -> Result<[u8; 32]> {
+        if name.len() > crate::card::MAX_NAME
+            || members.len() + 1 > enclave_proto::group::MAX_MEMBERS
+        {
+            return Err(CoreError::TooLong);
+        }
+        let now = unix_now();
+        let me = self.account.root_public.0;
+        let mut cards = BTreeMap::from([(me, self.card())]);
+        for r in members {
+            let c = self.contacts.get(r).ok_or(CoreError::NotFound)?;
+            if c.state != ContactState::Accepted {
+                return Err(CoreError::NotAccepted);
+            }
+            cards.insert(*r, c.card.clone().ok_or(CoreError::NotFound)?);
+        }
+        let mut group = Group::create(name, me, self.profile.server, now, &mut self.rng)?;
+        let st = group.state.child(|s| {
+            for r in members {
+                let _ = s.add(*r, false, now);
+            }
+        })?;
+        group.apply_state(st)?;
+        // Our first chain: members get it in their welcome.
+        group.rotate(&[], None, now, &mut self.rng)?;
+        let gid = group.state.group_id;
+        let keyed: BTreeSet<[u8; 64]> = members.iter().copied().collect();
+        self.groups.insert(
+            gid,
+            GroupEntry {
+                group,
+                cards: cards.clone(),
+                cursors: HashMap::new(),
+                pending: Vec::new(),
+                keyed,
+                next_seq: 0,
+                unread: 0,
+                left: false,
+            },
+        );
+        self.save_group(&gid)?;
+
+        let encoded: Vec<Vec<u8>> = cards.values().map(ContactCard::encode).collect();
+        for r in members {
+            let welcome = {
+                let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
+                let idx = e.group.state.index_of(r).ok_or(CoreError::NotFound)?;
+                e.group.welcome(idx)?.to_vec()
+            };
+            self.send_content(r, &Content::GroupWelcome(welcome), now)
+                .await?;
+            for chunk in encoded.chunks(MAX_CARDS_PER_MESSAGE) {
+                self.send_content(
+                    r,
+                    &Content::GroupCards {
+                        group_id: gid,
+                        cards: chunk.to_vec(),
+                    },
+                    now,
+                )
+                .await?;
+            }
+        }
+        Ok(gid)
+    }
+
+    /// Send text to a group.
+    pub async fn send_group_text(&mut self, gid: &[u8; 32], text: &str) -> Result<GroupMessage> {
+        if text.len() > MAX_TEXT {
+            return Err(CoreError::TooLong);
+        }
+        let now = unix_now();
+        {
+            let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+            if e.left {
+                return Err(CoreError::NotAccepted);
+            }
+            if e.group.state.admins_only
+                && !e
+                    .group
+                    .state
+                    .members
+                    .get(e.group.me as usize)
+                    .is_some_and(|m| m.admin)
+            {
+                return Err(CoreError::NotAccepted);
+            }
+        }
+        if self
+            .groups
+            .get(gid)
+            .is_some_and(|e| e.group.needs_rotation(now))
+        {
+            self.rotate_group(gid, None, None, now).await?;
+        }
+        let mut msg = self.store_group_message(gid, None, text, now)?;
+        self.post_group(gid, text.as_bytes(), 0, now).await?;
+        msg.delivered = true;
+        self.store.put(
+            &msg_ns(gid),
+            &msg.seq.to_be_bytes(),
+            &msg.encode(),
+            &mut self.rng,
+        )?;
+        Ok(msg)
+    }
+
+    /// Remove a member (admins only): a new epoch the removed member never
+    /// learns, then a state update in it.
+    pub async fn remove_group_member(&mut self, gid: &[u8; 32], root: &[u8; 64]) -> Result<()> {
+        let now = unix_now();
+        let (next, removed) = {
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            let idx = e.group.state.index_of(root).ok_or(CoreError::NotFound)?;
+            let me = e.group.me;
+            if !e
+                .group
+                .state
+                .members
+                .get(me as usize)
+                .is_some_and(|m| m.admin)
+            {
+                return Err(CoreError::NotAccepted);
+            }
+            let (epoch, secret) = e.group.new_epoch(&mut self.rng)?;
+            let next = e.group.state.child(|s| {
+                s.remove(idx);
+                s.epoch = epoch;
+            })?;
+            e.group.apply_state(next.clone())?;
+            (next, (epoch, secret))
+        };
+        self.rotate_group(gid, Some(removed), Some(*root), now)
+            .await?;
+        self.post_group(gid, &next.encode(), FLAG_STATE_UPDATE, now)
+            .await?;
+        Ok(())
+    }
+
+    /// Leave a group.
+    pub async fn leave_group(&mut self, gid: &[u8; 32]) -> Result<()> {
+        let now = unix_now();
+        let me = self.account.root_public.0;
+        let next = {
+            let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+            let idx = e.group.state.index_of(&me).ok_or(CoreError::NotFound)?;
+            e.group.state.child(|s| s.remove(idx))?
+        };
+        if self
+            .groups
+            .get(gid)
+            .is_some_and(|e| e.group.needs_rotation(now))
+        {
+            self.rotate_group(gid, None, None, now).await?;
+        }
+        self.post_group(gid, &next.encode(), FLAG_STATE_UPDATE, now)
+            .await?;
+        if let Some(e) = self.groups.get_mut(gid) {
+            e.left = true;
+        }
+        self.save_group(gid)
+    }
+
+    // ------------------------------------------------------------------
+    // Network
+    // ------------------------------------------------------------------
+
+    async fn post_group(
+        &mut self,
+        gid: &[u8; 32],
+        content: &[u8],
+        flags: u8,
+        now: u64,
+    ) -> Result<()> {
+        let (unit, host, addr, secret) = {
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            let unit = e.group.seal(content, flags, &mut self.rng)?;
+            let epoch = e.group.epoch();
+            let addr = e.group.mailbox(day(now))?;
+            let secret = e.group.mailbox_secret(epoch, &addr)?;
+            (unit, e.group.state.host, addr, secret)
+        };
+        // The chain advanced: persist before the unit leaves.
+        self.save_group(gid)?;
+        let h = RequestHeader {
+            op: Op::Write,
+            flags: FLAG_GROUP,
+            mailbox: addr,
+            token: secret,
+        };
+        self.rpc
+            .call_ok(&host, h, &unit, now, &mut self.rng)
+            .await?;
+        Ok(())
+    }
+
+    /// Rotate our chain for every reachable member device and post the
+    /// three rekey units.
+    async fn rotate_group(
+        &mut self,
+        gid: &[u8; 32],
+        new_epoch: Option<(u32, [u8; 32])>,
+        exclude: Option<[u8; 64]>,
+        now: u64,
+    ) -> Result<()> {
+        let (units, host, keyed) = {
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            let me = e.group.me;
+            let mut targets = Vec::new();
+            let mut keyed = BTreeSet::new();
+            for (m, member) in e.group.state.active() {
+                if m == me || Some(member.root) == exclude {
+                    continue;
+                }
+                let Some(c) = self.contacts.get(&member.root) else {
+                    continue;
+                };
+                for (di, dev) in c.manifest.devices.iter().enumerate() {
+                    if let Some(s) = self.sessions.get(&(member.root, dev.id)) {
+                        targets.push(RekeyTarget {
+                            member: m,
+                            device: di as u8,
+                            device_id: dev.id,
+                            session: s,
+                        });
+                        keyed.insert(member.root);
+                    }
+                }
+            }
+            let units = e.group.rotate(&targets, new_epoch, now, &mut self.rng)?;
+            (units, e.group.state.host, keyed)
+        };
+        if let Some(e) = self.groups.get_mut(gid) {
+            e.keyed = keyed;
+        }
+        self.save_group(gid)?;
+        for (b, unit) in units.iter().enumerate() {
+            let announce = u32::from_be_bytes([unit[4], unit[5], unit[6], unit[7]]);
+            let (addr, secret) = {
+                let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+                let addr = e.group.rekey_mailbox(announce, day(now), b as u8)?;
+                (addr, e.group.mailbox_secret(announce, &addr)?)
+            };
+            let h = RequestHeader {
+                op: Op::Write,
+                flags: FLAG_GROUP,
+                mailbox: addr,
+                token: secret,
+            };
+            self.rpc.call_ok(&host, h, unit, now, &mut self.rng).await?;
+        }
+        Ok(())
+    }
+
+    /// Poll a group mailbox; a mailbox nobody has written to yet is empty.
+    async fn poll_group(
+        &mut self,
+        gid: &[u8; 32],
+        host: [u8; 16],
+        addr: [u8; 32],
+        secret: [u8; 32],
+        now: u64,
+    ) -> Result<Vec<Vec<u8>>> {
+        let cursor = self
+            .groups
+            .get(gid)
+            .and_then(|e| e.cursors.get(&addr).copied())
+            .unwrap_or(0);
+        match self
+            .rpc
+            .poll(&host, addr, &secret, cursor, now, &mut self.rng)
+            .await
+        {
+            Ok(items) => {
+                if let (Some((_, last)), Some(e)) = (items.last(), self.groups.get_mut(gid)) {
+                    e.cursors.insert(addr, *last);
+                }
+                Ok(items.into_iter().map(|(u, _)| u).collect())
+            }
+            Err(CoreError::Server(Status::Denied | Status::NotFound)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Everything group-related a sync does.
+    pub(crate) async fn sync_groups(&mut self, now: u64) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
+        let ids: Vec<[u8; 32]> = self
+            .groups
+            .iter()
+            .filter(|(_, e)| !e.left)
+            .map(|(k, _)| *k)
+            .collect();
+        for gid in ids {
+            self.connect_members(&gid).await;
+
+            // Collect units from every held epoch, today and yesterday.
+            let (host, polls) = {
+                let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
+                let mut polls = Vec::new();
+                for epoch in e.group.epochs() {
+                    for d in [day(now).saturating_sub(1), day(now)] {
+                        for b in 0..BUCKETS as u8 {
+                            let addr = e.group.rekey_mailbox(epoch, d, b)?;
+                            polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
+                        }
+                        let addr = e
+                            .group
+                            .mailboxes(d)
+                            .into_iter()
+                            .find(|(x, _)| *x == epoch)
+                            .map(|(_, a)| a);
+                        if let Some(addr) = addr {
+                            polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
+                        }
+                    }
+                }
+                (e.group.state.host, polls)
+            };
+            let mut units = Vec::new();
+            for (addr, secret) in polls {
+                units.extend(self.poll_group(&gid, host, addr, secret, now).await?);
+            }
+            // Forget cursors of mailboxes we no longer poll.
+            if let Some(e) = self.groups.get_mut(&gid) {
+                let live: BTreeSet<[u8; 32]> = e
+                    .group
+                    .epochs()
+                    .into_iter()
+                    .flat_map(|ep| {
+                        [day(now).saturating_sub(1), day(now)]
+                            .into_iter()
+                            .flat_map(move |d| (0..=BUCKETS as u8).map(move |b| (ep, d, b)))
+                    })
+                    .filter_map(|(ep, d, b)| {
+                        if (b as usize) < BUCKETS {
+                            e.group.rekey_mailbox(ep, d, b).ok()
+                        } else {
+                            e.group
+                                .mailboxes(d)
+                                .into_iter()
+                                .find(|(x, _)| *x == ep)
+                                .map(|(_, a)| a)
+                        }
+                    })
+                    .collect();
+                e.cursors.retain(|a, _| live.contains(a));
+            }
+            if let Some(e) = self.groups.get_mut(&gid) {
+                units.append(&mut e.pending);
+            }
+            // Rekeys first (they may unlock messages in the same batch), and
+            // a second pass for anything a rekey unlocked.
+            let mut rest = units;
+            for _ in 0..2 {
+                let mut held = Vec::new();
+                rest.sort_by_key(|u| u[2] == 0); // subkind 1 (rekey) before 0 (message)
+                for u in rest {
+                    match self.process_group_unit(&gid, &u, now) {
+                        Ok(Some(ev)) => events.push(ev),
+                        Ok(None) => {}
+                        Err(CoreError::Proto(ProtoError::Missing)) => held.push(u),
+                        Err(_) => {}
+                    }
+                }
+                rest = held;
+            }
+            if let Some(e) = self.groups.get_mut(&gid) {
+                rest.truncate(MAX_PENDING);
+                e.pending = rest;
+            }
+            self.save_group(&gid)?;
+
+            // Key members that became reachable since our last rotation.
+            let due = {
+                let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
+                let me = e.group.me;
+                !e.left
+                    && e.group.state.active().any(|(m, member)| {
+                        m != me
+                            && !e.keyed.contains(&member.root)
+                            && self.contacts.get(&member.root).is_some_and(|c| {
+                                c.manifest
+                                    .devices
+                                    .iter()
+                                    .any(|d| self.sessions.contains_key(&(member.root, d.id)))
+                            })
+                    })
+            };
+            if due
+                && !self
+                    .groups
+                    .get(&gid)
+                    .is_some_and(|e| e.group.needs_rotation(now))
+            {
+                self.rotate_group(&gid, None, None, now).await?;
+            }
+        }
+        Ok(events)
+    }
+
+    /// Reach members we have no session with (group introduction), and
+    /// accept pending requests from members.
+    async fn connect_members(&mut self, gid: &[u8; 32]) {
+        let me = self.account.root_public.0;
+        let Some(e) = self.groups.get(gid) else {
+            return;
+        };
+        let cards: Vec<ContactCard> = e
+            .group
+            .state
+            .active()
+            .filter(|(_, m)| m.root != me)
+            .filter_map(|(_, m)| e.cards.get(&m.root).cloned())
+            .collect();
+        for card in cards {
+            match self.contacts.get(&card.root).map(|c| c.state) {
+                None => {
+                    let _ = self.add_contact_with(&card, "", Some(*gid)).await;
+                }
+                Some(ContactState::Request) => {
+                    let _ = self.accept_with(&card.root, Some(*gid)).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn process_group_unit(
+        &mut self,
+        gid: &[u8; 32],
+        unit: &[u8],
+        now: u64,
+    ) -> Result<Option<Event>> {
+        if unit.len() != enclave_wire::ENVELOPE_LEN {
+            return Ok(None);
+        }
+        if unit[2] == 1 {
+            let (sender, _) = self
+                .groups
+                .get(gid)
+                .ok_or(CoreError::NotFound)?
+                .group
+                .rekey_sender(unit)?;
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            if sender.member == e.group.me {
+                return Ok(None);
+            }
+            let root = e
+                .group
+                .state
+                .members
+                .get(sender.member as usize)
+                .map(|m| m.root)
+                .ok_or(ProtoError::Decode)?;
+            let dev_id = self
+                .contacts
+                .get(&root)
+                .and_then(|c| c.manifest.devices.get(sender.device as usize))
+                .map(|d| d.id)
+                .ok_or(ProtoError::Missing)?;
+            let session = self
+                .sessions
+                .get(&(root, dev_id))
+                .ok_or(ProtoError::Missing)?;
+            return match e.group.apply_rekey(unit, session)? {
+                RekeyOutcome::Installed { .. } => Ok(None),
+                RekeyOutcome::NotForUs => Ok(None),
+            };
+        }
+        let msg = {
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            match e.group.open(unit) {
+                Ok(m) => m,
+                Err(ProtoError::Counter) => return Ok(None), // our own, or a replay
+                Err(err) => return Err(err.into()),
+            }
+        };
+        if msg.own_account {
+            return Ok(None);
+        }
+        let (sender_root, prev_state) = {
+            let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+            let root = e
+                .group
+                .state
+                .members
+                .get(msg.member as usize)
+                .map(|m| m.root)
+                .ok_or(ProtoError::Decode)?;
+            (root, e.group.state.clone())
+        };
+        if msg.flags & FLAG_STATE_UPDATE != 0 {
+            let next = GroupState::decode(&msg.content)?;
+            if !prev_state.accepts(&next, msg.member) {
+                return Ok(None);
+            }
+            let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+            match e.group.apply_state(next) {
+                Ok(()) => {}
+                Err(ProtoError::NoSession) => e.left = true,
+                Err(err) => return Err(err.into()),
+            }
+            return Ok(Some(Event::GroupChanged { group_id: *gid }));
+        }
+        let text = String::from_utf8(msg.content).map_err(|_| ProtoError::Decode)?;
+        let name = {
+            let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;
+            self.member_name(e, &sender_root)
+        };
+        let m = self.store_group_message(gid, Some((sender_root, name)), &text, now)?;
+        if let Some(e) = self.groups.get_mut(gid) {
+            e.unread = e.unread.saturating_add(1);
+        }
+        Ok(Some(Event::GroupMessage {
+            group_id: *gid,
+            message: m,
+        }))
+    }
+
+    // ------------------------------------------------------------------
+    // Pairwise group content
+    // ------------------------------------------------------------------
+
+    /// A welcome from `from`, who must be an admin of the group it describes.
+    pub(crate) fn on_group_welcome(
+        &mut self,
+        from: &[u8; 64],
+        welcome: &[u8],
+        _now: u64,
+    ) -> Result<Option<Event>> {
+        let me = self.account.root_public.0;
+        let group = Group::join(welcome, &me, 0)?;
+        let st = &group.state;
+        let from_admin = st
+            .index_of(from)
+            .and_then(|i| st.members.get(i as usize))
+            .is_some_and(|m| m.admin);
+        if !from_admin {
+            return Ok(None);
+        }
+        let gid = st.group_id;
+        if self.groups.contains_key(&gid) {
+            return Ok(None);
+        }
+        let name = st.name.clone();
+        let mut cards = BTreeMap::new();
+        if let Some(c) = self.contacts.get(from).and_then(|c| c.card.clone()) {
+            cards.insert(*from, c);
+        }
+        self.groups.insert(
+            gid,
+            GroupEntry {
+                group,
+                cards,
+                cursors: HashMap::new(),
+                pending: Vec::new(),
+                keyed: BTreeSet::new(),
+                next_seq: 0,
+                unread: 0,
+                left: false,
+            },
+        );
+        self.save_group(&gid)?;
+        Ok(Some(Event::GroupJoined {
+            group_id: gid,
+            name: sanitize_name(&name),
+        }))
+    }
+
+    /// Member cards from a member of the group.
+    pub(crate) fn on_group_cards(
+        &mut self,
+        from: &[u8; 64],
+        gid: &[u8; 32],
+        cards: &[Vec<u8>],
+    ) -> Result<()> {
+        let Some(e) = self.groups.get_mut(gid) else {
+            return Ok(());
+        };
+        if e.group.state.index_of(from).is_none() {
+            return Ok(());
+        }
+        for b in cards {
+            if let Ok(c) = ContactCard::decode(b)
+                && e.group.state.index_of(&c.root).is_some()
+            {
+                e.cards.entry(c.root).or_insert(c);
+            }
+        }
+        self.save_group(gid)
+    }
+
+    // ------------------------------------------------------------------
+    // Storage
+    // ------------------------------------------------------------------
+
+    fn save_group(&mut self, gid: &[u8; 32]) -> Result<()> {
+        let Some(e) = self.groups.get(gid) else {
+            return Ok(());
+        };
+        let bytes = zeroize::Zeroizing::new(e.encode());
+        Ok(self.store.put(NS_GROUPS, gid, &bytes, &mut self.rng)?)
+    }
+
+    fn store_group_message(
+        &mut self,
+        gid: &[u8; 32],
+        from: Option<([u8; 64], String)>,
+        text: &str,
+        now: u64,
+    ) -> Result<GroupMessage> {
+        let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
+        let seq = e.next_seq;
+        e.next_seq += 1;
+        let (from, from_name) = match from {
+            Some((r, n)) => (Some(r), n),
+            None => (None, self.profile.name.clone()),
+        };
+        let m = GroupMessage {
+            seq,
+            from,
+            from_name,
+            text: text.to_string(),
+            at: now,
+            delivered: false,
+        };
+        self.store
+            .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;
+        self.save_group(gid)?;
+        Ok(m)
+    }
+}

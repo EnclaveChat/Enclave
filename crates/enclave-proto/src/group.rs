@@ -337,16 +337,13 @@ pub fn rekey_mailbox(es: &Key, day: u32, b: u8) -> [u8; 32] {
     )
 }
 
-/// Write token for a group mailbox address (multi-use for that address).
+/// Write token for a group mailbox address. Every member may both write and
+/// read, so the same secret is the mailbox's owner secret: the first write
+/// creates the mailbox, later writes present it again, and polls use the
+/// read credential derived from it.
 pub fn write_token(es: &Key, addr: &[u8; 32]) -> [u8; 32] {
     let k: Key = kmac256(es, b"", labels::NET_GRP_WRITE_KEY);
     kmac256(&k, addr, labels::NET_GRP_WRITE_TOKEN)
-}
-
-/// Read credential secret for a group mailbox address.
-pub fn read_secret(es: &Key, addr: &[u8; 32]) -> [u8; 32] {
-    let k: Key = kmac256(es, b"", labels::NET_GRP_READ_KEY);
-    kmac256(&k, addr, labels::NET_GRP_READ_CRED)
 }
 
 fn keystream(es: &Key, nonce: &[u8], out: &mut [u8]) {
@@ -577,10 +574,10 @@ impl Group {
             .collect()
     }
 
-    /// Write token and read-credential secret for an address of epoch `e`.
-    pub fn mailbox_auth(&self, e: u32, addr: &[u8; 32]) -> Result<([u8; 32], [u8; 32])> {
+    /// Owner secret (write token) of a mailbox address of epoch `e`.
+    pub fn mailbox_secret(&self, e: u32, addr: &[u8; 32]) -> Result<[u8; 32]> {
         let es = self.epochs.get(&e).ok_or(ProtoError::Missing)?;
-        Ok((write_token(es, addr), read_secret(es, addr)))
+        Ok(write_token(es, addr))
     }
 
     /// The bucket and rekey mailbox this device reads for epoch `e`.
@@ -1142,6 +1139,142 @@ impl Group {
             }
         }
         Ok(RekeyOutcome::NotForUs)
+    }
+
+    // ------------------------------------------------------------------
+    // Persistence
+    // ------------------------------------------------------------------
+
+    /// Serialize for sealed local storage (holds secrets).
+    pub fn export(&self) -> Zeroizing<Vec<u8>> {
+        let mut w = Writer::new();
+        w.u8(1)
+            .bytes(&self.state.encode())
+            .u8(self.me)
+            .u8(self.my_device);
+        w.u8(self.epochs.len() as u8);
+        for (e, s) in &self.epochs {
+            w.u32(*e).fixed(s);
+        }
+        match &self.mine {
+            Some(m) => {
+                w.u8(1)
+                    .u32(m.epoch)
+                    .u8(m.generation)
+                    .fixed(&m.seed)
+                    .fixed(&m.chain.cs)
+                    .u32(m.chain.n)
+                    .u64(m.created_at);
+                w.u8(m.mac_keys.len() as u8);
+                for k in &m.mac_keys {
+                    w.fixed(k);
+                }
+            }
+            None => {
+                w.u8(0);
+            }
+        }
+        w.u16(self.recv.len() as u16);
+        for ((m, d, g), c) in &self.recv {
+            w.u8(*m)
+                .u8(*d)
+                .u8(*g)
+                .u32(c.epoch)
+                .fixed(&c.chain.cs)
+                .u32(c.chain.n)
+                .fixed(&c.mac_key);
+            w.u16(c.skipped.len() as u16);
+            for (n, k) in &c.skipped {
+                w.u32(*n).fixed(k);
+            }
+        }
+        for id in &self.frontier {
+            w.fixed(id);
+        }
+        let recent: Vec<&MsgId> = self.seen.iter().rev().take(4096).collect();
+        w.u16(recent.len() as u16);
+        for id in recent.into_iter().rev() {
+            w.fixed(id);
+        }
+        Zeroizing::new(w.finish())
+    }
+
+    /// Inverse of [`Group::export`].
+    pub fn import(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        if r.u8()? != 1 {
+            return Err(ProtoError::Decode);
+        }
+        let state = GroupState::decode(r.bytes(64 * 1024)?)?;
+        let (me, my_device) = (r.u8()?, r.u8()?);
+        let mut epochs = BTreeMap::new();
+        for _ in 0..r.u8()? {
+            epochs.insert(r.u32()?, r.array()?);
+        }
+        let mut g = Self::with(state, me, my_device, epochs);
+        if r.u8()? == 1 {
+            let (epoch, generation, seed, cs, n, created_at) = (
+                r.u32()?,
+                r.u8()?,
+                r.array()?,
+                r.array()?,
+                r.u32()?,
+                r.u64()?,
+            );
+            let k = r.u8()? as usize;
+            if k > MAX_MEMBERS {
+                return Err(ProtoError::Decode);
+            }
+            let mac_keys = (0..k).map(|_| r.array()).collect::<Result<Vec<Key>>>()?;
+            g.mine = Some(MyChain {
+                epoch,
+                generation,
+                seed,
+                chain: Chain { cs, n },
+                mac_keys,
+                created_at,
+            });
+        }
+        for _ in 0..r.u16()? {
+            let key = (r.u8()?, r.u8()?, r.u8()?);
+            let (epoch, cs, n, mac_key) = (r.u32()?, r.array()?, r.u32()?, r.array()?);
+            let mut skipped = BTreeMap::new();
+            let k = r.u16()?;
+            if u32::from(k) > MAX_SKIP {
+                return Err(ProtoError::Decode);
+            }
+            for _ in 0..k {
+                skipped.insert(r.u32()?, r.array()?);
+            }
+            g.recv.insert(
+                key,
+                RecvChain {
+                    epoch,
+                    chain: Chain { cs, n },
+                    skipped,
+                    mac_key,
+                },
+            );
+        }
+        for i in 0..MAX_MEMBERS {
+            g.frontier[i] = r.array()?;
+        }
+        for _ in 0..r.u16()? {
+            let id = r.array()?;
+            g.remember(id);
+        }
+        r.end()?;
+        Ok(g)
+    }
+
+    /// Current epoch number.
+    pub fn epoch(&self) -> u32 {
+        self.state.epoch
+    }
+
+    /// Epochs we hold secrets for.
+    pub fn epochs(&self) -> Vec<u32> {
+        self.epochs.keys().copied().collect()
     }
 
     // ------------------------------------------------------------------
