@@ -416,6 +416,114 @@ pub struct Publication {
     pub last_resort: LastResortPrekey,
 }
 
+impl Publication {
+    /// Canonical encoding (what a device uploads to its directory).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        let s = &self.spk;
+        w.fixed(&s.device)
+            .u32(s.id)
+            .fixed(&s.x448.0)
+            .fixed(&s.pq.0[..])
+            .u64(s.expires_at)
+            .fixed(&s.signature);
+        let h = &self.batch;
+        w.fixed(&h.device)
+            .u32(h.batch_id)
+            .u16(h.count)
+            .fixed(&h.root)
+            .fixed(&h.signature);
+        w.u16(self.opks.len() as u16);
+        for o in &self.opks {
+            w.u16(o.index).fixed(&o.x448.0).fixed(&o.pq.0[..]);
+            for p in &o.path {
+                w.fixed(p);
+            }
+        }
+        let l = &self.last_resort;
+        w.fixed(&l.device)
+            .u32(l.id)
+            .fixed(&l.pq.0[..])
+            .u64(l.expires_at)
+            .fixed(&l.signature);
+        w.finish()
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(b);
+        let pq = |r: &mut Reader<'_>| -> Result<PqKeyBytes> {
+            let mut a = Box::new([0u8; MLKEM_PK_LEN]);
+            a.copy_from_slice(r.fixed(MLKEM_PK_LEN)?);
+            Ok(PqKeyBytes(a))
+        };
+        let spk = SignedPrekey {
+            device: r.array()?,
+            id: r.u32()?,
+            x448: X448Public(r.array()?),
+            pq: pq(&mut r)?,
+            expires_at: r.u64()?,
+            signature: r.fixed(COMPOSITE_SIG_LEN)?.to_vec(),
+        };
+        let batch = OpkBatchHeader {
+            device: r.array()?,
+            batch_id: r.u32()?,
+            count: r.u16()?,
+            root: r.array()?,
+            signature: r.fixed(COMPOSITE_SIG_LEN)?.to_vec(),
+        };
+        let n = r.u16()? as usize;
+        if n > OPK_BATCH {
+            return Err(ProtoError::Limit);
+        }
+        let mut opks = Vec::with_capacity(n);
+        for _ in 0..n {
+            let index = r.u16()?;
+            let x448 = X448Public(r.array()?);
+            let pqk = pq(&mut r)?;
+            let mut path = Vec::with_capacity(MERKLE_DEPTH);
+            for _ in 0..MERKLE_DEPTH {
+                path.push(r.array()?);
+            }
+            opks.push(OneTimePrekey {
+                batch_id: batch.batch_id,
+                index,
+                x448,
+                pq: pqk,
+                path,
+            });
+        }
+        let last_resort = LastResortPrekey {
+            device: r.array()?,
+            id: r.u32()?,
+            pq: pq(&mut r)?,
+            expires_at: r.u64()?,
+            signature: r.fixed(COMPOSITE_SIG_LEN)?.to_vec(),
+        };
+        r.end()?;
+        Ok(Self {
+            spk,
+            batch,
+            opks,
+            last_resort,
+        })
+    }
+
+    /// Verify every part against the device key.
+    pub fn verify(&self, signer: &CompositePublic, now: u64) -> Result<()> {
+        self.spk.verify(signer, now)?;
+        self.last_resort.verify(signer, now)?;
+        self.batch.verify(signer)?;
+        for o in &self.opks {
+            o.verify(&self.batch)?;
+        }
+        if self.batch.device != self.spk.device || self.last_resort.device != self.spk.device {
+            return Err(ProtoError::BadSignature);
+        }
+        Ok(())
+    }
+}
+
 impl PrekeyStore {
     fn next(&mut self) -> u32 {
         self.next_id = self.next_id.wrapping_add(1);

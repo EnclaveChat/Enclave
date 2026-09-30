@@ -1,0 +1,282 @@
+//! Request and reply payloads shared by clients and servers
+//! (`docs/12-servers.md`).
+//!
+//! Control operations carry a small payload inside the 14,336-byte envelope
+//! region: `u32 length ‖ bytes ‖ random padding`. Large objects (manifests,
+//! prekey publications, the 1.36 MB McEliece key) travel as numbered chunks of
+//! at most [`CHUNK_DATA`] bytes.
+
+use crate::{Result, RpcError};
+use enclave_crypto::rng::HedgedRng;
+use enclave_wire::ENVELOPE_LEN;
+
+/// Reply status, carried in the reply header's `flags` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Status {
+    /// Success.
+    Ok = 0,
+    /// Not authorized (bad or spent token, bad credential).
+    Denied = 1,
+    /// Nothing there.
+    NotFound = 2,
+    /// Quota exceeded.
+    Quota = 3,
+    /// Malformed request.
+    Malformed = 4,
+    /// Proof of work missing or too weak.
+    Pow = 5,
+    /// Stored object failed validation (bad signature, rollback).
+    Invalid = 6,
+}
+
+impl Status {
+    /// Parse.
+    pub fn from_u8(v: u8) -> Self {
+        match v & 0x0f {
+            0 => Status::Ok,
+            1 => Status::Denied,
+            2 => Status::NotFound,
+            3 => Status::Quota,
+            5 => Status::Pow,
+            6 => Status::Invalid,
+            _ => Status::Malformed,
+        }
+    }
+}
+
+/// Reply flag: a poll found a message.
+pub const FLAG_FOUND: u8 = 0x10;
+/// Reply flag: more messages are waiting.
+pub const FLAG_MORE: u8 = 0x20;
+/// Request flag on `RegisterTokens`: create the inbox.
+pub const FLAG_CREATE: u8 = 0x01;
+/// Request flag on `RegisterTokens` with create: make it a request inbox.
+pub const FLAG_REQUEST_INBOX: u8 = 0x02;
+
+/// Maximum payload bytes in one envelope.
+pub const MAX_PAYLOAD: usize = ENVELOPE_LEN - 4;
+/// Data bytes per directory chunk.
+pub const CHUNK_DATA: usize = 14_000;
+
+/// Frame a payload into a full envelope region with random padding.
+pub fn frame(payload: &[u8], rng: &mut HedgedRng) -> Result<Vec<u8>> {
+    if payload.len() > MAX_PAYLOAD {
+        return Err(RpcError::Malformed);
+    }
+    let mut env = vec![0u8; ENVELOPE_LEN];
+    env[..4].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    env[4..4 + payload.len()].copy_from_slice(payload);
+    rng.fill("api/padding", &mut env[4 + payload.len()..])?;
+    Ok(env)
+}
+
+/// Extract a framed payload.
+pub fn unframe(env: &[u8]) -> Result<&[u8]> {
+    if env.len() != ENVELOPE_LEN {
+        return Err(RpcError::Malformed);
+    }
+    let n = u32::from_be_bytes([env[0], env[1], env[2], env[3]]) as usize;
+    env.get(4..4 + n).ok_or(RpcError::Malformed)
+}
+
+/// Directory object kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DirKind {
+    /// Signed account manifest, keyed by SHAKE256-256 of the root key.
+    Manifest = 1,
+    /// A device's prekey publication (put) or a claimed bundle (get).
+    Bundle = 2,
+    /// Encrypted McEliece vault key, keyed by a random locator.
+    Vault = 3,
+}
+
+/// Directory action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DirAction {
+    /// Upload a chunk.
+    Put = 1,
+    /// Download a chunk.
+    Get = 2,
+    /// Claim a bundle (burns one one-time prekey; returns a claim id).
+    Claim = 3,
+}
+
+/// A directory request payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirRequest {
+    /// Object kind.
+    pub kind: DirKind,
+    /// Action.
+    pub action: DirAction,
+    /// Object key (root hash, device id padded, locator, or claim id).
+    pub key: [u8; 32],
+    /// Chunk index.
+    pub index: u32,
+    /// Total chunks (put only).
+    pub total: u32,
+    /// Proof of work or owner secret, depending on the action.
+    pub proof: [u8; 32],
+    /// Chunk data (put only).
+    pub data: Vec<u8>,
+}
+
+impl DirRequest {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(78 + self.data.len());
+        v.push(self.kind as u8);
+        v.push(self.action as u8);
+        v.extend_from_slice(&self.key);
+        v.extend_from_slice(&self.index.to_be_bytes());
+        v.extend_from_slice(&self.total.to_be_bytes());
+        v.extend_from_slice(&self.proof);
+        v.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
+        v.extend_from_slice(&self.data);
+        v
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        if b.len() < 78 {
+            return Err(RpcError::Malformed);
+        }
+        let kind = match b[0] {
+            1 => DirKind::Manifest,
+            2 => DirKind::Bundle,
+            3 => DirKind::Vault,
+            _ => return Err(RpcError::Malformed),
+        };
+        let action = match b[1] {
+            1 => DirAction::Put,
+            2 => DirAction::Get,
+            3 => DirAction::Claim,
+            _ => return Err(RpcError::Malformed),
+        };
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&b[2..34]);
+        let index = u32::from_be_bytes([b[34], b[35], b[36], b[37]]);
+        let total = u32::from_be_bytes([b[38], b[39], b[40], b[41]]);
+        let mut proof = [0u8; 32];
+        proof.copy_from_slice(&b[42..74]);
+        let n = u32::from_be_bytes([b[74], b[75], b[76], b[77]]) as usize;
+        if n > CHUNK_DATA {
+            return Err(RpcError::Malformed);
+        }
+        let data = b.get(78..78 + n).ok_or(RpcError::Malformed)?.to_vec();
+        Ok(Self {
+            kind,
+            action,
+            key,
+            index,
+            total,
+            proof,
+            data,
+        })
+    }
+}
+
+/// A directory reply payload: `total chunks ‖ claim id ‖ data`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirReply {
+    /// Total chunks of the object.
+    pub total: u32,
+    /// Claim id (bundle claims) or zeros.
+    pub claim: [u8; 32],
+    /// Chunk data.
+    pub data: Vec<u8>,
+}
+
+impl DirReply {
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(40 + self.data.len());
+        v.extend_from_slice(&self.total.to_be_bytes());
+        v.extend_from_slice(&self.claim);
+        v.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
+        v.extend_from_slice(&self.data);
+        v
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        if b.len() < 40 {
+            return Err(RpcError::Malformed);
+        }
+        let total = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        let mut claim = [0u8; 32];
+        claim.copy_from_slice(&b[4..36]);
+        let n = u32::from_be_bytes([b[36], b[37], b[38], b[39]]) as usize;
+        let data = b.get(40..40 + n).ok_or(RpcError::Malformed)?.to_vec();
+        Ok(Self { total, claim, data })
+    }
+}
+
+/// Split an object into directory chunks.
+pub fn chunks(data: &[u8]) -> Vec<&[u8]> {
+    if data.is_empty() {
+        return vec![&[]];
+    }
+    data.chunks(CHUNK_DATA).collect()
+}
+
+/// Context string for a request-inbox proof of work.
+pub fn pow_context_request(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> {
+    [b"request-inbox".as_slice(), mailbox, envelope_hash].concat()
+}
+
+/// Context string for a bundle-claim proof of work.
+pub fn pow_context_claim(device: &[u8; 32], day: u64) -> Vec<u8> {
+    [b"claim-bundle".as_slice(), device, &day.to_be_bytes()].concat()
+}
+
+/// Context string for a blob-upload proof of work.
+pub fn pow_context_blob(id: &[u8; 32], chunk_hash: &[u8]) -> Vec<u8> {
+    [b"blob-put".as_slice(), id, chunk_hash].concat()
+}
+
+/// Read credential for an inbox, derived from the owner secret.
+pub fn read_credential(owner_secret: &[u8; 32]) -> [u8; 24] {
+    let k: [u8; 32] =
+        enclave_crypto::kmac::kmac256(owner_secret, b"read", "enclave/v1/rpc/read-credential");
+    let mut out = [0u8; 24];
+    out.copy_from_slice(&k[..24]);
+    out
+}
+
+/// Server-side hash of an owner secret or read credential.
+pub fn credential_hash(secret: &[u8]) -> [u8; 32] {
+    enclave_crypto::kmac::kmac256(secret, b"", "enclave/v1/rpc/credential-hash")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_and_dir_codec() {
+        let mut rng = HedgedRng::new().unwrap();
+        let env = frame(b"payload", &mut rng).unwrap();
+        assert_eq!(env.len(), ENVELOPE_LEN);
+        assert_eq!(unframe(&env).unwrap(), b"payload");
+        let r = DirRequest {
+            kind: DirKind::Bundle,
+            action: DirAction::Put,
+            key: [1; 32],
+            index: 2,
+            total: 3,
+            proof: [4; 32],
+            data: vec![5; 100],
+        };
+        assert_eq!(DirRequest::decode(&r.encode()).unwrap(), r);
+        let d = DirReply {
+            total: 7,
+            claim: [8; 32],
+            data: vec![9; 10],
+        };
+        assert_eq!(DirReply::decode(&d.encode()).unwrap(), d);
+        assert_eq!(chunks(&vec![0u8; 30_000]).len(), 3);
+    }
+}

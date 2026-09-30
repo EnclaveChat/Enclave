@@ -4,6 +4,11 @@ members = [
     "crates/enclave-crypto",
     "crates/enclave-wire",
     "crates/enclave-proto",
+    "crates/enclave-rpc",
+    "crates/enclave-tokens",
+    "crates/enclave-kt",
+    "crates/enclave-server",
+    "crates/enclave-sim",
     "xtask",
 ]
 

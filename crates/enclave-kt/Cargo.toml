@@ -1,0 +1,22 @@
+[package]
+name = "enclave-kt"
+description = "Enclave key transparency: akd with an Enclave SHA3 configuration, signed tree heads, witness cosigning and client verification."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf"] }
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

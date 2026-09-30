@@ -1,0 +1,263 @@
+//! The server-side log (`KtLog`), witnesses, and client lookup verification.
+
+use crate::config::EnclaveKtConfig;
+use crate::head::{CTX_COSIGN, Cosignature, SignedHead, TreeHead, WitnessPolicy, cosign_message};
+use crate::username::{normalize, skeleton};
+use crate::{KtError, Result};
+use akd::ecvrf::{VRFKeyStorage, VrfError};
+use akd::storage::StorageManager;
+use akd::storage::memory::AsyncInMemoryDatabase;
+use akd::{AkdLabel, AkdValue, AppendOnlyProof, AzksParallelismConfig, Directory, LookupProof};
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::{CompositePublic, CompositeSigningKey};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// VRF key held in memory for the life of the process.
+#[derive(Clone)]
+pub struct VrfKey(Arc<[u8; 32]>);
+
+#[async_trait::async_trait]
+impl VRFKeyStorage for VrfKey {
+    async fn retrieve(&self) -> core::result::Result<Vec<u8>, VrfError> {
+        Ok(self.0.to_vec())
+    }
+}
+
+fn akd_err(e: impl core::fmt::Display) -> KtError {
+    KtError::Directory(e.to_string())
+}
+
+type Dir = Directory<EnclaveKtConfig, AsyncInMemoryDatabase, VrfKey>;
+
+/// A server's key-transparency log.
+pub struct KtLog {
+    server: [u8; 16],
+    dir: Dir,
+    signing: CompositeSigningKey,
+    heads: Vec<SignedHead>,
+    vrf_public: Vec<u8>,
+    /// skeleton → registered name
+    skeletons: HashMap<String, String>,
+}
+
+impl KtLog {
+    /// Create an empty log. `vrf_secret` must stay fixed for the life of the log.
+    pub async fn new(
+        server: [u8; 16],
+        signing: CompositeSigningKey,
+        vrf_secret: [u8; 32],
+    ) -> Result<Self> {
+        let storage = StorageManager::new_no_cache(AsyncInMemoryDatabase::new());
+        let vrf = VrfKey(Arc::new(vrf_secret));
+        let dir = Directory::new(storage, vrf, AzksParallelismConfig::default())
+            .await
+            .map_err(akd_err)?;
+        let vrf_public = dir
+            .get_public_key()
+            .await
+            .map_err(akd_err)?
+            .as_bytes()
+            .to_vec();
+        Ok(Self {
+            server,
+            dir,
+            signing,
+            heads: Vec::new(),
+            vrf_public,
+            skeletons: HashMap::new(),
+        })
+    }
+
+    /// Server identifier.
+    pub fn server(&self) -> [u8; 16] {
+        self.server
+    }
+
+    /// The server's head-signing public key.
+    pub fn public_key(&self) -> &CompositePublic {
+        self.signing.public()
+    }
+
+    /// VRF public key clients need to verify lookups.
+    pub fn vrf_public(&self) -> &[u8] {
+        &self.vrf_public
+    }
+
+    /// Register or update `name → value` (value = SHA3-512 of the root key and
+    /// the manifest locator). A new name must not share a confusable skeleton
+    /// with an existing different name.
+    pub async fn publish(
+        &mut self,
+        name: &str,
+        value: Vec<u8>,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<SignedHead> {
+        let n = normalize(name)?;
+        let sk = skeleton(&n);
+        if let Some(existing) = self.skeletons.get(&sk)
+            && existing != &n
+        {
+            return Err(KtError::Username);
+        }
+        let eh = self
+            .dir
+            .publish(vec![(AkdLabel::from(n.as_str()), AkdValue(value))])
+            .await
+            .map_err(akd_err)?;
+        self.skeletons.insert(sk, n);
+        let head = TreeHead {
+            server: self.server,
+            epoch: eh.epoch(),
+            root: eh.hash(),
+            time: now,
+        };
+        let sh = SignedHead::sign(head, &self.signing, rng)?;
+        self.heads.push(sh.clone());
+        Ok(sh)
+    }
+
+    /// Latest head (with whatever cosignatures it has collected).
+    pub fn latest(&self) -> Option<&SignedHead> {
+        self.heads.last()
+    }
+
+    /// Heads with epochs in `(after, upto]`, oldest first.
+    pub fn heads_after(&self, after: u64, upto: u64) -> Vec<SignedHead> {
+        self.heads
+            .iter()
+            .filter(|h| h.head.epoch > after && h.head.epoch <= upto)
+            .cloned()
+            .collect()
+    }
+
+    /// Attach a witness cosignature to the head of `epoch`.
+    pub fn add_cosignature(&mut self, epoch: u64, c: Cosignature) {
+        if let Some(h) = self.heads.iter_mut().find(|h| h.head.epoch == epoch)
+            && !h.cosignatures.iter().any(|x| x.witness == c.witness)
+        {
+            h.cosignatures.push(c);
+        }
+    }
+
+    /// Lookup proof for `name` against the latest head.
+    pub async fn lookup(&self, name: &str) -> Result<(LookupProof, SignedHead)> {
+        let n = normalize(name)?;
+        let head = self.latest().cloned().ok_or(KtError::Lookup)?;
+        let (proof, eh) = self
+            .dir
+            .lookup(AkdLabel::from(n.as_str()))
+            .await
+            .map_err(|_| KtError::Lookup)?;
+        if eh.epoch() != head.head.epoch {
+            return Err(KtError::Stale);
+        }
+        Ok((proof, head))
+    }
+
+    /// Append-only proof from epoch `from` to epoch `to`.
+    pub async fn audit(&self, from: u64, to: u64) -> Result<AppendOnlyProof> {
+        self.dir.audit(from, to).await.map_err(akd_err)
+    }
+}
+
+/// Client: verify a lookup, returning `(value, version, trusted time)`.
+pub fn verify_lookup(
+    policy: &WitnessPolicy,
+    server_key: &CompositePublic,
+    server_operator: &str,
+    vrf_public: &[u8],
+    sh: &SignedHead,
+    name: &str,
+    proof: LookupProof,
+    now: u64,
+) -> Result<(Vec<u8>, u64, u64)> {
+    let trusted = policy.check(sh, server_key, server_operator, now)?;
+    let n = normalize(name)?;
+    let r = akd::verify::lookup_verify::<EnclaveKtConfig>(
+        vrf_public,
+        sh.head.root,
+        sh.head.epoch,
+        AkdLabel::from(n.as_str()),
+        proof,
+    )
+    .map_err(|_| KtError::Lookup)?;
+    Ok((r.value.0, r.version, trusted))
+}
+
+/// A witness: cosigns heads only after checking they extend what it saw before.
+pub struct Witness {
+    /// Identifier.
+    pub id: [u8; 16],
+    /// Operator (for the independence rule).
+    pub operator: String,
+    signing: CompositeSigningKey,
+    last: HashMap<[u8; 16], TreeHead>,
+}
+
+impl Witness {
+    /// New witness.
+    pub fn new(id: [u8; 16], operator: &str, signing: CompositeSigningKey) -> Self {
+        Self {
+            id,
+            operator: operator.to_string(),
+            signing,
+            last: HashMap::new(),
+        }
+    }
+
+    /// Public key clients pin.
+    pub fn public_key(&self) -> &CompositePublic {
+        self.signing.public()
+    }
+
+    /// Cosign the newest of `heads` (consecutive epochs following the last head
+    /// this witness cosigned for that server). `proof` is the append-only proof
+    /// from the last cosigned epoch to the newest. The first time a witness sees
+    /// a server it cosigns on first use.
+    pub async fn cosign(
+        &mut self,
+        server_key: &CompositePublic,
+        heads: &[SignedHead],
+        proof: Option<AppendOnlyProof>,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Cosignature> {
+        let newest = heads.last().ok_or(KtError::Stale)?;
+        for h in heads {
+            h.verify_server(server_key)?;
+            if h.head.server != newest.head.server {
+                return Err(KtError::Signature);
+            }
+        }
+        for w in heads.windows(2) {
+            if w[1].head.epoch != w[0].head.epoch + 1 {
+                return Err(KtError::NotAppendOnly);
+            }
+        }
+        let server = newest.head.server;
+        if let Some(last) = self.last.get(&server).copied() {
+            let first = &heads[0].head;
+            if first.epoch != last.epoch + 1 {
+                return Err(KtError::NotAppendOnly);
+            }
+            let mut hashes = vec![last.root];
+            hashes.extend(heads.iter().map(|h| h.head.root));
+            let p = proof.ok_or(KtError::NotAppendOnly)?;
+            akd::auditor::audit_verify::<EnclaveKtConfig>(hashes, p)
+                .await
+                .map_err(|_| KtError::NotAppendOnly)?;
+        }
+        let signature = self
+            .signing
+            .sign(CTX_COSIGN, &cosign_message(&newest.head, now), rng)
+            .map_err(|_| KtError::Signature)?;
+        self.last.insert(server, newest.head);
+        Ok(Cosignature {
+            witness: self.id,
+            time: now,
+            signature,
+        })
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "enclave-rpc"
+description = "Sealed requests and replies between Enclave clients and servers (X448 + ML-KEM-1024 to the server's daily key)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-wire = { path = "../enclave-wire" }
+zeroize = "1.9.0"
+thiserror = "2"

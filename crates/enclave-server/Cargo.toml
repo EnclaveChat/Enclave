@@ -1,0 +1,26 @@
+[package]
+name = "enclave-server"
+description = "Enclave server: inboxes, request inboxes, blobs, directory and key transparency, reached only through sealed requests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-wire = { path = "../enclave-wire" }
+enclave-rpc = { path = "../enclave-rpc" }
+enclave-proto = { path = "../enclave-proto" }
+enclave-tokens = { path = "../enclave-tokens" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+thiserror = "2"
+
+[[bin]]
+name = "enclave-server"
+path = "src/main.rs"

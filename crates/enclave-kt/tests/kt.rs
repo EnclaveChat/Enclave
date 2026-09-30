@@ -1,0 +1,186 @@
+//! Key-transparency tests: lookups, witness quorum, split-view detection.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use enclave_kt::{KtError, KtLog, Witness, WitnessPolicy, verify_lookup};
+
+const NOW: u64 = 1_790_000_000;
+
+async fn cosign_all(
+    log: &mut KtLog,
+    witnesses: &mut [Witness],
+    from_epoch: u64,
+    rng: &mut HedgedRng,
+) {
+    let latest = log.latest().unwrap().head.epoch;
+    let heads = log.heads_after(from_epoch, latest);
+    let proof = if from_epoch == 0 {
+        None
+    } else {
+        Some(log.audit(from_epoch, latest).await.unwrap())
+    };
+    for w in witnesses.iter_mut() {
+        let c = w
+            .cosign(log.public_key(), &heads, proof.clone(), NOW + 5, rng)
+            .await
+            .unwrap();
+        log.add_cosignature(latest, c);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lookup_with_witness_quorum_and_split_view() {
+    let mut rng = HedgedRng::new().unwrap();
+    let server_key = CompositeSigningKey::generate(&mut rng).unwrap();
+    let server_seed = *server_key.seed();
+    let mut log = KtLog::new([1; 16], server_key, [9; 32]).await.unwrap();
+
+    let mut witnesses = vec![
+        Witness::new(
+            [10; 16],
+            "operator-a",
+            CompositeSigningKey::generate(&mut rng).unwrap(),
+        ),
+        Witness::new(
+            [11; 16],
+            "operator-b",
+            CompositeSigningKey::generate(&mut rng).unwrap(),
+        ),
+        Witness::new(
+            [12; 16],
+            "server-operator",
+            CompositeSigningKey::generate(&mut rng).unwrap(),
+        ),
+    ];
+    let policy = WitnessPolicy {
+        witnesses: witnesses
+            .iter()
+            .map(|w| (w.id, w.public_key().clone(), w.operator.clone()))
+            .collect(),
+        threshold: 2,
+    };
+
+    log.publish("alice", b"alice-root-hash".to_vec(), NOW, &mut rng)
+        .await
+        .unwrap();
+    cosign_all(&mut log, &mut witnesses, 0, &mut rng).await;
+    log.publish("bob", b"bob-root-hash".to_vec(), NOW + 1, &mut rng)
+        .await
+        .unwrap();
+    cosign_all(&mut log, &mut witnesses, 1, &mut rng).await;
+
+    let (proof, head) = log.lookup("Alice").await.unwrap();
+    let (value, version, trusted) = verify_lookup(
+        &policy,
+        log.public_key(),
+        "server-operator",
+        log.vrf_public(),
+        &head,
+        "alice",
+        proof,
+        NOW + 10,
+    )
+    .unwrap();
+    assert_eq!(value, b"alice-root-hash");
+    assert_eq!(version, 1);
+    assert_eq!(trusted, NOW + 5);
+
+    // Cosignatures from the server's own operator do not count.
+    let strict = WitnessPolicy {
+        witnesses: policy.witnesses.clone(),
+        threshold: 3,
+    };
+    let (proof, head) = log.lookup("alice").await.unwrap();
+    let e = verify_lookup(
+        &strict,
+        log.public_key(),
+        "server-operator",
+        log.vrf_public(),
+        &head,
+        "alice",
+        proof,
+        NOW + 10,
+    );
+    assert_eq!(e.unwrap_err(), KtError::Quorum);
+
+    // A lookup proof for one name does not verify for another.
+    let (proof, head) = log.lookup("alice").await.unwrap();
+    assert!(
+        verify_lookup(
+            &policy,
+            log.public_key(),
+            "server-operator",
+            log.vrf_public(),
+            &head,
+            "bob",
+            proof,
+            NOW + 10
+        )
+        .is_err()
+    );
+
+    // Split view: the server forks history (same key, different alice value).
+    let forked_key = CompositeSigningKey::from_seed(&server_seed).unwrap();
+    let mut fork = KtLog::new([1; 16], forked_key, [9; 32]).await.unwrap();
+    fork.publish("alice", b"attacker-root".to_vec(), NOW, &mut rng)
+        .await
+        .unwrap();
+    fork.publish("bob", b"bob-root-hash".to_vec(), NOW + 1, &mut rng)
+        .await
+        .unwrap();
+    fork.publish("carol", b"carol".to_vec(), NOW + 2, &mut rng)
+        .await
+        .unwrap();
+    // Witnesses already cosigned epoch 2 of the real log; the fork's epoch 3
+    // does not extend it, so they refuse.
+    let heads = fork.heads_after(2, 3);
+    let proof = fork.audit(2, 3).await.unwrap();
+    for w in witnesses.iter_mut() {
+        let r = w
+            .cosign(
+                fork.public_key(),
+                &heads,
+                Some(proof.clone()),
+                NOW + 20,
+                &mut rng,
+            )
+            .await;
+        assert_eq!(r.unwrap_err(), KtError::NotAppendOnly);
+    }
+    // Gossip also catches it: the two heads for epoch 2 differ.
+    let real2 = log.heads_after(1, 2)[0].head;
+    let fork2 = fork.heads_after(1, 2)[0].head;
+    assert_ne!(real2.gossip_digest(), fork2.gossip_digest());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn confusable_names_are_refused() {
+    let mut rng = HedgedRng::new().unwrap();
+    let mut log = KtLog::new(
+        [2; 16],
+        CompositeSigningKey::generate(&mut rng).unwrap(),
+        [3; 32],
+    )
+    .await
+    .unwrap();
+    log.publish("paul", b"p".to_vec(), NOW, &mut rng)
+        .await
+        .unwrap();
+    assert_eq!(
+        log.publish("pau1", b"x".to_vec(), NOW, &mut rng)
+            .await
+            .unwrap_err(),
+        KtError::Username
+    );
+    // The owner can update their own name.
+    log.publish("paul", b"p2".to_vec(), NOW + 1, &mut rng)
+        .await
+        .unwrap();
+    assert_eq!(
+        log.publish("adm1n", b"x".to_vec(), NOW, &mut rng)
+            .await
+            .unwrap_err(),
+        KtError::Username
+    );
+}
