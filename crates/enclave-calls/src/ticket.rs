@@ -57,6 +57,36 @@ impl TicketSecretKey {
         })
     }
 
+    /// The key for `epoch` (a day) from that day's chain seed: a relay that
+    /// restarts holds the key it published, and erasing old seeds erases
+    /// old keys.
+    pub fn from_seed(relay_id: [u8; 16], epoch: u32, seed: &[u8; 32]) -> Self {
+        let m: Zeroizing<[u8; X448_LEN + 64]> =
+            Zeroizing::new(kmac256(seed, &epoch.to_be_bytes(), labels::TICKET_KEY));
+        let mut xb = [0u8; X448_LEN];
+        xb.copy_from_slice(&m[..X448_LEN]);
+        let x = X448Secret::from_bytes(xb);
+        xb.fill(0);
+        let mut ms = Zeroizing::new([0u8; 64]);
+        ms.copy_from_slice(&m[X448_LEN..]);
+        let (k, kp) = MlKemSecret::from_seed(&ms);
+        Self {
+            public: TicketKey {
+                relay_id,
+                epoch,
+                x448: x.public(),
+                mlkem: kp,
+            },
+            x,
+            k,
+        }
+    }
+
+    /// The chain seed of the day after `seed`'s.
+    pub fn next_seed(seed: &[u8; 32]) -> [u8; 32] {
+        kmac256(seed, b"", labels::TICKET_CHAIN)
+    }
+
     /// Public half.
     pub fn public(&self) -> &TicketKey {
         &self.public

@@ -23,6 +23,7 @@ use enclave_server::config::FileConfig;
 use enclave_server::db::Db;
 use enclave_server::keys::ServerKeys;
 use enclave_server::{Config, Server};
+use enclave_service::config::{flag, hex};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -40,17 +41,6 @@ fn now() -> u64 {
 
 fn today() -> u32 {
     (now() / 86_400) as u32
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn flag(args: &[String], k: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == k)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
 }
 
 fn load_config(args: &[String]) -> Result<FileConfig, String> {

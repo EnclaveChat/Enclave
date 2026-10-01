@@ -2,8 +2,9 @@
 //!
 //! Every key can be overridden from the environment as
 //! `ENCLAVE_<SECTION>__<KEY>` (for example `ENCLAVE_SERVER__DOMAIN`), which
-//! is how the compose file sets per-deployment values. Unknown keys are
-//! refused, so a typo doesn't silently fall back to a default.
+//! is how the compose file sets per-deployment values
+//! (`enclave_service::config`). Unknown keys are refused, so a typo doesn't
+//! silently fall back to a default.
 
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -143,10 +144,7 @@ impl Default for BackupSection {
     }
 }
 
-/// A configuration problem, with where it was found.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct ConfigError(String);
+pub use enclave_service::config::ConfigError;
 
 impl FileConfig {
     /// Read `path` (if given) and apply `ENCLAVE_*` overrides from `env`.
@@ -154,35 +152,7 @@ impl FileConfig {
         path: Option<&Path>,
         env: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, ConfigError> {
-        let mut table: toml::Table = match path {
-            Some(p) => {
-                let text = std::fs::read_to_string(p)
-                    .map_err(|e| ConfigError(format!("{}: {e}", p.display())))?;
-                text.parse()
-                    .map_err(|e| ConfigError(format!("{}: {e}", p.display())))?
-            }
-            None => toml::Table::new(),
-        };
-        for (k, v) in env {
-            let Some(rest) = k.strip_prefix("ENCLAVE_") else {
-                continue;
-            };
-            let Some((section, key)) = rest.split_once("__") else {
-                continue;
-            };
-            let (section, key) = (section.to_lowercase(), key.to_lowercase());
-            let value = env_value(&v);
-            let entry = table
-                .entry(section.clone())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            let toml::Value::Table(t) = entry else {
-                return Err(ConfigError(format!("[{section}] is not a section")));
-            };
-            t.insert(key, value);
-        }
-        let cfg: FileConfig = toml::Value::Table(table)
-            .try_into()
-            .map_err(|e| ConfigError(format!("configuration: {e}")))?;
+        let cfg: FileConfig = enclave_service::config::load(path, env)?;
         cfg.check()?;
         Ok(cfg)
     }
@@ -221,19 +191,6 @@ impl FileConfig {
             token_quota: p.token_quota,
             ttl_secs: p.ttl_days * 86_400,
         }
-    }
-}
-
-/// An environment value as TOML: integers and booleans keep their type,
-/// everything else is a string.
-fn env_value(v: &str) -> toml::Value {
-    if let Ok(i) = v.parse::<i64>() {
-        return toml::Value::Integer(i);
-    }
-    match v {
-        "true" => toml::Value::Boolean(true),
-        "false" => toml::Value::Boolean(false),
-        _ => toml::Value::String(v.to_string()),
     }
 }
 

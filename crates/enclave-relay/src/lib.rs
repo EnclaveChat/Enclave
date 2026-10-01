@@ -29,6 +29,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub mod keys;
+pub mod ledger;
+
+pub use ledger::{MemorySpent, Spent};
+
 /// Datagram type: client link.
 pub const T_CLIENT: u8 = 0x01;
 /// Datagram type: relay link.
@@ -83,37 +88,70 @@ pub struct Stats {
 pub struct Relay {
     desc: Descriptor,
     link_secret: X448Secret,
-    tickets: TicketSecretKey,
+    /// Ticket keys, newest first (today's, and yesterday's for requests
+    /// sealed just before midnight).
+    tickets: Vec<TicketSecretKey>,
     sessions: HashMap<[u8; 16], Session>,
     rendezvous: HashMap<[u8; 16], [u8; 16]>,
     peers: HashMap<SocketAddr, Peer>,
-    burned: std::collections::HashSet<[u8; 32]>,
+    spent: Box<dyn Spent + Send>,
     stats: Stats,
     rng: HedgedRng,
 }
 
 impl Relay {
-    /// A new relay at `addr`.
+    /// A relay at `addr` with fresh random keys and an in-memory ledger
+    /// (tests, development).
     pub fn new(id: [u8; 16], family: &str, addr: SocketAddr, day: u32) -> Result<Self, CallError> {
         let mut rng = HedgedRng::new()?;
-        let (link_secret, lp) = X448Secret::generate(&mut rng)?;
+        let (link_secret, _) = X448Secret::generate(&mut rng)?;
         let tickets = TicketSecretKey::generate(id, day, &mut rng)?;
+        Self::with_keys(
+            id,
+            family,
+            addr,
+            link_secret,
+            vec![tickets],
+            Box::new(MemorySpent::default()),
+        )
+    }
+
+    /// A relay with keys from disk (`keys::RelayKeys`) and a durable
+    /// ledger of spent tokens.
+    pub fn with_keys(
+        id: [u8; 16],
+        family: &str,
+        addr: SocketAddr,
+        link_secret: X448Secret,
+        tickets: Vec<TicketSecretKey>,
+        spent: Box<dyn Spent + Send>,
+    ) -> Result<Self, CallError> {
+        if tickets.is_empty() {
+            return Err(CallError::UnknownKey);
+        }
         Ok(Self {
             desc: Descriptor {
                 id,
                 family: family.into(),
                 addr,
-                link_key: lp.0,
+                link_key: link_secret.public().0,
             },
             link_secret,
             tickets,
             sessions: HashMap::new(),
             rendezvous: HashMap::new(),
             peers: HashMap::new(),
-            burned: Default::default(),
+            spent,
             stats: Stats::default(),
-            rng,
+            rng: HedgedRng::new()?,
         })
+    }
+
+    /// Replace the ticket keys (at midnight UTC), newest first.
+    pub fn set_ticket_keys(&mut self, tickets: Vec<TicketSecretKey>) {
+        if !tickets.is_empty() {
+            self.tickets = tickets;
+        }
     }
 
     /// Public descriptor.
@@ -121,9 +159,9 @@ impl Relay {
         &self.desc
     }
 
-    /// The ticket key clients request tickets with.
+    /// The ticket key clients request tickets with (today's).
     pub fn ticket_key(&self) -> &enclave_calls::ticket::TicketKey {
-        self.tickets.public()
+        self.tickets[0].public()
     }
 
     /// Aggregate counters.
@@ -166,8 +204,18 @@ impl Relay {
         now: u64,
         token_ok: impl Fn(&[u8; 32]) -> bool,
     ) -> Result<Vec<u8>, CallError> {
-        let accepted = self.tickets.accept(request)?;
-        if !token_ok(&accepted.token) || !self.burned.insert(accepted.token) {
+        let epoch = request
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+            .ok_or(CallError::Malformed)?;
+        let key = self
+            .tickets
+            .iter()
+            .find(|k| k.public().epoch == epoch)
+            .ok_or(CallError::UnknownKey)?;
+        let accepted = key.accept(request)?;
+        if !token_ok(&accepted.token) || !self.spent.spend(&accepted.token, now)? {
             return Err(CallError::Crypto);
         }
         let duration = u64::from(accepted.duration.min(4 * 3600));
@@ -186,8 +234,11 @@ impl Relay {
         Ok(reply)
     }
 
-    /// Drop expired sessions.
+    /// Drop expired sessions and spent tokens past their retention.
     pub fn expire(&mut self, now: u64) {
+        if let Err(e) = self.spent.prune(now) {
+            eprintln!("enclave-relay: pruning spent tokens failed: {e}");
+        }
         self.sessions.retain(|_, s| !s.link.expired(now));
         let live: std::collections::HashSet<[u8; 16]> = self.sessions.keys().copied().collect();
         self.rendezvous.retain(|_, s| live.contains(s));

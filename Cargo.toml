@@ -26,6 +26,7 @@ members = [
     "crates/enclave-app",
     "crates/enclave-calls",
     "crates/enclave-relay",
+    "crates/enclave-service",
     "crates/enclave-fuzz",
     "xtask",
 ]

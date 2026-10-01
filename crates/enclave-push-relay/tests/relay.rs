@@ -89,3 +89,46 @@ async fn unified_push_delivery() {
             .is_err()
     );
 }
+
+#[test]
+fn keys_persist_rotate_and_overlap() {
+    use enclave_push_relay::keys::RelayKeys;
+    let dir = std::env::temp_dir().join(format!("enclave-push-keys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut rng = HedgedRng::new().unwrap();
+    let day0 = 300 * EPOCH_DAYS + 3; // epoch 300, day 3 into it
+    let keys = RelayKeys::init(&dir.join("k"), day0).unwrap();
+    assert!(
+        RelayKeys::init(&dir.join("k"), day0).is_err(),
+        "never overwrites"
+    );
+    let [current, next] = keys.published();
+    assert_eq!((current.epoch, next.epoch), (300, 301));
+    let old_token = seal_token(&current, Platform::Fcm, b"dev-1", 0, &mut rng).unwrap();
+    let early = seal_token(&next, Platform::Fcm, b"dev-2", 0, &mut rng).unwrap();
+
+    // A restart holds the same key: tokens sealed before it still open.
+    let mut keys = RelayKeys::load(&dir.join("k")).unwrap();
+    let mut relay = Relay::new(keys.secrets());
+    assert_eq!(relay.open(&old_token).unwrap().token, b"dev-1");
+    assert!(!keys.advance(day0).unwrap());
+
+    // Into the next epoch: the key published ahead takes over, and the old
+    // one is still held for the overlap.
+    assert!(keys.advance(301 * EPOCH_DAYS).unwrap());
+    relay.set_keys(keys.secrets());
+    assert_eq!(relay.epochs(), [301, 300]);
+    assert_eq!(relay.open(&early).unwrap().token, b"dev-2");
+    assert_eq!(relay.open(&old_token).unwrap().token, b"dev-1");
+    let reloaded = RelayKeys::load(&dir.join("k")).unwrap();
+    assert_eq!(Relay::new(reloaded.secrets()).epochs(), [301, 300]);
+
+    // After the overlap the old key is gone, from memory and from disk.
+    assert!(!keys.advance(301 * EPOCH_DAYS + OVERLAP_DAYS - 1).unwrap());
+    assert!(keys.advance(301 * EPOCH_DAYS + OVERLAP_DAYS).unwrap());
+    relay.set_keys(keys.secrets());
+    assert!(relay.open(&old_token).is_err());
+    let reloaded = RelayKeys::load(&dir.join("k")).unwrap();
+    assert_eq!(Relay::new(reloaded.secrets()).epochs(), [301]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

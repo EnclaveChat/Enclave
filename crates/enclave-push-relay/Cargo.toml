@@ -1,6 +1,6 @@
 [package]
 name = "enclave-push-relay"
-description = "The Enclave push relay: opens sealed push tokens, shapes wakes into 60-second windows, and forwards them to UnifiedPush (APNs and FCM later)."
+description = "The Enclave push relay: opens sealed push tokens, shapes wakes into 60-second windows, and forwards them to UnifiedPush (APNs and FCM later). Keys rotate every 30 days from a forward-secure seed chain."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,9 +18,11 @@ path = "src/bin/enclave-push-relay.rs"
 
 [dependencies]
 enclave-crypto = { path = "../enclave-crypto" }
+enclave-service = { path = "../enclave-service" }
 thiserror = "2"
 zeroize = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }

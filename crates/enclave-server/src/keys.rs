@@ -13,16 +13,19 @@
 //!   secret of the username log. Clients pin both, so they never change
 //!   for the life of the log.
 //!
-//! Files are created by `enclave-server init` with mode 0600 and replaced
-//! atomically (write, fsync, rename).
+//! Files are created by `enclave-server init` in a 0700 directory with
+//! mode 0600 and replaced atomically (`enclave_service::keyfile`).
 
 use enclave_crypto::hash::shake256;
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::{COMPOSITE_SEED_LEN, CompositePublic, CompositeSigningKey};
 use enclave_rpc::ServerSecret;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use enclave_service::SeedChain;
+use enclave_service::keyfile::{create_key_dir, create_secret, read_array};
+use std::path::Path;
 use zeroize::Zeroizing;
+
+pub use enclave_service::KeyError;
 
 /// Label of the server id (`docs/label-registry.md`).
 pub const SERVER_ID_LABEL: &str = "enclave/v1/net/server-id";
@@ -31,23 +34,6 @@ const IDENTITY_FILE: &str = "identity.key";
 const CHAIN_FILE: &str = "request-chain.key";
 const KT_HEAD_FILE: &str = "kt-head.key";
 const KT_VRF_FILE: &str = "kt-vrf.key";
-
-/// Key file trouble.
-#[derive(Debug, thiserror::Error)]
-pub enum KeyError {
-    /// Reading or writing failed.
-    #[error("key file {0}: {1}")]
-    Io(PathBuf, std::io::Error),
-    /// A key file is damaged.
-    #[error("key file {0} is damaged")]
-    Damaged(PathBuf),
-    /// `init` would overwrite existing keys.
-    #[error("keys already exist in {0}; refusing to overwrite them")]
-    Exists(PathBuf),
-    /// Key generation failed.
-    #[error("crypto: {0}")]
-    Crypto(#[from] enclave_crypto::Error),
-}
 
 /// The server id: the first 16 bytes of
 /// `SHAKE256("enclave/v1/net/server-id" ‖ identity public key)`.
@@ -58,92 +44,34 @@ pub fn server_id(identity: &CompositePublic) -> [u8; 16] {
     id
 }
 
-/// The request-key chain: the seed for `day`, and the previous day's seed
-/// while it may still be needed.
-pub struct RequestChain {
-    day: u32,
-    seed: Zeroizing<[u8; 32]>,
-    prev: Option<Zeroizing<[u8; 32]>>,
-    path: PathBuf,
-}
+/// The request-key chain: a [`SeedChain`] with one period per day.
+pub struct RequestChain(SeedChain);
 
 impl RequestChain {
     /// The day the chain is at.
     pub fn day(&self) -> u32 {
-        self.day
+        self.0.period()
     }
 
     /// Request keys, newest first: today's, and yesterday's if kept.
     pub fn keys(&self) -> Vec<ServerSecret> {
-        let mut v = vec![ServerSecret::from_seed(self.day, &self.seed)];
-        if let Some(p) = &self.prev {
-            v.push(ServerSecret::from_seed(self.day.saturating_sub(1), p));
+        let day = self.day();
+        let mut v = vec![ServerSecret::from_seed(day, self.0.current())];
+        if let Some(p) = self.0.previous() {
+            v.push(ServerSecret::from_seed(day.saturating_sub(1), p));
         }
         v
     }
 
     /// The key for `day + 1`, published ahead in the descriptor.
     pub fn next_key(&self) -> ServerSecret {
-        ServerSecret::from_seed(self.day + 1, &ServerSecret::next_seed(&self.seed))
+        ServerSecret::from_seed(self.day() + 1, &self.0.next())
     }
 
     /// Step the chain to `today` and persist it. Returns whether it moved.
     /// Seeds older than yesterday are gone afterwards.
     pub fn advance_to(&mut self, today: u32) -> Result<bool, KeyError> {
-        if today <= self.day {
-            return Ok(false);
-        }
-        while self.day < today {
-            let next = Zeroizing::new(ServerSecret::next_seed(&self.seed));
-            self.prev = (self.day + 1 == today).then(|| self.seed.clone());
-            self.seed = next;
-            self.day += 1;
-        }
-        self.save()?;
-        Ok(true)
-    }
-
-    fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let mut b = Zeroizing::new(Vec::with_capacity(4 + 32 + 1 + 32));
-        b.extend_from_slice(&self.day.to_be_bytes());
-        b.extend_from_slice(&self.seed[..]);
-        match &self.prev {
-            Some(p) => {
-                b.push(1);
-                b.extend_from_slice(&p[..]);
-            }
-            None => b.push(0),
-        }
-        b
-    }
-
-    fn decode(path: PathBuf, b: &[u8]) -> Result<Self, KeyError> {
-        let bad = || KeyError::Damaged(path.clone());
-        if b.len() != 37 && b.len() != 69 {
-            return Err(bad());
-        }
-        let day = u32::from_be_bytes(b[..4].try_into().map_err(|_| bad())?);
-        let mut seed = Zeroizing::new([0u8; 32]);
-        seed.copy_from_slice(&b[4..36]);
-        let prev = match b[36] {
-            0 if b.len() == 37 => None,
-            1 if b.len() == 69 => {
-                let mut p = Zeroizing::new([0u8; 32]);
-                p.copy_from_slice(&b[37..69]);
-                Some(p)
-            }
-            _ => return Err(bad()),
-        };
-        Ok(Self {
-            day,
-            seed,
-            prev,
-            path,
-        })
-    }
-
-    fn save(&self) -> Result<(), KeyError> {
-        write_secret(&self.path, &self.encode())
+        self.0.advance_to(today)
     }
 }
 
@@ -168,41 +96,28 @@ impl ServerKeys {
     /// Create fresh keys in `dir`, starting the chain at `today`. Refuses
     /// to overwrite keys that exist.
     pub fn init(dir: &Path, today: u32) -> Result<Self, KeyError> {
-        let id_path = dir.join(IDENTITY_FILE);
-        let chain_path = dir.join(CHAIN_FILE);
         if [IDENTITY_FILE, CHAIN_FILE, KT_HEAD_FILE, KT_VRF_FILE]
             .iter()
             .any(|f| dir.join(f).exists())
         {
             return Err(KeyError::Exists(dir.to_path_buf()));
         }
-        let mut b = std::fs::DirBuilder::new();
-        b.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            b.mode(0o700);
-        }
-        b.create(dir)
-            .map_err(|e| KeyError::Io(dir.to_path_buf(), e))?;
-        let mut rng = HedgedRng::new()?;
-        let identity = CompositeSigningKey::generate(&mut rng)?;
-        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(rng.array("server/request-chain")?);
-        let kt_head = CompositeSigningKey::generate(&mut rng)?;
-        let kt_vrf: Zeroizing<[u8; 32]> = Zeroizing::new(rng.array("server/kt-vrf")?);
-        write_secret(&id_path, identity.seed().as_slice())?;
-        write_secret(&dir.join(KT_HEAD_FILE), kt_head.seed().as_slice())?;
-        write_secret(&dir.join(KT_VRF_FILE), &kt_vrf[..])?;
-        let chain = RequestChain {
-            day: today,
-            seed,
-            prev: None,
-            path: chain_path,
-        };
-        chain.save()?;
+        create_key_dir(dir)?;
+        let crypto = |_| KeyError::Crypto;
+        let mut rng = HedgedRng::new().map_err(crypto)?;
+        let identity = CompositeSigningKey::generate(&mut rng).map_err(crypto)?;
+        let seed: Zeroizing<[u8; 32]> =
+            Zeroizing::new(rng.array("server/request-chain").map_err(crypto)?);
+        let kt_head = CompositeSigningKey::generate(&mut rng).map_err(crypto)?;
+        let kt_vrf: Zeroizing<[u8; 32]> =
+            Zeroizing::new(rng.array("server/kt-vrf").map_err(crypto)?);
+        create_secret(&dir.join(IDENTITY_FILE), identity.seed().as_slice())?;
+        create_secret(&dir.join(KT_HEAD_FILE), kt_head.seed().as_slice())?;
+        create_secret(&dir.join(KT_VRF_FILE), &kt_vrf[..])?;
+        let chain = SeedChain::create(&dir.join(CHAIN_FILE), today, seed, ServerSecret::next_seed)?;
         Ok(Self {
             identity,
-            chain,
+            chain: RequestChain(chain),
             kt_head,
             kt_vrf,
         })
@@ -210,74 +125,34 @@ impl ServerKeys {
 
     /// Load the keys in `dir`.
     pub fn load(dir: &Path) -> Result<Self, KeyError> {
-        let identity = load_signing(&dir.join(IDENTITY_FILE))?;
-        let kt_head = load_signing(&dir.join(KT_HEAD_FILE))?;
-        let vrf_path = dir.join(KT_VRF_FILE);
-        let raw = Zeroizing::new(
-            std::fs::read(&vrf_path).map_err(|e| KeyError::Io(vrf_path.clone(), e))?,
-        );
-        if raw.len() != 32 {
-            return Err(KeyError::Damaged(vrf_path));
-        }
-        let mut kt_vrf = Zeroizing::new([0u8; 32]);
-        kt_vrf.copy_from_slice(&raw);
-        let chain_path = dir.join(CHAIN_FILE);
-        let raw = Zeroizing::new(
-            std::fs::read(&chain_path).map_err(|e| KeyError::Io(chain_path.clone(), e))?,
-        );
-        let chain = RequestChain::decode(chain_path, &raw)?;
         Ok(Self {
-            identity,
-            chain,
-            kt_head,
-            kt_vrf,
+            identity: load_signing(&dir.join(IDENTITY_FILE))?,
+            chain: RequestChain(SeedChain::load(
+                &dir.join(CHAIN_FILE),
+                ServerSecret::next_seed,
+            )?),
+            kt_head: load_signing(&dir.join(KT_HEAD_FILE))?,
+            kt_vrf: read_array::<32>(&dir.join(KT_VRF_FILE))?,
         })
     }
 
     /// A copy of the head-signing key (the log runs on its own thread).
     pub fn kt_head_copy(&self) -> Result<CompositeSigningKey, KeyError> {
-        Ok(CompositeSigningKey::from_seed(self.kt_head.seed())?)
+        CompositeSigningKey::from_seed(self.kt_head.seed()).map_err(|_| KeyError::Crypto)
     }
 }
 
-fn load_signing(path: &Path) -> Result<CompositeSigningKey, KeyError> {
-    let raw = Zeroizing::new(std::fs::read(path).map_err(|e| KeyError::Io(path.to_path_buf(), e))?);
-    let seed: &[u8; COMPOSITE_SEED_LEN] = raw
-        .as_slice()
-        .try_into()
-        .map_err(|_| KeyError::Damaged(path.to_path_buf()))?;
-    CompositeSigningKey::from_seed(seed).map_err(|_| KeyError::Damaged(path.to_path_buf()))
-}
-
-/// Write `bytes` to `path` atomically, readable by the owner only.
-fn write_secret(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
-    let err = |e| KeyError::Io(path.to_path_buf(), e);
-    let tmp = path.with_extension("tmp");
-    {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(0o600);
-        }
-        let mut f = o.open(&tmp).map_err(err)?;
-        f.write_all(bytes).map_err(err)?;
-        f.sync_all().map_err(err)?;
-    }
-    std::fs::rename(&tmp, path).map_err(err)?;
-    if let Some(dir) = path.parent()
-        && let Ok(d) = std::fs::File::open(dir)
-    {
-        let _ = d.sync_all();
-    }
-    Ok(())
+/// A composite signing key stored as its seed.
+pub fn load_signing(path: &Path) -> Result<CompositeSigningKey, KeyError> {
+    let seed = read_array::<COMPOSITE_SEED_LEN>(path)?;
+    CompositeSigningKey::from_seed(&seed).map_err(|_| KeyError::Damaged(path.to_path_buf()))
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use std::path::PathBuf;
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("enclave-keys-{name}-{}", std::process::id()));

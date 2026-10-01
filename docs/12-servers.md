@@ -268,9 +268,11 @@ A server whose witnesses collude can show different people different logs, each 
 - **Server descriptors** at `https://<domain>/.well-known/enclave`, self-signed (`enclave/v1/net/server-descriptor`), pinned on first use and logged in KT: the server composite key, `server_id`, operator family, Nym address, current and next daily request keys, PoW efforts, quotas, and the KT head-signing key. Today a client learns a server's request key from the dev transport.
 - **Moving an account:** a root-signed `Moved` record (ctx `enclave/v1/proto/moved`).
 
-## 5. Relays (not yet implemented)
+## 5. Relays
 
-`enclave-relay`: GotaTun WireGuard endpoints, the relay-ticket service, a Rosenpass daemon for relay↔relay links, and the SFU for group calls; relay descriptors declare the operator family (`enclave/v1/calls/relay-descriptor`). `enclave-push-relay` is in `10-push.md`. `enclave-witness` will package §3.3 as a service.
+`enclave-relay` as built: the relay-ticket service and the data plane with the interim link framing (`11-calls.md` §3.4). Its keys live in a key directory created by `enclave-relay init` (`keys.rs`): `relay-id` (16 B), `link.key` (the X448 secret for relay↔relay links, published in the descriptor) and `ticket-chain.key`, a daily seed chain (`enclave_service::SeedChain`). Day `d`'s ticket key is `KMAC256(seed_d, u32(d), 960, "enclave/v1/calls/ticket-key")` split into the X448 secret and the ML-KEM-1024 seed; `seed_{d+1} = KMAC256(seed_d, "", 256, "enclave/v1/calls/ticket-chain")`. The relay serves today's key and yesterday's (for requests sealed just before midnight), and publishes tomorrow's ahead. Spent Privacy Pass tokens are recorded in `data_dir/relay.redb` (`ledger.rs`) and committed before the ticket is issued, so a restart never accepts a token twice; they are kept 62 days. `enclave-relay run --config FILE` reads `[relay] listen` (default `0.0.0.0:51820`), `public_addr`, `family` (required), `keys_dir`, `data_dir` and `peers` (peer descriptors in hex); `healthcheck` checks the heartbeat file `run` writes every 30 s. Calls in progress do not survive a restart (sessions last at most 4 h and are held in memory).
+
+Not implemented yet (C2–C5): GotaTun WireGuard endpoints, a Rosenpass daemon for relay↔relay links, the SFU for group calls, and signed relay descriptors that declare the operator family (`enclave/v1/calls/relay-descriptor`). `enclave-push-relay` is in `10-push.md`. `enclave-witness` will package §3.3 as a service.
 
 ## 6. Deployment
 

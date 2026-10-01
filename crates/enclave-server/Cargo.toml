@@ -19,11 +19,11 @@ enclave-rpc = { path = "../enclave-rpc" }
 enclave-proto = { path = "../enclave-proto" }
 enclave-tokens = { path = "../enclave-tokens" }
 enclave-kt = { path = "../enclave-kt" }
+enclave-service = { path = "../enclave-service" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
 thiserror = "2"
 redb = "4.3.0"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
 zeroize = "1"
 
 [features]

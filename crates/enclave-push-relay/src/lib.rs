@@ -13,6 +13,11 @@
 //! server can't learn anything by flooding. The relay keeps no logs, only
 //! counts.
 //!
+//! Keys: one X448 + ML-KEM-1024 key per 30-day epoch, derived from a
+//! forward-secure seed chain ([`keys::RelayKeys`]). The previous epoch's key
+//! stays for 7 days so tokens sealed just before a rotation still open; the
+//! next epoch's key is published ahead of time.
+//!
 //! Delivery: UnifiedPush (an HTTP POST to the device's endpoint) is here;
 //! APNs and FCM need the project's credentials and are not. Plain `http://`
 //! endpoints only for now (development distributors); TLS is future work.
@@ -33,6 +38,16 @@ const L_SEAL: &str = "enclave/v1/net/push-seal";
 const L_TRANSCRIPT: &str = "enclave/v1/net/push-transcript";
 /// AD prefix of a sealed token.
 const L_AD: &str = "enclave/v1/wire/ad-push-token";
+/// KMAC label deriving an epoch's key material from its chain seed.
+pub const L_RELAY_KEY: &str = "enclave/v1/push/relay-key";
+/// KMAC label stepping the key chain to the next epoch.
+pub const L_RELAY_CHAIN: &str = "enclave/v1/push/relay-chain";
+/// Days per key epoch.
+pub const EPOCH_DAYS: u32 = 30;
+/// Days into a new epoch that the previous epoch's key is still accepted.
+pub const OVERLAP_DAYS: u32 = 7;
+
+pub mod keys;
 
 /// Longest platform token (a UnifiedPush endpoint URL, an APNs or FCM
 /// token), padded to this so every sealed token has one size.
@@ -154,10 +169,45 @@ impl RelaySecret {
         })
     }
 
+    /// The key for `epoch` from that epoch's chain seed (deterministic, so
+    /// a restarted relay holds the key it published).
+    pub fn from_seed(epoch: u32, seed: &[u8; 32]) -> Self {
+        let m: zeroize::Zeroizing<[u8; X448_LEN + 64]> = zeroize::Zeroizing::new(
+            enclave_crypto::kmac::kmac256(seed, &epoch.to_be_bytes(), L_RELAY_KEY),
+        );
+        let mut x = [0u8; X448_LEN];
+        x.copy_from_slice(&m[..X448_LEN]);
+        let x448 = X448Secret::from_bytes(x);
+        x.fill(0);
+        let mut ms = zeroize::Zeroizing::new([0u8; 64]);
+        ms.copy_from_slice(&m[X448_LEN..]);
+        let (mlkem, mp) = MlKemSecret::from_seed(&ms);
+        let xp = x448.public();
+        Self {
+            x448,
+            mlkem,
+            public: RelayPublic {
+                epoch,
+                x448: xp,
+                mlkem: mp,
+            },
+        }
+    }
+
+    /// The chain seed of the epoch after `seed`'s.
+    pub fn next_seed(seed: &[u8; 32]) -> [u8; 32] {
+        enclave_crypto::kmac::kmac256(seed, b"", L_RELAY_CHAIN)
+    }
+
     /// Public half.
     pub fn public(&self) -> &RelayPublic {
         &self.public
     }
+}
+
+/// The key epoch `day` falls in.
+pub fn epoch_of(day: u32) -> u32 {
+    day / EPOCH_DAYS
 }
 
 fn seal_key(dh: &[u8], ss: &[u8], eph: &[u8], ct: &[u8], relay: &RelayPublic) -> seal::SealKey {
@@ -244,6 +294,16 @@ impl Relay {
             forwarded: 0,
             shaped: 0,
         }
+    }
+
+    /// Replace the keys (after a rotation).
+    pub fn set_keys(&mut self, keys: Vec<RelaySecret>) {
+        self.keys = keys;
+    }
+
+    /// Epochs of the keys held, newest first.
+    pub fn epochs(&self) -> Vec<u32> {
+        self.keys.iter().map(|k| k.public.epoch).collect()
     }
 
     /// Open a sealed token.

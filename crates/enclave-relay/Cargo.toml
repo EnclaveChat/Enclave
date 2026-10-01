@@ -15,7 +15,11 @@ workspace = true
 [dependencies]
 enclave-calls = { path = "../enclave-calls" }
 enclave-crypto = { path = "../enclave-crypto" }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+enclave-service = { path = "../enclave-service" }
+redb = "4.3.0"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 
 [dev-dependencies]
 enclave-crypto = { path = "../enclave-crypto" }

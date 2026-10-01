@@ -222,3 +222,67 @@ async fn udp_loopback_call() {
         assert_eq!(got, vec![i as u8; 111]);
     }
 }
+
+/// Keys and spent tokens survive a restart; ticket keys roll daily and a
+/// request sealed to yesterday's key is still served for a day.
+#[test]
+fn keys_and_spent_tokens_survive_a_restart() {
+    use enclave_calls::ticket;
+    use enclave_relay::keys::RelayKeys;
+    use enclave_relay::ledger::RedbSpent;
+    let dir = std::env::temp_dir().join(format!("enclave-relay-keys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let addr: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+    let day = 20_000;
+    let now = u64::from(day) * 86_400 + 100;
+    let mut rng = HedgedRng::new().unwrap();
+    let open = |keys: &RelayKeys| {
+        Relay::with_keys(
+            keys.id,
+            "a",
+            addr,
+            keys.link_secret(),
+            keys.tickets(),
+            Box::new(RedbSpent::open(&dir.join("relay.redb")).unwrap()),
+        )
+        .unwrap()
+    };
+
+    let keys = RelayKeys::init(&dir.join("k"), day).unwrap();
+    assert!(
+        RelayKeys::init(&dir.join("k"), day).is_err(),
+        "never overwrites"
+    );
+    let tomorrow = keys.next_ticket().public().clone();
+    let (desc, ticket_key) = {
+        let mut relay = open(&keys);
+        let (req, _) = ticket::request(relay.ticket_key(), [1; 32], 600, &mut rng).unwrap();
+        relay.issue_ticket(&req, now, |_| true).unwrap();
+        (relay.descriptor().clone(), relay.ticket_key().clone())
+    };
+
+    let mut keys = RelayKeys::load(&dir.join("k")).unwrap();
+    let mut relay = open(&keys);
+    assert_eq!(relay.descriptor(), &desc, "same id and link key");
+    assert!(relay.ticket_key() == &ticket_key, "same ticket key");
+    // The token spent before the restart stays spent.
+    let (again, _) = ticket::request(relay.ticket_key(), [1; 32], 600, &mut rng).unwrap();
+    assert!(relay.issue_ticket(&again, now, |_| true).is_err());
+
+    // Next day: tomorrow's published key is current; yesterday's still works.
+    let (late, _) = ticket::request(relay.ticket_key(), [2; 32], 600, &mut rng).unwrap();
+    assert!(keys.advance(day + 1).unwrap());
+    relay.set_ticket_keys(keys.tickets());
+    assert!(relay.ticket_key() == &tomorrow);
+    relay.issue_ticket(&late, now + 86_400, |_| true).unwrap();
+    // Two days on, the old key is gone.
+    let (stale, _) = ticket::request(&ticket_key, [3; 32], 600, &mut rng).unwrap();
+    keys.advance(day + 2).unwrap();
+    relay.set_ticket_keys(keys.tickets());
+    assert!(
+        relay
+            .issue_ticket(&stale, now + 2 * 86_400, |_| true)
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -55,6 +55,10 @@ pub mod labels {
     pub const LINK_DIR: &str = "enclave/v1/calls/link-dir";
     /// Relay-to-relay link key.
     pub const RELAY_LINK: &str = "enclave/v1/calls/relay-link";
+    /// A day's ticket-key material from that day's chain seed.
+    pub const TICKET_KEY: &str = "enclave/v1/calls/ticket-key";
+    /// Stepping the ticket-key chain to the next day.
+    pub const TICKET_CHAIN: &str = "enclave/v1/calls/ticket-chain";
 }
 
 /// Errors from calls.
@@ -78,6 +82,9 @@ pub enum CallError {
     /// The offer expired or the answer does not match.
     #[error("offer expired or does not match")]
     Stale,
+    /// A relay's storage failed; the request may be retried.
+    #[error("storage unavailable")]
+    Unavailable,
 }
 
 impl From<enclave_crypto::Error> for CallError {

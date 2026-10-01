@@ -2512,6 +2512,8 @@ name = "enclave-push-relay"
 version = "0.1.0"
 dependencies = [
  "enclave-crypto",
+ "enclave-service",
+ "serde",
  "thiserror 2.0.21",
  "tokio",
  "zeroize",
@@ -2523,7 +2525,11 @@ version = "0.1.0"
 dependencies = [
  "enclave-calls",
  "enclave-crypto",
+ "enclave-service",
+ "redb",
+ "serde",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2554,12 +2560,22 @@ dependencies = [
  "enclave-kt",
  "enclave-proto",
  "enclave-rpc",
+ "enclave-service",
  "enclave-tokens",
  "enclave-wire",
  "redb",
  "serde",
  "thiserror 2.0.21",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "enclave-service"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
  "toml 0.8.23",
  "zeroize",
 ]
