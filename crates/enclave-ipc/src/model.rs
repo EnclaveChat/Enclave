@@ -133,6 +133,12 @@ pub struct Msg {
     pub sticker: bool,
     /// The sticker's pack is added here.
     pub pack_added: bool,
+    /// A voice note.
+    pub voice: bool,
+    /// Its length in milliseconds (0 until read).
+    pub voice_ms: u32,
+    /// Its waveform: up to 64 peak levels, 0 to 255.
+    pub waveform: Vec<u8>,
 }
 
 /// Everything the window shows.
@@ -525,7 +531,10 @@ impl Snapshot {
                 .str(&m.location)
                 .str(&m.location_label)
                 .bool(m.sticker)
-                .bool(m.pack_added);
+                .bool(m.pack_added)
+                .bool(m.voice)
+                .u32(m.voice_ms)
+                .bytes(&m.waveform[..m.waveform.len().min(64)]);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -643,6 +652,15 @@ impl Snapshot {
                     location_label: r.str()?,
                     sticker: r.bool()?,
                     pack_added: r.bool()?,
+                    voice: r.bool()?,
+                    voice_ms: r.u32()?,
+                    waveform: {
+                        let w = r.bytes()?;
+                        if w.len() > 64 {
+                            return Err(IpcError::Malformed);
+                        }
+                        w
+                    },
                 })
             })
             .collect::<Result<_>>()?;

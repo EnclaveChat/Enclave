@@ -682,6 +682,41 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Stickers);
         shot("45-sticker-picker-phone", phone);
         ui.set_sheet(Sheet::None);
+
+        // Voice notes: a waveform and a length.
+        let mut vn = data.clone();
+        let wave = |seed: u32| -> Vec<u8> {
+            (0..64u32)
+                .map(|i| {
+                    let x = (i * 37 + seed * 11) % 97;
+                    (40 + (x * 2) % 200) as u8
+                })
+                .collect()
+        };
+        vn.messages.push(Msg {
+            outgoing: false,
+            time: "14:08".into(),
+            status: 2,
+            seq: 97,
+            file: "voice-note.evn".into(),
+            voice: true,
+            voice_ms: 14_000,
+            waveform: wave(1),
+            ..Default::default()
+        });
+        vn.messages.push(Msg {
+            outgoing: true,
+            time: "14:09".into(),
+            status: 1,
+            seq: 96,
+            file: "voice-note.evn".into(),
+            voice: true,
+            voice_ms: 6_000,
+            waveform: wave(5),
+            ..Default::default()
+        });
+        view::apply(&ui, &vn);
+        shot("46-voice-notes-phone", phone);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

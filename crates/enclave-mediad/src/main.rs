@@ -26,6 +26,30 @@ fn handle(req: MediaRequest) -> MediaReply {
             height: s.height,
             bytes: s.bytes,
         }),
+        MediaOp::VoiceNote => {
+            enclave_media::voice::voice_note_from_wav(&req.bytes).and_then(|note| {
+                let info = enclave_media::voice::voice_info(&note)?;
+                Ok(MediaOut::Audio {
+                    duration_ms: info.duration_ms,
+                    waveform: info.waveform,
+                    bytes: note,
+                })
+            })
+        }
+        MediaOp::VoiceInfo => {
+            enclave_media::voice::voice_info(&req.bytes).map(|i| MediaOut::Audio {
+                duration_ms: i.duration_ms,
+                waveform: i.waveform,
+                bytes: Vec::new(),
+            })
+        }
+        MediaOp::VoiceWav => enclave_media::voice::voice_info(&req.bytes).and_then(|i| {
+            Ok(MediaOut::Audio {
+                duration_ms: i.duration_ms,
+                waveform: i.waveform,
+                bytes: enclave_media::voice::voice_to_wav(&req.bytes)?,
+            })
+        }),
         MediaOp::Shrink(side) => {
             enclave_media::sanitize_max(&req.bytes, u32::from(side)).map(|s| MediaOut::Sanitized {
                 png: s.format == enclave_media::Format::Png,

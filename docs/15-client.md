@@ -111,6 +111,12 @@ If the gate is still blocked **8 weeks after M6**, mobile gets thin SwiftUI and 
 
 The container is a sequence of 64 KiB records, each `u8(track) ‖ u32(pts_ms) ‖ u16(frames) ‖ payload`, with a header record listing tracks (AV1 or Opus, with fixed parameters). It has no variable-length boxes, no nesting, and no index; it is fuzzed as a parser (`20-assurance.md` §1).
 
+### 5.2 As implemented: voice notes
+
+`enclave-media/src/voice.rs`. Voice notes use a simpler audio-only container than §5.1 (video isn't built): `"EVN1" ‖ u32 frames ‖ u16 packet_len ‖ 64 B waveform ‖ frames × packet_len`. Every frame is 20 ms of 48 kHz mono Opus at a constant 24 kbit/s (60 B), so a note's size follows from its length alone, and at most 15 minutes. The codec is pure Rust, so PLAN §22's libopus exception isn't needed for voice notes: `opus-rs` encodes (it only ever sees our own audio) and `opus-decoder` (RFC 8251 conformant, no unsafe code) decodes what other people send; both run in `mediad` (`MediaOp::VoiceNote`, `VoiceInfo`, `VoiceWav`), and `enclave-fuzz`'s `media` target covers the container and the decoder.
+
+On the desktop a voice note comes from a WAV recording sent from the attach sheet (16- or 8-bit PCM, mono or stereo, 8–96 kHz): it is resampled and re-encoded, so nothing of the file but its sound leaves the device (no name, no `LIST`/`INFO` chunks). It travels as an ordinary sealed attachment (`audio/x-enclave-voice`). The conversation shows a waveform and the length, read by `mediad` from the note; **Save** writes a WAV decoded by `mediad`. Tests in `enclave-media` and `voice_note_through_the_engine`. Not done: recording from the microphone and playing in the app, which need the platform audio shims (`cpal` over ALSA/PulseAudio, CoreAudio, WASAPI; this build environment has no audio stack), and speech-to-text.
+
 ## 6. Feature parity
 
 The feature matrix is in `16-features.md`.

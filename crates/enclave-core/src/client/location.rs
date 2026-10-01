@@ -58,7 +58,8 @@ impl Location {
         format!("{}, {}", f(self.lat_e6), f(self.lon_e6))
     }
 
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    /// `u32 lat ‖ u32 lon ‖ bytes(label)`.
+    pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         w.u32(self.lat_e6 as u32)
             .u32(self.lon_e6 as u32)
@@ -66,7 +67,8 @@ impl Location {
         w.finish()
     }
 
-    pub(crate) fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
+    /// Decode (strict; coordinates must be on the Earth).
+    pub fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let l = Self {
             lat_e6: r.u32()? as i32,

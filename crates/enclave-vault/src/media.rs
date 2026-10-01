@@ -172,7 +172,7 @@ impl Media {
                 height,
                 bytes,
             }),
-            MediaOut::Rgba { .. } => Err("unexpected reply".into()),
+            _ => Err("unexpected reply".into()),
         }
     }
 
@@ -190,7 +190,39 @@ impl Media {
                 height,
                 bytes,
             }),
-            MediaOut::Rgba { .. } => Err("unexpected reply".into()),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
+    /// A WAV recording as a voice note: (note, duration ms, waveform).
+    pub async fn voice_note(&self, wav: Vec<u8>) -> Result<(Vec<u8>, u32, Vec<u8>), String> {
+        match self.call(MediaOp::VoiceNote, wav).await? {
+            MediaOut::Audio {
+                duration_ms,
+                waveform,
+                bytes,
+            } => Ok((bytes, duration_ms, waveform)),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
+    /// A voice note's duration (ms) and waveform, after checking it.
+    pub async fn voice_info(&self, note: Vec<u8>) -> Result<(u32, Vec<u8>), String> {
+        match self.call(MediaOp::VoiceInfo, note).await? {
+            MediaOut::Audio {
+                duration_ms,
+                waveform,
+                ..
+            } => Ok((duration_ms, waveform)),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
+    /// A voice note decoded to a WAV file.
+    pub async fn voice_wav(&self, note: Vec<u8>) -> Result<Vec<u8>, String> {
+        match self.call(MediaOp::VoiceWav, note).await? {
+            MediaOut::Audio { bytes, .. } => Ok(bytes),
+            _ => Err("unexpected reply".into()),
         }
     }
 
@@ -206,7 +238,7 @@ impl Media {
                 height,
                 pixels,
             }),
-            MediaOut::Sanitized { .. } => Err("unexpected reply".into()),
+            _ => Err("unexpected reply".into()),
         }
     }
 }
@@ -218,6 +250,26 @@ fn local(op: MediaOp, bytes: &[u8]) -> Result<MediaOut, String> {
             width: s.width,
             height: s.height,
             bytes: s.bytes,
+        }),
+        MediaOp::VoiceNote => enclave_media::voice::voice_note_from_wav(bytes).and_then(|note| {
+            let info = enclave_media::voice::voice_info(&note)?;
+            Ok(MediaOut::Audio {
+                duration_ms: info.duration_ms,
+                waveform: info.waveform,
+                bytes: note,
+            })
+        }),
+        MediaOp::VoiceInfo => enclave_media::voice::voice_info(bytes).map(|i| MediaOut::Audio {
+            duration_ms: i.duration_ms,
+            waveform: i.waveform,
+            bytes: Vec::new(),
+        }),
+        MediaOp::VoiceWav => enclave_media::voice::voice_info(bytes).and_then(|i| {
+            Ok(MediaOut::Audio {
+                duration_ms: i.duration_ms,
+                waveform: i.waveform,
+                bytes: enclave_media::voice::voice_to_wav(bytes)?,
+            })
         }),
         MediaOp::Shrink(side) => {
             enclave_media::sanitize_max(bytes, u32::from(side)).map(|s| MediaOut::Sanitized {

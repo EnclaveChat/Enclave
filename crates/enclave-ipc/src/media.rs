@@ -17,6 +17,12 @@ pub enum MediaOp {
     /// Re-encode like `Sanitize`, at most this many pixels on the long
     /// side (stickers).
     Shrink(u16),
+    /// A WAV recording to a voice note.
+    VoiceNote,
+    /// Check a voice note and read its duration and waveform.
+    VoiceInfo,
+    /// A voice note as a WAV file.
+    VoiceWav,
 }
 
 /// Vault → mediad.
@@ -41,6 +47,16 @@ pub enum MediaOut {
         width: u32,
         /// Height.
         height: u32,
+        /// The file.
+        bytes: Vec<u8>,
+    },
+    /// Audio: a file (voice note or WAV; empty for `VoiceInfo`), its
+    /// duration and a 64-point waveform.
+    Audio {
+        /// Milliseconds.
+        duration_ms: u32,
+        /// Peak levels, 0 to 255.
+        waveform: Vec<u8>,
         /// The file.
         bytes: Vec<u8>,
     },
@@ -73,6 +89,9 @@ impl MediaRequest {
             MediaOp::Sanitize => w.u8(1),
             MediaOp::Thumbnail(side) => w.u8(2).u32(u32::from(side)),
             MediaOp::Shrink(side) => w.u8(3).u32(u32::from(side)),
+            MediaOp::VoiceNote => w.u8(4),
+            MediaOp::VoiceInfo => w.u8(5),
+            MediaOp::VoiceWav => w.u8(6),
         };
         w.bytes(&self.bytes[..self.bytes.len().min(MAX_BYTES)]);
         w.0
@@ -86,6 +105,9 @@ impl MediaRequest {
             1 => MediaOp::Sanitize,
             2 => MediaOp::Thumbnail(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
             3 => MediaOp::Shrink(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
+            4 => MediaOp::VoiceNote,
+            5 => MediaOp::VoiceInfo,
+            6 => MediaOp::VoiceWav,
             _ => return Err(IpcError::Malformed),
         };
         let bytes = r.bytes()?;
@@ -114,6 +136,13 @@ impl MediaReply {
                 pixels,
             }) if pixels.len() <= MAX_BYTES => {
                 w.u8(2).u32(*width).u32(*height).bytes(pixels);
+            }
+            Ok(MediaOut::Audio {
+                duration_ms,
+                waveform,
+                bytes,
+            }) if bytes.len() <= MAX_BYTES && waveform.len() <= 64 => {
+                w.u8(3).u32(*duration_ms).bytes(waveform).bytes(bytes);
             }
             Ok(_) => {
                 w.u8(0).str("too large");
@@ -147,6 +176,18 @@ impl MediaReply {
                     width,
                     height,
                     pixels,
+                })
+            }
+            3 => {
+                let duration_ms = r.u32()?;
+                let waveform = r.bytes()?;
+                if waveform.len() > 64 {
+                    return Err(IpcError::Malformed);
+                }
+                Ok(MediaOut::Audio {
+                    duration_ms,
+                    waveform,
+                    bytes: r.bytes()?,
                 })
             }
             _ => return Err(IpcError::Malformed),

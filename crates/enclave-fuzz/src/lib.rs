@@ -69,6 +69,8 @@ fn content(d: &[u8]) {
     let _ = enclave_core::ContactCard::from_link(&String::from_utf8_lossy(d));
     let _ = enclave_core::card::b64url_decode(&String::from_utf8_lossy(d));
     let _ = enclave_core::files::Attachment::decode(d);
+    let _ = enclave_core::client::StickerPack::decode(d);
+    let _ = enclave_core::client::Location::decode(d);
 }
 
 fn calls(d: &[u8]) {
@@ -155,9 +157,12 @@ fn ipc(d: &[u8]) {
     let _ = enclave_ipc::media::MediaReply::decode(d);
 }
 
-/// What mediad decodes: every byte string a peer can send as a picture.
+/// What mediad decodes: every byte string a peer can send as a picture or
+/// a voice note.
 fn media(d: &[u8]) {
     let _ = enclave_media::thumbnail(d, 64);
+    let _ = enclave_media::voice::voice_info(d);
+    let _ = enclave_media::voice::decode_voice(d);
 }
 
 /// Every target.

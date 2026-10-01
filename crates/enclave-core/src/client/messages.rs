@@ -524,7 +524,7 @@ impl Client {
 
     /// A file's bytes: from the local cache, or downloaded (every chunk of
     /// its bucket), verified against its hash and cached.
-    pub(crate) async fn fetch_file(&mut self, att: &Attachment) -> Result<Vec<u8>> {
+    pub async fn fetch_file(&mut self, att: &Attachment) -> Result<Vec<u8>> {
         if let Some(b) = self.store.get(NS_FILES, &att.hash[..32])? {
             return Ok(b);
         }

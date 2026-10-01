@@ -121,6 +121,9 @@ struct Engine {
     media: crate::media::Media,
     /// Previews already sent to the UI (conversation, message position).
     previews: std::collections::HashSet<(String, u64)>,
+    /// Voice notes' duration and waveform, by (conversation, position),
+    /// read by mediad.
+    voice: HashMap<(String, u64), (u32, Vec<u8>)>,
     transport: Arc<dyn Transport>,
     server: ServerId,
     client: Option<Client>,
@@ -220,6 +223,15 @@ fn mime_for(name: &str) -> &'static str {
 
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
+
+/// MIME type of a voice note (`enclave_media::voice`).
+const VOICE_MIME: &str = "audio/x-enclave-voice";
+/// File name of a voice note.
+const VOICE_NAME: &str = "voice-note.evn";
+
+fn is_voice(a: &enclave_core::files::Attachment) -> bool {
+    a.mime == VOICE_MIME && a.size <= PREVIEW_MAX_BYTES
+}
 
 /// Sticker pictures are re-encoded to at most this many pixels a side.
 const STICKER_SIDE: u16 = 512;
@@ -444,6 +456,7 @@ pub async fn run_with(
             .media
             .unwrap_or_else(crate::media::Media::in_process),
         previews: std::collections::HashSet::new(),
+        voice: HashMap::new(),
         transport,
         server,
         client: None,
@@ -502,12 +515,18 @@ pub async fn run_with(
                 e.handle(cmd).await;
                 e.push();
                 e.load_previews().await;
+                if e.load_voice().await {
+                    e.push();
+                }
             }
             _ = tick.tick() => {
                 if e.client.is_some() {
                     e.sync().await;
                     e.push();
                     e.load_previews().await;
+                    if e.load_voice().await {
+                        e.push();
+                    }
                 } else if e.joining.is_some() {
                     e.poll_join().await;
                     e.push();
@@ -571,6 +590,74 @@ impl Engine {
     /// Send the UI previews of pictures in the open conversation: fetched
     /// (people we accepted only, never message requests), decoded by
     /// mediad, a few per pass.
+    /// Read the duration and waveform of voice notes in the open
+    /// conversation (fetched, checked and read by mediad), a few per pass.
+    /// Returns whether anything new is known.
+    async fn load_voice(&mut self) -> bool {
+        let Some(c) = self.client.as_mut() else {
+            return false;
+        };
+        let (conv, notes): (String, Vec<(u64, enclave_core::files::Attachment)>) =
+            if let Some(gid) = self.selected_group {
+                (
+                    group_id_str(&gid),
+                    c.group_messages(&gid)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|m| !m.deleted)
+                        .filter_map(|m| m.attachment.filter(is_voice).map(|a| (m.seq, a)))
+                        .collect(),
+                )
+            } else if let Some(root) = self.selected {
+                if c.contact(&root).map(|ct| ct.state) != Some(ContactState::Accepted) {
+                    return false;
+                }
+                (
+                    hex_id(&root),
+                    c.messages(&root)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|m| !m.deleted)
+                        .filter_map(|m| m.attachment.filter(is_voice).map(|a| (m.seq, a)))
+                        .collect(),
+                )
+            } else {
+                return false;
+            };
+        let mut changed = false;
+        let todo: Vec<(u64, enclave_core::files::Attachment)> = notes
+            .into_iter()
+            .rev()
+            .filter(|(s, _)| !self.voice.contains_key(&(conv.clone(), *s)))
+            .take(4)
+            .collect();
+        for (seq, att) in todo {
+            let Ok(bytes) = c.fetch_file(&att).await else {
+                continue;
+            };
+            // A note mediad can't read shows as a plain file from now on.
+            let info = self
+                .media
+                .voice_info(bytes)
+                .await
+                .unwrap_or((0, Vec::new()));
+            self.voice.insert((conv.clone(), seq), info);
+            changed = true;
+        }
+        changed
+    }
+
+    /// What saving a file writes: a voice note becomes a WAV file anyone
+    /// can play (decoded by mediad); anything else is saved as it is.
+    async fn exportable(&self, name: String, bytes: Vec<u8>) -> (String, Vec<u8>) {
+        if name.ends_with(".evn")
+            && let Ok(wav) = self.media.voice_wav(bytes.clone()).await
+        {
+            return (with_extension(&name, "wav"), wav);
+        }
+        (name, bytes)
+    }
+
     async fn load_previews(&mut self) {
         if let Some(gid) = self.selected_group {
             return self.load_group_previews(gid).await;
@@ -1320,7 +1407,18 @@ impl Engine {
                 self.push();
                 // Pictures are re-encoded first: what leaves is new pixels
                 // only, never the original file's metadata (GPS, camera).
-                let (name, mime, bytes) = if enclave_media::detect(&bytes).is_some() {
+                let (name, mime, bytes) = if enclave_media::voice::is_wav(&bytes) {
+                    // A recording: re-encoded as a voice note, nothing of
+                    // the original file but its sound.
+                    match self.media.voice_note(bytes).await {
+                        Ok((note, _, _)) => (VOICE_NAME.to_string(), VOICE_MIME, note),
+                        Err(_) => {
+                            self.status = "Enclave couldn't read that recording, so it wasn't sent. Use a 16-bit WAV file.".into();
+                            self.busy = false;
+                            return;
+                        }
+                    }
+                } else if enclave_media::detect(&bytes).is_some() {
                     match self.media.sanitize(bytes).await {
                         Ok(s) => (
                             with_extension(&name, s.format.extension()),
@@ -1382,6 +1480,7 @@ impl Engine {
                         .unwrap_or_else(|| "file".into());
                     match c.fetch_group_attachment(&gid, seq).await {
                         Ok(bytes) if bytes.len() <= 15 * 1024 * 1024 => {
+                            let (name, bytes) = self.exportable(name, bytes).await;
                             let _ = self.out.send(Out::File(name, bytes));
                         }
                         Ok(_) => {
@@ -1408,6 +1507,7 @@ impl Engine {
                         .unwrap_or_else(|| "file".into());
                     match c.fetch_attachment(&root, seq).await {
                         Ok(bytes) if bytes.len() <= 15 * 1024 * 1024 => {
+                            let (name, bytes) = self.exportable(name, bytes).await;
                             let _ = self.out.send(Out::File(name, bytes));
                         }
                         Ok(_) => {
@@ -2051,6 +2151,25 @@ impl Engine {
                     .iter()
                     .map(|m| {
                         let card = shared.get(&m.id).filter(|_| !m.deleted);
+                        if let Some(att) = m.attachment.as_ref().filter(|a| is_voice(a))
+                            && !m.deleted
+                        {
+                            let (ms, wave) = self
+                                .voice
+                                .get(&(hex_id(&ct.root), m.seq))
+                                .cloned()
+                                .unwrap_or_default();
+                            return Msg {
+                                text: m.text.clone(),
+                                file: att.name.clone(),
+                                can_edit: false,
+                                voice: true,
+                                voice_ms: ms,
+                                waveform: wave,
+                                pinned: pinned.contains(&m.id),
+                                ..display(m, now)
+                            };
+                        }
                         if let (Some(_), Some(att)) = (m.sticker, &m.attachment)
                             && !m.deleted
                         {
@@ -2201,6 +2320,20 @@ impl Engine {
                                 .is_some_and(|a| !m.deleted && is_picture(a)),
                             ..Default::default()
                         };
+                        if let Some(att) = m.attachment.as_ref().filter(|a| is_voice(a))
+                            && !m.deleted
+                        {
+                            let (ms, wave) = self
+                                .voice
+                                .get(&(group_id_str(&g.id), m.seq))
+                                .cloned()
+                                .unwrap_or_default();
+                            msg.text = m.text.clone();
+                            msg.file = att.name.clone();
+                            msg.voice = true;
+                            msg.voice_ms = ms;
+                            msg.waveform = wave;
+                        }
                         if let (Some(_), Some(att)) = (m.sticker, &m.attachment)
                             && !m.deleted
                         {

@@ -210,6 +210,21 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             location_label: m.location_label.clone().into(),
             sticker: m.sticker,
             pack_added: m.pack_added,
+            voice: m.voice,
+            // Every other point of 64: a bubble-sized waveform.
+            waveform: ModelRc::from(Rc::new(VecModel::from(
+                m.waveform
+                    .iter()
+                    .step_by(2)
+                    .map(|&w| i32::from(w))
+                    .collect::<Vec<_>>(),
+            ))),
+            voice_time: if m.voice_ms > 0 {
+                let s = m.voice_ms.div_ceil(1000);
+                format!("{}:{:02}", s / 60, s % 60).into()
+            } else {
+                SharedString::new()
+            },
             poll_options: ModelRc::from(Rc::new(VecModel::from(
                 m.poll_options
                     .iter()

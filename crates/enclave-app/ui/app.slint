@@ -87,6 +87,10 @@ export struct MessageRow {
     location-label: string,
     sticker: bool,
     pack-added: bool,
+    // A voice note: its waveform (0–255 per bar) and length, "0:42".
+    voice: bool,
+    waveform: [int],
+    voice-time: string,
 }
 
 export struct StickerPackRow {
@@ -148,7 +152,7 @@ component Bubble inherits HorizontalLayout {
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
-        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.sticker ? "Sticker. " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + (root.msg.location != "" ? "Location: " + root.msg.location-label + " " + root.msg.location + ". " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.sticker ? "Sticker. " : "") + (root.msg.voice ? "Voice note, " + (root.msg.voice-time != "" ? root.msg.voice-time : "length unknown") + ". Select it to save it as a sound file. " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + (root.msg.location != "" ? "Location: " + root.msg.location-label + " " + root.msg.location + ". " : "") + root.msg.text + ", " + root.msg.time;
         accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
@@ -161,6 +165,41 @@ component Bubble inherits HorizontalLayout {
                 font-size: Tokens.type-caption;
                 font-weight: 600;
                 color: Tokens.pine;
+            }
+            if root.msg.voice: HorizontalLayout {
+                spacing: Tokens.space-sm;
+                VerticalLayout {
+                    alignment: center;
+                    Path {
+                        width: 20px;
+                        height: 20px;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Icons.voice;
+                        stroke: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.pine;
+                        stroke-width: 1.75px;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    for w in root.msg.waveform: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 3px;
+                            height: max(3px, w * 28px / 255);
+                            border-radius: 1.5px;
+                            background: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.pine;
+                        }
+                    }
+                    if root.msg.waveform.length == 0: Caption { text: "Voice note"; vertical-alignment: center; }
+                }
+                Text {
+                    text: root.msg.voice-time;
+                    font-size: Tokens.type-caption;
+                    color: root.msg.outgoing ? Tokens.meta-on-bubble-out : Tokens.text-muted;
+                    vertical-alignment: center;
+                }
             }
             if root.msg.sticker && !root.msg.has-image: Rectangle {
                 width: 120px;
@@ -1619,7 +1658,7 @@ export component AppWindow inherits Window {
     if root.sheet == Sheet.attach: SheetFrame {
         title: "Send a file";
         close => { root.sheet = Sheet.none; }
-        Secondary { text: "Files are sealed before they leave this device and padded so their size doesn't give them away. " + (root.current.kind == 1 ? "Each member downloads them" : root.current.name + " downloads them") + " only when they choose to."; }
+        Secondary { text: "Files are sealed before they leave this device and padded so their size doesn't give them away. " + (root.current.kind == 1 ? "Each member downloads them" : root.current.name + " downloads them") + " only when they choose to. A WAV recording is sent as a voice note."; }
         Field { placeholder: "Path to the file"; mono: true; text <=> root.attach-path; }
         Field { placeholder: "Add a caption (optional)"; text <=> root.attach-caption; }
         if root.attach-error != "": Text {

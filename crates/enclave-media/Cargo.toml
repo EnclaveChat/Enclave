@@ -1,6 +1,6 @@
 [package]
 name = "enclave-media"
-description = "Image handling for Enclave: sender-side re-encoding (metadata stripped) and bounded decoding to thumbnails."
+description = "Media handling for Enclave: pictures re-encoded on the sender side (metadata stripped) and decoded within bounds, and voice notes (Opus in a fixed-chunk container)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,10 @@ zune-core = "0.5"
 png = "0.18"
 jpeg-encoder = "0.7"
 thiserror = "2"
+# Voice notes: pure-Rust Opus. The encoder only ever sees our own audio;
+# the decoder, which sees other people's, has no unsafe code.
+opus-rs = "0.1.34"
+opus-decoder = "0.1.1"
 
 [dev-dependencies]
 png = "0.18"

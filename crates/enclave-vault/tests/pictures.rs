@@ -208,3 +208,82 @@ async fn sticker_pack_through_the_engine() {
     assert_eq!(p.seq, m.seq);
     assert_eq!((p.width, p.height), (40, 60), "upright, small");
 }
+
+/// A 16-bit WAV, 1.2 s of a 330 Hz tone at 22.05 kHz, stereo, with a
+/// metadata chunk.
+fn recording() -> Vec<u8> {
+    let rate = 22_050u32;
+    let n = (rate as f32 * 1.2) as usize;
+    let mut pcm = Vec::new();
+    for i in 0..n {
+        let s =
+            ((i as f32 * 330.0 * 2.0 * std::f32::consts::PI / rate as f32).sin() * 9000.0) as i16;
+        pcm.extend_from_slice(&s.to_le_bytes());
+        pcm.extend_from_slice(&s.to_le_bytes());
+    }
+    let mut w = b"RIFF".to_vec();
+    w.extend_from_slice(&((36 + 20 + pcm.len()) as u32).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&rate.to_le_bytes());
+    w.extend_from_slice(&(rate * 4).to_le_bytes());
+    w.extend_from_slice(&4u16.to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"LIST");
+    w.extend_from_slice(&12u32.to_le_bytes());
+    w.extend_from_slice(b"INFOIART\0\0\0\0");
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    w.extend_from_slice(&pcm);
+    w
+}
+
+/// Voice notes through the engine: a WAV recording is re-encoded as a
+/// voice note (Opus, our container) in mediad's code; the conversation
+/// shows its length and waveform, and saving it gives back a WAV.
+#[tokio::test(flavor = "multi_thread")]
+async fn voice_note_through_the_engine() {
+    let (tx, mut rx) = enclave_vault::spawn(enclave_vault::Mode::Demo);
+    tx.send(Cmd::Create("Robin".into(), String::new())).unwrap();
+    let s = next(&mut rx, snapshot(|s| !s.requests.is_empty())).await;
+    let sam = s.requests[0].id.clone();
+    tx.send(Cmd::Accept(sam.clone())).unwrap();
+    next(
+        &mut rx,
+        snapshot(|s| s.contacts.iter().any(|c| c.id == sam && c.state == 2)),
+    )
+    .await;
+    tx.send(Cmd::Select(sam.clone())).unwrap();
+    tx.send(Cmd::SendFile(
+        sam.clone(),
+        "Memo 14.wav".into(),
+        recording(),
+        String::new(),
+    ))
+    .unwrap();
+    let s = next(
+        &mut rx,
+        snapshot(|s| s.messages.iter().any(|m| m.voice && m.voice_ms > 0)),
+    )
+    .await;
+    let m = s.messages.iter().find(|m| m.voice).unwrap().clone();
+    assert_eq!(m.voice_ms, 1200);
+    assert_eq!(m.waveform.len(), 64);
+    assert_eq!(m.file, "voice-note.evn", "not the original name");
+    assert!(m.text.is_empty());
+
+    tx.send(Cmd::SaveFile(sam.clone(), m.seq)).unwrap();
+    let (name, bytes) = next(&mut rx, |o| match o {
+        Out::File(n, b) => Some((n, b)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(name, "voice-note.wav");
+    assert!(bytes.starts_with(b"RIFF"));
+    assert!(
+        !bytes.windows(4).any(|w| w == b"IART"),
+        "no metadata from the original"
+    );
+}

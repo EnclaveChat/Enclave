@@ -21,6 +21,7 @@
 
 mod exif;
 mod resize;
+pub mod voice;
 
 /// Largest file accepted for decoding.
 pub const MAX_INPUT: usize = 64 << 20;
@@ -32,7 +33,7 @@ pub const MAX_SIDE: u32 = 4096;
 pub const JPEG_QUALITY: u8 = 85;
 
 /// Why an image could not be used.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MediaError {
     /// Not a JPEG or PNG.
     #[error("not a JPEG or PNG image")]
@@ -46,6 +47,9 @@ pub enum MediaError {
     /// Encoding failed.
     #[error("couldn't encode the image")]
     Encode,
+    /// A kind of file Enclave doesn't read (say, a float WAV).
+    #[error("unsupported format")]
+    Unsupported,
 }
 
 /// Result type.
