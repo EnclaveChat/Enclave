@@ -1718,6 +1718,66 @@ async fn block_and_unblock() {
     );
 }
 
+/// The pre-rekey PQ step (07 §5.2): a rotation into a new epoch pings
+/// members whose pairwise PQ state hasn't moved since the last epoch
+/// change; once they have answered, the device rotates again.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_rekey_pq_step() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    ada.send_group_text(&gid, "hello").await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    assert_eq!(ada.group_pre_step(&gid).unwrap(), (0, 0));
+
+    // Removing Jo starts a new epoch. Pairs that stepped since the last
+    // epoch change (welcomes and cards did) need no ping.
+    ada.remove_group_member(&gid, &jo.root()).await.unwrap();
+    assert_eq!(ada.group_pre_step(&gid).unwrap(), (0, 0));
+    settle(&mut [&mut mo, &mut ada], 2).await;
+
+    // A day later Ada's chain is due. Nothing has crossed between Ada and Mo
+    // since the epoch began, so Ada pings Mo before rotating.
+    net.advance(25 * 3600);
+    ada.send_group_text(&gid, "a day later").await.unwrap();
+    let (pending, healed) = ada.group_pre_step(&gid).unwrap();
+    assert!(
+        pending >= 1,
+        "Mo's pair hadn't stepped since the epoch began"
+    );
+    assert_eq!(healed, 0);
+    settle(&mut [&mut mo, &mut ada], 3).await;
+    assert_eq!(
+        ada.group_pre_step(&gid).unwrap(),
+        (0, 1),
+        "Mo answered; Ada rotated again under the new keys"
+    );
+    // The group still works after the extra rotation.
+    ada.send_group_text(&gid, "still here").await.unwrap();
+    settle(&mut [&mut ada, &mut mo], 2).await;
+    assert!(
+        mo.group_messages(&gid)
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "still here")
+    );
+}
+
 /// Files in groups: sealed chunks on the sender's server, a reference in
 /// the group message; every member downloads and verifies the same bytes.
 #[tokio::test(flavor = "multi_thread")]

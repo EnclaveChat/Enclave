@@ -693,6 +693,27 @@ impl Client {
         exclude: Option<[u8; 64]>,
         now: u64,
     ) -> Result<()> {
+        self.pre_rekey_step(gid, now).await?;
+        self.rotate_group_now(gid, new_epoch, exclude, now).await?;
+        self.refresh_pq_marks(gid)
+    }
+
+    /// The rotation a completed pre-rekey PQ step asks for (`group_pq.rs`).
+    pub(crate) async fn rotate_group_after_pre_step(
+        &mut self,
+        gid: &[u8; 32],
+        now: u64,
+    ) -> Result<()> {
+        self.rotate_group_now(gid, None, None, now).await
+    }
+
+    async fn rotate_group_now(
+        &mut self,
+        gid: &[u8; 32],
+        new_epoch: Option<(u32, [u8; 32])>,
+        exclude: Option<[u8; 64]>,
+        now: u64,
+    ) -> Result<()> {
         let (units, host, keyed) = {
             let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
             let me = e.group.me;

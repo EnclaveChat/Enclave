@@ -641,6 +641,11 @@ impl Client {
                 self.save_contact(&c)?;
                 events.push(Event::TimerChanged { root: *root, secs });
             }
+            Content::PqStep { reply } => {
+                if reply {
+                    self.queue_pq_reply(root)?;
+                }
+            }
             Content::ContactShare { id, card } => {
                 if let Some(ev) = self.on_contact_share(root, id, &card, false, now)? {
                     self.bump_unread(root)?;

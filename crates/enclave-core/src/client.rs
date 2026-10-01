@@ -100,6 +100,7 @@ mod devices;
 mod gossip;
 mod group_edits;
 mod group_files;
+mod group_pq;
 mod groups;
 mod guard;
 mod history;
@@ -1062,6 +1063,7 @@ impl Client {
         self.expire_invites(now).await?;
         let mut group_events = self.sync_groups(now).await?;
         events.append(&mut group_events);
+        self.finish_pre_steps(now).await?;
 
         self.maintain_prekeys(now).await?;
         Ok(events)

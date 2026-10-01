@@ -138,6 +138,12 @@ pub enum Content {
         /// Disappearing timer (seconds, 0 = off).
         expires: u32,
     },
+    /// A PQ round trip for the pre-rekey step (`07-groups.md` §5.2): the
+    /// unit's PQ slot is the point; `reply` asks the peer to answer.
+    PqStep {
+        /// Answer with a `PqStep` of our own.
+        reply: bool,
+    },
     /// A contact card, shared so the recipient can add that person.
     ContactShare {
         /// Message id.
@@ -181,6 +187,7 @@ const K_RECOVERY_SHARE: u8 = 17;
 const K_PIN: u8 = 18;
 const K_CONTACT_SHARE: u8 = 19;
 const K_LOCATION: u8 = 20;
+const K_PQ_STEP: u8 = 21;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -360,6 +367,9 @@ impl Content {
             Content::Pin { target, on } => {
                 w.u8(K_PIN).fixed(target).u8(u8::from(*on));
             }
+            Content::PqStep { reply } => {
+                w.u8(K_PQ_STEP).u8(u8::from(*reply));
+            }
             Content::ContactShare { id, card } => {
                 if card.len() > MAX_CARD {
                     return too_large;
@@ -451,6 +461,13 @@ impl Content {
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
+            K_PQ_STEP => Content::PqStep {
+                reply: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(ProtoError::Decode),
+                },
+            },
             K_LOCATION => Content::Location {
                 id: r.array()?,
                 location: r.bytes(MAX_LOCATION)?.to_vec(),
@@ -543,6 +560,7 @@ mod tests {
                 location: vec![1; 40],
                 expires: 3600,
             },
+            Content::PqStep { reply: true },
             Content::SelfCopy {
                 to: [9; 64],
                 content: vec![K_TEXT, 0, 0, 0, 0, 0],
