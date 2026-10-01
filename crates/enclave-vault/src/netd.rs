@@ -13,17 +13,28 @@ use enclave_net::transport::{ServerId, Transport};
 use enclave_rpc::ServerKey;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<Vec<u8>, String>>>>>;
 
-/// A [`Transport`] that forwards to a netd child process.
+/// Spare netd processes started with the first. The confined vault can't
+/// start programs, so if netd dies the next request goes to a spare that is
+/// already running; when all are gone, the network is down until restart.
+pub const SPARES: usize = 1;
+
+/// A [`Transport`] that forwards to a netd child process (the first one
+/// still running, of the helper and its spares).
 pub struct PipeTransport {
+    links: Vec<Link>,
+}
+
+struct Link {
     next: AtomicU32,
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Pending,
+    alive: Arc<AtomicBool>,
     // Kept so the child is killed when the transport goes away.
     _child: Mutex<Child>,
 }
@@ -35,10 +46,8 @@ pub fn netd_binary() -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
-impl PipeTransport {
-    /// Start netd for the dev server at `addr` (the only server in server
-    /// mode for now). Must run inside a tokio runtime.
-    pub fn spawn(bin: &std::path::Path, server: ServerId, addr: &str) -> std::io::Result<Self> {
+impl Link {
+    fn spawn(bin: &std::path::Path, server: ServerId, addr: &str) -> std::io::Result<Self> {
         let hex: String = server.iter().map(|b| format!("{b:02x}")).collect();
         let mut child = Command::new(bin)
             .args(["--server", &format!("{hex}={addr}")])
@@ -56,6 +65,7 @@ impl PipeTransport {
             .ok_or_else(|| std::io::Error::other("no stdout"))?;
         let (out, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
         tokio::spawn(async move {
             while let Some(body) = rx.recv().await {
                 if frame::write_frame(&mut stdin, &body).await.is_err() {
@@ -64,6 +74,7 @@ impl PipeTransport {
             }
         });
         let p = Arc::clone(&pending);
+        let a = Arc::clone(&alive);
         tokio::spawn(async move {
             while let Ok(body) = frame::read_frame(&mut stdout).await {
                 let Ok(reply) = NetReply::decode(&body) else {
@@ -73,24 +84,56 @@ impl PipeTransport {
                     let _ = tx.send(reply.result);
                 }
             }
-            // netd went away: fail everything still waiting.
+            // netd went away: mark it, then fail everything still waiting.
+            a.store(false, Ordering::SeqCst);
             p.lock().await.clear();
         });
         Ok(Self {
             next: AtomicU32::new(1),
             out,
             pending,
+            alive,
             _child: Mutex::new(child),
         })
     }
+}
+
+impl PipeTransport {
+    /// Start netd, and [`SPARES`] more, for the dev server at `addr` (the
+    /// only server in server mode for now). Must run inside a tokio
+    /// runtime, before the vault confines itself.
+    pub fn spawn(bin: &std::path::Path, server: ServerId, addr: &str) -> std::io::Result<Self> {
+        let mut links = vec![Link::spawn(bin, server, addr)?];
+        links.extend((0..SPARES).filter_map(|_| Link::spawn(bin, server, addr).ok()));
+        Ok(Self { links })
+    }
+
+    /// netd processes still running.
+    pub fn alive(&self) -> usize {
+        self.links
+            .iter()
+            .filter(|l| l.alive.load(Ordering::SeqCst))
+            .count()
+    }
 
     async fn call(&self, make: impl FnOnce(u32) -> NetRequest) -> enclave_net::Result<Vec<u8>> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let l = self
+            .links
+            .iter()
+            .find(|l| l.alive.load(Ordering::SeqCst))
+            .ok_or(NetError::Unavailable("netd stopped"))?;
+        let id = l.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        self.out
-            .send(make(id).encode())
-            .map_err(|_| NetError::Unavailable("netd stopped"))?;
+        l.pending.lock().await.insert(id, tx);
+        // A request added after the reader gave up would wait forever.
+        if !l.alive.load(Ordering::SeqCst) {
+            l.pending.lock().await.remove(&id);
+            return Err(NetError::Unavailable("netd stopped"));
+        }
+        if l.out.send(make(id).encode()).is_err() {
+            l.alive.store(false, Ordering::SeqCst);
+            return Err(NetError::Unavailable("netd stopped"));
+        }
         match rx.await {
             Ok(Ok(bytes)) => Ok(bytes),
             Ok(Err(e)) => Err(NetError::Unreachable(e)),

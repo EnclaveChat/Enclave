@@ -10,21 +10,29 @@ use enclave_ipc::media::{MediaOp, MediaOut, MediaReply, MediaRequest};
 use enclave_media::{Format, Rgba, Sanitized};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<MediaOut, String>>>>>;
 
+/// Spare `mediad` processes started with the first: the vault can't start
+/// programs once it is confined, so a helper that dies (a picture that
+/// crashes the decoder, say) is replaced by a spare that is already
+/// running. When all are gone, pictures fail until the app restarts.
+pub const SPARES: usize = 2;
+
 /// Where pictures are handled.
 pub struct Media {
-    child: Option<Proc>,
+    /// The helpers, first live one used; empty means in this process.
+    procs: Vec<Proc>,
 }
 
 struct Proc {
     next: AtomicU32,
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Pending,
+    alive: Arc<AtomicBool>,
     _child: Mutex<Child>,
 }
 
@@ -35,19 +43,8 @@ pub fn mediad_binary() -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
-impl Media {
-    /// Decode in this process (demo, tests, or no mediad).
-    pub fn in_process() -> Self {
-        Self { child: None }
-    }
-
-    /// Whether pictures are handled by a separate process.
-    pub fn separate(&self) -> bool {
-        self.child.is_some()
-    }
-
-    /// Start `mediad`. Must run inside a tokio runtime.
-    pub fn spawn(bin: &std::path::Path) -> std::io::Result<Self> {
+impl Proc {
+    fn spawn(bin: &std::path::Path) -> std::io::Result<Self> {
         let mut child = Command::new(bin)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -63,6 +60,7 @@ impl Media {
             .ok_or_else(|| std::io::Error::other("no stdout"))?;
         let (out, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
         tokio::spawn(async move {
             while let Some(body) = rx.recv().await {
                 if frame::write_frame(&mut stdin, &body).await.is_err() {
@@ -71,6 +69,7 @@ impl Media {
             }
         });
         let p = Arc::clone(&pending);
+        let a = Arc::clone(&alive);
         tokio::spawn(async move {
             while let Ok(body) = frame::read_frame(&mut stdout).await {
                 let Ok(reply) = MediaReply::decode(&body) else {
@@ -80,32 +79,82 @@ impl Media {
                     let _ = tx.send(reply.result);
                 }
             }
-            // mediad stopped (perhaps a picture crashed it): everything
-            // waiting fails, and so does everything after.
+            // This helper stopped: what was waiting on it fails, and the
+            // next call goes to a spare.
+            a.store(false, Ordering::SeqCst);
             p.lock().await.clear();
         });
         Ok(Self {
-            child: Some(Proc {
-                next: AtomicU32::new(1),
-                out,
-                pending,
-                _child: Mutex::new(child),
-            }),
+            next: AtomicU32::new(1),
+            out,
+            pending,
+            alive,
+            _child: Mutex::new(child),
         })
+    }
+}
+
+impl Media {
+    /// Decode in this process (demo, tests, or no mediad).
+    pub fn in_process() -> Self {
+        Self { procs: Vec::new() }
+    }
+
+    /// Whether pictures are handled by a separate process.
+    pub fn separate(&self) -> bool {
+        !self.procs.is_empty()
+    }
+
+    /// Helpers still running.
+    pub fn alive(&self) -> usize {
+        self.procs
+            .iter()
+            .filter(|p| p.alive.load(Ordering::SeqCst))
+            .count()
+    }
+
+    /// Start `mediad` and `spares` more. Must run inside a tokio runtime,
+    /// before the vault confines itself.
+    pub fn spawn(bin: &std::path::Path, spares: usize) -> std::io::Result<Self> {
+        let bins = vec![bin.to_path_buf(); spares + 1];
+        Self::spawn_each(&bins)
+    }
+
+    /// Start one helper per program, in order of use (the first must start;
+    /// a spare that doesn't is skipped). `spawn` uses the same program for
+    /// all; tests use this to start a helper that dies at once.
+    pub fn spawn_each(bins: &[std::path::PathBuf]) -> std::io::Result<Self> {
+        let (first, rest) = bins
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("no helper"))?;
+        let mut procs = vec![Proc::spawn(first)?];
+        procs.extend(rest.iter().filter_map(|b| Proc::spawn(b).ok()));
+        Ok(Self { procs })
     }
 
     async fn call(&self, op: MediaOp, bytes: Vec<u8>) -> Result<MediaOut, String> {
-        let Some(p) = &self.child else {
+        if self.procs.is_empty() {
             return tokio::task::spawn_blocking(move || local(op, &bytes))
                 .await
                 .map_err(|_| "the decoder stopped".to_string())?;
+        }
+        let Some(p) = self.procs.iter().find(|p| p.alive.load(Ordering::SeqCst)) else {
+            return Err("mediad stopped".into());
         };
         let id = p.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         p.pending.lock().await.insert(id, tx);
-        p.out
-            .send(MediaRequest { id, op, bytes }.encode())
-            .map_err(|_| "mediad stopped".to_string())?;
+        // The reader marks a helper dead before failing what's pending, so
+        // a request added after that is caught here instead of waiting
+        // forever.
+        if !p.alive.load(Ordering::SeqCst) {
+            p.pending.lock().await.remove(&id);
+            return Err("mediad stopped".into());
+        }
+        if p.out.send(MediaRequest { id, op, bytes }.encode()).is_err() {
+            p.alive.store(false, Ordering::SeqCst);
+            return Err("mediad stopped".into());
+        }
         rx.await.map_err(|_| "mediad stopped".to_string())?
     }
 

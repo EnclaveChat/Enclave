@@ -134,3 +134,29 @@ async fn sent_pictures_lose_metadata_and_get_previews() {
     .await;
     assert!(!s.messages.iter().any(|m| m.file.starts_with("broken")));
 }
+
+/// A mediad that dies is replaced by a spare that is already running (the
+/// confined vault can't start a new one). Needs the mediad binary, which
+/// `cargo test --workspace` builds; skipped otherwise.
+#[tokio::test]
+async fn a_dead_mediad_is_replaced_by_a_spare() {
+    let mediad = std::path::Path::new(env!("CARGO_BIN_EXE_enclave-vault"))
+        .with_file_name(format!("enclave-mediad{}", std::env::consts::EXE_SUFFIX));
+    let dies = std::path::PathBuf::from("/bin/false");
+    if !mediad.exists() || !dies.exists() {
+        return;
+    }
+    let media = enclave_vault::media::Media::spawn_each(&[dies, mediad]).unwrap();
+    assert!(media.separate());
+    let mut last = Err(String::new());
+    for _ in 0..3 {
+        last = media.thumbnail(photo(), 32).await;
+        if last.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let t = last.expect("the spare decoded it");
+    assert!(t.width <= 32 && t.height <= 32);
+    assert_eq!(media.alive(), 1, "the first is gone, the spare runs");
+}

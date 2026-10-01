@@ -104,7 +104,7 @@ where
         report.network = "netd";
     }
     let media = enclave_vault::media::mediad_binary()
-        .and_then(|b| enclave_vault::media::Media::spawn(&b).ok());
+        .and_then(|b| enclave_vault::media::Media::spawn(&b, enclave_vault::media::SPARES).ok());
     if media.is_some() {
         report.media = "mediad";
     }
