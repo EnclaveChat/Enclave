@@ -129,6 +129,54 @@ Every label in this section appears in the code. "Where" names the crate, file a
 
 Total: 50 implemented labels.
 
+### 2.8 Built after the M0 draft
+
+These labels were first reserved in §3 and are now used by code. "Where" names the defining files.
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/proto/link-transcript` | TR | — | `enclave-core/src/client/link.rs` | Device-link transcript prefix (spec: 02b §11) |
+| `enclave/v1/proto/link-keys` | KMAC | 512 | `enclave-core/src/client/link.rs` | Link channel keys `k_p2n ‖ k_n2p` (spec: 02b §11) |
+| `enclave/v1/proto/link-phrase` | KMAC | 256 (33 bits used) | `enclave-core/src/client/link.rs` | Three-word link phrase (spec: 02b §11) |
+| `enclave/v1/proto/grp-chain` | KMAC | 512 | `enclave-proto/src/labels.rs` | Group sender chain `cs' ‖ gmk` (spec: 07 §2) |
+| `enclave/v1/proto/grp-mac` | KMAC | 128 | `enclave-proto/src/labels.rs` | MAC-vector entry (spec: 07 §3) |
+| `enclave/v1/proto/grp-admin-mac` | KMAC | 128 | `enclave-proto/src/labels.rs` | Admin MAC-vector entry on state updates (spec: 07 §7) |
+| `enclave/v1/proto/grp-export` | KMAC | 256 | `enclave-proto/src/labels.rs` | Pairwise exporter key `K_exp` for rekey (spec: 07 §5) |
+| `enclave/v1/proto/grp-rekey-pad` | KMAC | 512 | `enclave-proto/src/labels.rs` | Pad that encrypts a rekey entry (spec: 07 §5) |
+| `enclave/v1/proto/grp-rekey-check` | KMAC | 96 | `enclave-proto/src/labels.rs` | Rekey entry authenticator (spec: 07 §5) |
+| `enclave/v1/proto/grp-bucket` | KMAC | 256 | `enclave-proto/src/labels.rs` | Epoch bucket key (spec: 07 §5) |
+| `enclave/v1/proto/grp-bucket-index` | KMAC | 256 (16 bits used) | `enclave-proto/src/labels.rs` | Recipient bucket index (spec: 07 §5) |
+| `enclave/v1/proto/grp-header` | KMAC | 256 | `enclave-proto/src/labels.rs` | Group routing-header seal key (spec: 07 §4) |
+| `enclave/v1/proto/grp-state` | HASH | 256 | `enclave-proto/src/labels.rs` | Group state hash chain (spec: 07 §7) |
+| `enclave/v1/proto/grp-msg-id` | HASH | 256 (first 64 used) | `enclave-proto/src/labels.rs` | Group message ID for the causal frontier (spec: 07 §7) |
+| `enclave/v1/proto/poll-tally-hash` | HASH | 512 | `enclave-core/src/client/polls.rs`, `enclave-proto/src/labels.rs` | Poll-close tally hash (spec: 07 §7) |
+| `enclave/v1/net/grp-mailbox` | KMAC | 256 | `enclave-proto/src/labels.rs` | Daily group-mailbox address (spec: 07 §4) |
+| `enclave/v1/net/grp-rekey-mailbox` | KMAC | 256 | `enclave-proto/src/labels.rs` | Daily per-bucket rekey sub-mailbox address (spec: 07 §5.5) |
+| `enclave/v1/net/grp-write-key` | KMAC | 256 | `enclave-proto/src/labels.rs` | Group write-token key (spec: 07 §4) |
+| `enclave/v1/net/grp-write-token` | KMAC | 256 | `enclave-proto/src/labels.rs` | Epoch MAC write token for one address (spec: 07 §4) |
+| `enclave/v1/net/push-transcript` | TR | — | `enclave-push-relay/src/lib.rs` | Push-token sealing transcript prefix (spec: 10 §2) |
+| `enclave/v1/net/push-seal` | KMAC | 256 | `enclave-push-relay/src/lib.rs` | Push-token seal key (spec: 10 §2) |
+| `enclave/v1/wire/chunk-key` | KMAC | 256 | `enclave-core/src/files.rs` | Blob chunk seal key (spec: 08 §9) |
+| `enclave/v1/wire/chunk-id` | KMAC | 256 | `enclave-core/src/files.rs` | Blob chunk ID (spec: 08 §9) |
+| `enclave/v1/wire/ad-link` | AD | — | `enclave-core/src/client/link.rs` | Device-link channel AD prefix (spec: 03 §4) |
+| `enclave/v1/wire/ad-push-token` | AD | — | `enclave-push-relay/src/lib.rs` | Sealed push token AD prefix (spec: 10 §2) |
+| `enclave/v1/calls/transcript` | TR | — | `enclave-calls/src/lib.rs` | Per-call transcript prefix (spec: 11 §2) |
+| `enclave/v1/calls/secret` | KMAC | 512 | `enclave-calls/src/lib.rs` | Call secret (spec: 11 §2) |
+| `enclave/v1/calls/sframe-base` | KMAC | 256 | `enclave-calls/src/lib.rs` | Per-sender SFrame base key (spec: 11 §5) |
+| `enclave/v1/calls/sframe-ratchet` | KMAC | 256 | `enclave-calls/src/lib.rs` | 5 s base-key ratchet step (spec: 11 §5) |
+| `enclave/v1/calls/sframe-key` | KMAC | 512 | `enclave-calls/src/lib.rs` | SFrame key and salt per KID (spec: 11 §5) |
+| `enclave/v1/calls/check-words` | KMAC | 256 (22 bits used) | `enclave-calls/src/lib.rs` | 2-word call check (spec: 11 §9) |
+| `enclave/v1/calls/direct-psk` | KMAC | 256 | `enclave-calls/src/lib.rs` | WireGuard PSK in direct mode (spec: 11 §4) |
+| `enclave/v1/calls/ticket-transcript` | TR | — | `enclave-calls/src/lib.rs` | Relay-ticket transcript prefix (spec: 11 §3) |
+| `enclave/v1/calls/ticket-secret` | KMAC | 256 | `enclave-calls/src/lib.rs` | Relay-ticket secret (spec: 11 §3) |
+| `enclave/v1/calls/ticket-seal` | KMAC | 256 | `enclave-calls/src/lib.rs` | Seal key for the relay-ticket request body (spec: 11 §3.3) |
+| `enclave/v1/calls/wg-psk` | KMAC | 256 | `enclave-calls/src/lib.rs` | WireGuard PSK for one 120 s period (spec: 11 §3) |
+| `enclave/v1/calls/link-dir` | KMAC | 256 | `enclave-calls/src/lib.rs` | Per-direction client↔relay link key from a period PSK (interim framing until WireGuard) (spec: 11 §3.4) |
+| `enclave/v1/calls/relay-link` | KMAC | 256 | `enclave-calls/src/lib.rs` | Per-direction relay↔relay link key from the relays' static X448 keys (interim until Rosenpass) (spec: 11 §3.4) |
+| `enclave/v1/calls/rendezvous` | KMAC | 128 | `enclave-calls/src/lib.rs` | Rendezvous id joining the two relay legs of a call (spec: 11 §3.4) |
+| `enclave/v1/calls/ad-ticket` | AD | — | `enclave-calls/src/lib.rs` | Relay-ticket seal AD prefix (spec: 11 §3) |
+| `enclave/v1/calls/ad-sframe` | AD | — | `enclave-calls/src/lib.rs` | Prefix of SFrame AAD (spec: 11 §5) |
+
 ## 3. Reserved labels (not yet implemented)
 
 These labels belong to features that are specified but not in code. They are reserved; the code MUST use exactly these strings when the feature is built, unless an RFC changes this file first.
@@ -149,9 +197,6 @@ These labels belong to features that are specified but not in code. They are res
 | `enclave/v1/proto/invite-psk` | KMAC | 256 | Normalized one-way invite PSK | 02b §5 |
 | `enclave/v1/proto/invite-cap` | KMAC | 256 | Request-inbox write capability from an invite secret | 02b §2.7 |
 | `enclave/v1/proto/link-psk` | KMAC | 256 | Normalized device-link PSK | 02b §5 |
-| `enclave/v1/proto/link-transcript` | TR | — | Device-link transcript prefix | 02b §11 |
-| `enclave/v1/proto/link-keys` | KMAC | 512 | Link channel keys `k_p2n ‖ k_n2p` | 02b §11 |
-| `enclave/v1/proto/link-phrase` | KMAC | 256 (33 bits used) | Three-word link phrase | 02b §11 |
 | `enclave/v1/proto/link-cap` | KMAC | 256 | Link rendezvous mailbox capability | 02b §11 |
 | `enclave/v1/proto/notify-key` | KMAC | 256 | Daily notification key chain step | 10 §4 |
 
@@ -159,28 +204,12 @@ These labels belong to features that are specified but not in code. They are res
 
 | Label | Kind | Output | Purpose | Defined in |
 |---|---|---|---|---|
-| `enclave/v1/proto/grp-chain` | KMAC | 512 | Group sender chain `cs' ‖ gmk` | 07 §2 |
-| `enclave/v1/proto/grp-mac` | KMAC | 128 | MAC-vector entry | 07 §3 |
-| `enclave/v1/proto/grp-admin-mac` | KMAC | 128 | Admin MAC-vector entry on state updates | 07 §7 |
-| `enclave/v1/proto/grp-export` | KMAC | 256 | Pairwise exporter key `K_exp` for rekey | 07 §5 |
-| `enclave/v1/proto/grp-rekey-pad` | KMAC | 512 | Pad that encrypts a rekey entry | 07 §5 |
-| `enclave/v1/proto/grp-rekey-check` | KMAC | 96 | Rekey entry authenticator | 07 §5 |
-| `enclave/v1/proto/grp-bucket` | KMAC | 256 | Epoch bucket key | 07 §5 |
-| `enclave/v1/proto/grp-bucket-index` | KMAC | 256 (16 bits used) | Recipient bucket index | 07 §5 |
-| `enclave/v1/proto/grp-header` | KMAC | 256 | Group routing-header seal key | 07 §4 |
 | `enclave/v1/proto/grp-rekey-outer` | KMAC | 256 | Outer seal key of rekey units | 07 §5 |
 | `enclave/v1/proto/grp-notify` | KMAC | 256 | Daily group notification key | 10 §4 |
-| `enclave/v1/proto/grp-state` | HASH | 256 | Group state hash chain | 07 §7 |
-| `enclave/v1/proto/grp-msg-id` | HASH | 256 (first 64 used) | Group message ID for the causal frontier | 07 §7 |
 | `enclave/v1/proto/grp-signed-msg` | CTX-C | — | On-the-record group message signature | 07 §3 |
 | `enclave/v1/proto/grp-admin-sig` | CTX-C | — | On-the-record admin update signature | 07 §7 |
 | `enclave/v1/proto/grp-invite-cap` | KMAC | 256 | Group invite capability | 07 §9 |
 | `enclave/v1/proto/poll-tally` | CTX-C | — | Poll creator's tally signature (On-the-record groups) | 07 §7 |
-| `enclave/v1/proto/poll-tally-hash` | HASH | 512 | Poll-close tally hash | 07 §7 |
-| `enclave/v1/net/grp-mailbox` | KMAC | 256 | Daily group-mailbox address | 07 §4 |
-| `enclave/v1/net/grp-rekey-mailbox` | KMAC | 256 | Daily per-bucket rekey sub-mailbox address | 07 §5.5 |
-| `enclave/v1/net/grp-write-key` | KMAC | 256 | Group write-token key | 07 §4 |
-| `enclave/v1/net/grp-write-token` | KMAC | 256 | Epoch MAC write token for one address | 07 §4 |
 | `enclave/v1/net/grp-read-key` | KMAC | 256 | Group read-credential key | 07 §4 |
 | `enclave/v1/net/grp-read-cred` | KMAC | 256 | Group read credential for one address | 07 §4 |
 
@@ -197,18 +226,12 @@ These labels belong to features that are specified but not in code. They are res
 | `enclave/v1/net/token-key` | KMAC | 256 | Per-contact write-token key derived from the inbox seed | 09 §3 |
 | `enclave/v1/net/cap-hash` | KMAC | 256 | Server-stored invite-capability hash | 09 §4 |
 | `enclave/v1/net/loop-probe` | KMAC | 256 | Self-loop probe identifiers | 09 §6.4 |
-| `enclave/v1/net/push-transcript` | TR | — | Push-token sealing transcript prefix | 10 §2 |
-| `enclave/v1/net/push-seal` | KMAC | 256 | Push-token seal key | 10 §2 |
-| `enclave/v1/wire/chunk-key` | KMAC | 256 | Blob chunk seal key | 08 §9 |
-| `enclave/v1/wire/chunk-id` | KMAC | 256 | Blob chunk ID | 08 §9 |
 | `enclave/v1/wire/ad-capsule` | AD | — | Notification capsule AD prefix | 08 §5.4 |
 | `enclave/v1/wire/ad-grp-header` | AD | — | Group routing-header AD prefix | 08 §7 |
 | `enclave/v1/wire/ad-grp-body` | AD | — | Group body AD prefix | 08 §7 |
 | `enclave/v1/wire/ad-rekey` | AD | — | Rekey unit outer AD prefix | 08 §8 |
 | `enclave/v1/wire/ad-rekey-common` | AD | — | Rekey common-blob AD prefix | 08 §8 |
 | `enclave/v1/wire/ad-chunk` | AD | — | Blob chunk AD prefix | 08 §9 |
-| `enclave/v1/wire/ad-link` | AD | — | Device-link channel AD prefix | 03 §4 |
-| `enclave/v1/wire/ad-push-token` | AD | — | Sealed push token AD prefix | 10 §2 |
 
 ### 3.4 KT, releases, storage, calls
 
@@ -223,24 +246,8 @@ These labels belong to features that are specified but not in code. They are res
 | `enclave/v1/store/root-wrap` | KMAC | 256 | Root (recovery-secret) wrap key: hardware + PIN | 14 §1.2 |
 | `enclave/v1/store/backup-blob-id` | KMAC | 256 | Blob secret for server-stored backup archives | 14 §4 |
 | `enclave/v1/store/ad-root` | AD | — | Wrapped recovery secret AD prefix | 14 §1.2 |
-| `enclave/v1/calls/transcript` | TR | — | Per-call transcript prefix | 11 §2 |
-| `enclave/v1/calls/secret` | KMAC | 512 | Call secret | 11 §2 |
-| `enclave/v1/calls/sframe-base` | KMAC | 256 | Per-sender SFrame base key | 11 §5 |
-| `enclave/v1/calls/sframe-ratchet` | KMAC | 256 | 5 s base-key ratchet step | 11 §5 |
-| `enclave/v1/calls/sframe-key` | KMAC | 512 | SFrame key and salt per KID | 11 §5 |
-| `enclave/v1/calls/check-words` | KMAC | 256 (22 bits used) | 2-word call check | 11 §9 |
-| `enclave/v1/calls/direct-psk` | KMAC | 256 | WireGuard PSK in direct mode | 11 §4 |
-| `enclave/v1/calls/ticket-transcript` | TR | — | Relay-ticket transcript prefix | 11 §3 |
-| `enclave/v1/calls/ticket-secret` | KMAC | 256 | Relay-ticket secret | 11 §3 |
-| `enclave/v1/calls/ticket-seal` | KMAC | 256 | Seal key for the relay-ticket request body | 11 §3.3 |
-| `enclave/v1/calls/wg-psk` | KMAC | 256 | WireGuard PSK for one 120 s period | 11 §3 |
-| `enclave/v1/calls/link-dir` | KMAC | 256 | Per-direction client↔relay link key from a period PSK (interim framing until WireGuard) | 11 §3.4 |
-| `enclave/v1/calls/relay-link` | KMAC | 256 | Per-direction relay↔relay link key from the relays' static X448 keys (interim until Rosenpass) | 11 §3.4 |
-| `enclave/v1/calls/rendezvous` | KMAC | 128 | Rendezvous id joining the two relay legs of a call | 11 §3.4 |
 | `enclave/v1/calls/link-cap` | KMAC | 256 | Call-link capability | 11 §8 |
 | `enclave/v1/calls/relay-descriptor` | CTX-C | — | Relay descriptor (declares operator family) | 12 §5 |
-| `enclave/v1/calls/ad-ticket` | AD | — | Relay-ticket seal AD prefix | 11 §3 |
-| `enclave/v1/calls/ad-sframe` | AD | — | Prefix of SFrame AAD | 11 §5 |
 
 ## 4. Retired draft labels
 
