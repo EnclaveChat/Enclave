@@ -14,9 +14,6 @@ use enclave_rpc::api::{self, FLAG_REVOKE};
 use enclave_wire::{Op, RequestHeader};
 
 const NS_BLOCKED: &str = "blocked";
-/// Recently issued tokens revoked on a block: more than anyone holds
-/// (32 outstanding plus a refill in flight).
-const REVOKE_LAST: usize = 64;
 /// Tokens sent on unblocking.
 const UNBLOCK_TOKENS: usize = 32;
 
@@ -43,11 +40,7 @@ impl Client {
         }
         let now = self.now();
         self.store.put(NS_BLOCKED, root, &[1], &mut self.rng)?;
-        let hashes = self
-            .issuers
-            .get(root)
-            .map(|i| i.recent_hashes(REVOKE_LAST))
-            .unwrap_or_default();
+        let hashes = self.issued_hashes(root);
         if !hashes.is_empty() {
             let payload = api::frame(&hashes.concat(), &mut self.rng)?;
             let h = RequestHeader {

@@ -27,7 +27,6 @@ use enclave_rpc::api::{
     self, DirAction, DirKind, FLAG_CREATE, FLAG_REQUEST_INBOX, device_key, manifest_key,
 };
 use enclave_store::{Keystore, Store};
-use enclave_tokens::TokenIssuer;
 use enclave_wire::{Op, RequestHeader};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -118,6 +117,7 @@ mod reports;
 mod search;
 mod sharing;
 mod social;
+mod tokens;
 mod usernames;
 
 pub use gossip::{GossipItem, KtAlert};
@@ -282,7 +282,8 @@ pub struct Client {
     profile: Profile,
     sessions: HashMap<([u8; 64], [u8; 16]), Session>,
     contacts: BTreeMap<[u8; 64], Contact>,
-    issuers: HashMap<[u8; 64], TokenIssuer>,
+    /// Registered write tokens not handed out yet (`tokens.rs`).
+    token_pool: Vec<Token>,
     groups: BTreeMap<[u8; 32], groups::GroupEntry>,
     /// Pinned key-transparency logs and witnesses (from the app's server list).
     kt: Option<enclave_kt::KtPolicy>,
@@ -478,7 +479,7 @@ impl Client {
             profile,
             sessions: HashMap::new(),
             contacts: BTreeMap::new(),
-            issuers: HashMap::new(),
+            token_pool: Vec::new(),
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),
@@ -534,12 +535,7 @@ impl Client {
             let c = persist::decode_contact(&v)?;
             contacts.insert(c.root, c);
         }
-        let mut issuers = HashMap::new();
-        for (k, v) in store.scan(NS_ISSUERS)? {
-            let root: [u8; 64] = k.as_slice().try_into().map_err(|_| CoreError::NotFound)?;
-            let b: [u8; 40] = v.as_slice().try_into().map_err(|_| CoreError::NotFound)?;
-            issuers.insert(root, TokenIssuer::from_bytes(&b));
-        }
+        let token_pool = tokens::load_pool(&store)?;
         let groups = groups::load(&store)?;
         Ok(Self {
             store,
@@ -552,7 +548,7 @@ impl Client {
             profile,
             sessions,
             contacts,
-            issuers,
+            token_pool,
             groups,
             kt: None,
             stale_manifests: BTreeMap::new(),
@@ -903,7 +899,6 @@ impl Client {
     /// history are removed; they get no new tokens.
     pub fn remove_contact(&mut self, root: &[u8; 64]) -> Result<()> {
         self.contacts.remove(root);
-        self.issuers.remove(root);
         self.store.delete(NS_CONTACTS, root)?;
         self.store.delete(NS_ISSUERS, root)?;
         let devs: Vec<[u8; 16]> = self
@@ -1570,29 +1565,6 @@ impl Client {
             .call_ok(&server, h, &env, now, &mut self.rng)
             .await?;
         Ok(())
-    }
-
-    async fn issue_tokens(&mut self, root: &[u8; 64], n: usize, now: u64) -> Result<Vec<Token>> {
-        if !self.issuers.contains_key(root) {
-            let issuer = TokenIssuer::new(&mut self.rng)?;
-            self.issuers.insert(*root, issuer);
-        }
-        let issuer = self.issuers.get_mut(root).ok_or(CoreError::NotFound)?;
-        let (toks, hashes) = issuer.issue(n);
-        let bytes = issuer.to_bytes();
-        self.store.put(NS_ISSUERS, root, &bytes, &mut self.rng)?;
-        let batch = enclave_tokens::registration_batch(&hashes, n / 2, &mut self.rng)?;
-        let payload = api::frame(&batch.concat(), &mut self.rng)?;
-        let h = RequestHeader {
-            op: Op::RegisterTokens,
-            flags: 0,
-            mailbox: self.profile.inbox,
-            token: self.profile.inbox_owner,
-        };
-        self.rpc
-            .call_ok(&self.profile.server, h, &payload, now, &mut self.rng)
-            .await?;
-        Ok(toks)
     }
 
     async fn maintain_prekeys(&mut self, now: u64) -> Result<()> {

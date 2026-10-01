@@ -433,7 +433,7 @@ impl LinkingDevice {
             profile,
             sessions: HashMap::new(),
             contacts: BTreeMap::new(),
-            issuers: HashMap::new(),
+            token_pool: Vec::new(),
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),

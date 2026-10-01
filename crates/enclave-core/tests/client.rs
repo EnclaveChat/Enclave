@@ -1643,6 +1643,37 @@ async fn report_to_the_operator() {
     );
 }
 
+/// Token registration doesn't group writes by sender (09 §3.2): the tokens
+/// two different contacts burn came in the same registration batch, so a
+/// server that logs batches and burns can't tell them apart by batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn token_batches_mix_contacts() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S2)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let burned_before = net.with_server(&S1, |s| s.token_log().1.len()).unwrap();
+    mo.send_text(&ada.root(), "from Mo").await.unwrap();
+    jo.send_text(&ada.root(), "from Jo").await.unwrap();
+    let (batches, burned) = net.with_server(&S1, |s| s.token_log().clone()).unwrap();
+    let (mo_tok, jo_tok) = (burned[burned_before], burned[burned_before + 1]);
+    let batch_of = |t: &[u8; 32]| batches.iter().position(|b| b.contains(t)).unwrap();
+    assert_eq!(
+        batch_of(&mo_tok),
+        batch_of(&jo_tok),
+        "both contacts' tokens came from one shared batch"
+    );
+}
+
 /// Blocking: the blocked contact's tokens are revoked at our server, so
 /// their writes fail; nothing from them shows. Unblocking sends fresh
 /// tokens and the conversation works again.

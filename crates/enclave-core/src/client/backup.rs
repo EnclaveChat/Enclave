@@ -171,7 +171,7 @@ impl Client {
             profile,
             sessions: HashMap::new(),
             contacts,
-            issuers: HashMap::new(),
+            token_pool: Vec::new(),
             groups: BTreeMap::new(),
             kt: None,
             stale_manifests: BTreeMap::new(),
@@ -182,11 +182,10 @@ impl Client {
             meet: None,
             pending_bond: None,
         };
-        // Fresh token issuers: the old counters may have been used after the
-        // backup was taken.
-        for (k, _) in client.store.scan(NS_ISSUERS)? {
-            client.store.delete(NS_ISSUERS, &k)?;
-        }
+        // Never reuse a token pool: its tokens may have been handed out
+        // after the backup was taken. (Pools are not backed up; this is
+        // belt and braces.)
+        client.clear_pool()?;
         let roots: Vec<[u8; 64]> = client.contacts.keys().copied().collect();
         for root in roots {
             let Some(card) = client.contacts.get(&root).and_then(|c| c.card.clone()) else {

@@ -149,6 +149,10 @@ pub struct Server {
     kt_fork: Option<KtService>,
     #[cfg(feature = "test-hooks")]
     kt_serve_fork: bool,
+    /// What a curious server could log about tokens (test hook): each
+    /// registration batch, and each burned hash in order.
+    #[cfg(feature = "test-hooks")]
+    token_log: (Vec<Vec<[u8; 32]>>, Vec<[u8; 32]>),
     /// name → (owning root, time of the last accepted claim)
     usernames: HashMap<String, ([u8; 64], u64)>,
     /// root → its current name
@@ -215,6 +219,8 @@ impl Server {
             kt_fork: None,
             #[cfg(feature = "test-hooks")]
             kt_serve_fork: false,
+            #[cfg(feature = "test-hooks")]
+            token_log: (Vec::new(), Vec::new()),
             usernames: HashMap::new(),
             names_by_root: HashMap::new(),
             kt_replies: HashMap::new(),
@@ -245,6 +251,13 @@ impl Server {
     /// Counters.
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Test hook: every token-registration batch, and every burned token
+    /// hash in order, as a curious server could log them.
+    #[cfg(feature = "test-hooks")]
+    pub fn token_log(&self) -> &(Vec<Vec<[u8; 32]>>, Vec<[u8; 32]>) {
+        &self.token_log
     }
 
     /// Lengths of every envelope and blob chunk ever stored.
@@ -436,6 +449,12 @@ impl Server {
         if ib.tokens.len() + p.len() / 32 > self.cfg.token_quota {
             return Status::Quota;
         }
+        #[cfg(feature = "test-hooks")]
+        self.token_log.0.push(
+            p.chunks_exact(32)
+                .filter_map(|c| c.try_into().ok())
+                .collect(),
+        );
         for c in p.chunks_exact(32) {
             let mut t = [0u8; 32];
             t.copy_from_slice(c);
@@ -549,6 +568,8 @@ impl Server {
         if !ib.tokens.remove(&th) {
             return Status::Denied;
         }
+        #[cfg(feature = "test-hooks")]
+        self.token_log.1.push(th);
         self.stats.tokens_burned += 1;
         self.store(&h.mailbox, env, now)
     }
