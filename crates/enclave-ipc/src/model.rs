@@ -139,6 +139,9 @@ pub struct Msg {
     pub voice_ms: u32,
     /// Its waveform: up to 64 peak levels, 0 to 255.
     pub waveform: Vec<u8>,
+    /// A clip (an animated picture): its length in milliseconds once its
+    /// poster arrived, else 0.
+    pub clip_ms: u32,
 }
 
 /// Everything the window shows.
@@ -393,6 +396,8 @@ pub enum Cmd {
     Typing(String, bool),
     /// Replace the recovery words (a new root; 03 §8.2).
     ChangeWords,
+    /// Play the clip at a message: conversation, position.
+    PlayClip(String, u64),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -429,6 +434,21 @@ pub enum Out {
     Invite(String),
     /// A picture's preview: conversation, message position, RGBA pixels.
     Preview(Preview),
+    /// A clip's frames to play.
+    Clip(ClipFrames),
+}
+
+/// A clip decoded for playing (by `mediad`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipFrames {
+    /// Width of every frame.
+    pub width: u32,
+    /// Height of every frame.
+    pub height: u32,
+    /// Time each frame shows.
+    pub interval_ms: u32,
+    /// `width × height × 4` bytes of RGBA each.
+    pub frames: Vec<Vec<u8>>,
 }
 
 /// A picture's preview, decoded by `mediad`.
@@ -551,7 +571,8 @@ impl Snapshot {
                 .bool(m.pack_added)
                 .bool(m.voice)
                 .u32(m.voice_ms)
-                .bytes(&m.waveform[..m.waveform.len().min(64)]);
+                .bytes(&m.waveform[..m.waveform.len().min(64)])
+                .u32(m.clip_ms);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -683,6 +704,7 @@ impl Snapshot {
                         }
                         w
                     },
+                    clip_ms: r.u32()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -884,6 +906,7 @@ impl Cmd {
             Cmd::TypingSetting(on) => w.u8(59).bool(*on),
             Cmd::Typing(c, on) => w.u8(60).str(c).bool(*on),
             Cmd::ChangeWords => w.u8(61),
+            Cmd::PlayClip(c, s) => w.u8(62).str(c).u64(*s),
         };
         w.0
     }
@@ -957,6 +980,7 @@ impl Cmd {
             59 => Cmd::TypingSetting(r.bool()?),
             60 => Cmd::Typing(r.str()?, r.bool()?),
             61 => Cmd::ChangeWords,
+            62 => Cmd::PlayClip(r.str()?, r.u64()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;
@@ -987,6 +1011,18 @@ impl Out {
                     .u32(p.width)
                     .u32(p.height)
                     .bytes(&p.pixels);
+                w.0
+            }
+            Out::Clip(c) => {
+                let mut w = Writer::default();
+                w.u8(6)
+                    .u32(c.width)
+                    .u32(c.height)
+                    .u32(c.interval_ms)
+                    .u32(c.frames.len() as u32);
+                for f in &c.frames {
+                    w.bytes(f);
+                }
                 w.0
             }
             Out::Effect(e) => vec![
@@ -1046,6 +1082,29 @@ impl Out {
                     return Err(IpcError::Malformed);
                 }
                 Ok(Out::Preview(p))
+            }
+            [6, ..] => {
+                let mut r = Reader(&b[1..]);
+                let (width, height, interval_ms) = (r.u32()?, r.u32()?, r.u32()?);
+                let n = r.u32()? as usize;
+                if n > crate::media::MAX_CLIP_FRAMES {
+                    return Err(IpcError::Malformed);
+                }
+                let mut frames = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let f = r.bytes()?;
+                    if crate::rgba_len(width, height) != Some(f.len()) {
+                        return Err(IpcError::Malformed);
+                    }
+                    frames.push(f);
+                }
+                r.end()?;
+                Ok(Out::Clip(ClipFrames {
+                    width,
+                    height,
+                    interval_ms,
+                    frames,
+                }))
             }
             _ => Err(IpcError::Malformed),
         }

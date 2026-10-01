@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 enclave-ipc = { path = "../enclave-ipc" }
-enclave-media = { path = "../enclave-media" }
+enclave-media = { path = "../enclave-media", features = ["av1"] }
 enclave-sandbox = { path = "../enclave-sandbox" }
 
 [dev-dependencies]

@@ -163,6 +163,12 @@ fn media(d: &[u8]) {
     let _ = enclave_media::thumbnail(d, 64);
     let _ = enclave_media::voice::voice_info(d);
     let _ = enclave_media::voice::decode_voice(d);
+    // Clips: the container parser, the poster, and the AV1 decoder. A
+    // fuzz input is one record of AV1 units after a valid header, so the
+    // decoder sees arbitrary bytes, not just layout errors.
+    let _ = enclave_media::video::clip_poster(d, 64);
+    let _ = enclave_media::video::clip_frames(d, 64, 4);
+    let _ = enclave_media::video::decode_units(d);
 }
 
 /// Every target.

@@ -226,6 +226,65 @@ impl Media {
         }
     }
 
+    /// Our animated GIF as a clip: (clip, width, height, length in ms).
+    pub async fn clip(&self, gif: Vec<u8>) -> Result<(Vec<u8>, u32, u32, u32), String> {
+        match self.call(MediaOp::Clip, gif).await? {
+            MediaOut::Clip {
+                width,
+                height,
+                duration_ms,
+                bytes,
+                ..
+            } => Ok((bytes, width, height, duration_ms)),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
+    /// A clip's poster at most `side` pixels, and its length in ms.
+    pub async fn clip_poster(&self, clip: Vec<u8>, side: u16) -> Result<(Rgba, u32), String> {
+        match self.call(MediaOp::ClipPoster(side), clip).await? {
+            MediaOut::Clip {
+                width,
+                height,
+                duration_ms,
+                mut frames,
+                ..
+            } if frames.len() == 1 => Ok((
+                Rgba {
+                    width,
+                    height,
+                    pixels: frames.remove(0),
+                },
+                duration_ms,
+            )),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
+    /// A clip's frames for playing, and its length in ms.
+    pub async fn clip_frames(&self, clip: Vec<u8>, side: u16) -> Result<(Vec<Rgba>, u32), String> {
+        match self.call(MediaOp::ClipFrames(side), clip).await? {
+            MediaOut::Clip {
+                width,
+                height,
+                duration_ms,
+                frames,
+                ..
+            } => Ok((
+                frames
+                    .into_iter()
+                    .map(|pixels| Rgba {
+                        width,
+                        height,
+                        pixels,
+                    })
+                    .collect(),
+                duration_ms,
+            )),
+            _ => Err("unexpected reply".into()),
+        }
+    }
+
     /// Decode a picture to at most `side` pixels on the long side.
     pub async fn thumbnail(&self, bytes: Vec<u8>, side: u16) -> Result<Rgba, String> {
         match self.call(MediaOp::Thumbnail(side), bytes).await? {
@@ -286,6 +345,27 @@ fn local(op: MediaOp, bytes: &[u8]) -> Result<MediaOut, String> {
                 pixels: t.pixels,
             })
         }
+        // Our own GIF, and a poster JPEG: the ordinary picture path.
+        MediaOp::Clip => enclave_media::video::clip_from_gif(bytes).map(|c| MediaOut::Clip {
+            width: c.width,
+            height: c.height,
+            duration_ms: c.duration_ms,
+            bytes: c.bytes,
+            frames: Vec::new(),
+        }),
+        MediaOp::ClipPoster(side) => {
+            enclave_media::video::clip_poster(bytes, u32::from(side)).map(|(img, ms)| {
+                MediaOut::Clip {
+                    width: img.width,
+                    height: img.height,
+                    duration_ms: ms,
+                    bytes: Vec::new(),
+                    frames: vec![img.pixels],
+                }
+            })
+        }
+        // Other people's AV1 is decoded in mediad only, never in the vault.
+        MediaOp::ClipFrames(_) => return Err("playing clips needs the media process".into()),
     }
     .map_err(|e| e.to_string())
 }

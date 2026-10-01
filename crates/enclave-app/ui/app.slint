@@ -91,6 +91,8 @@ export struct MessageRow {
     voice: bool,
     waveform: [int],
     voice-time: string,
+    // An animated picture (a clip): its length, "0:03"; empty otherwise.
+    clip-time: string,
 }
 
 export struct StickerPackRow {
@@ -108,7 +110,7 @@ export struct StickerCell {
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report, stickers, new-pack, change-words }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report, stickers, new-pack, change-words, player }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -139,6 +141,7 @@ component Bubble inherits HorizontalLayout {
     callback add-contact();
     callback copy(string);
     callback add-pack();
+    callback play-clip();
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
@@ -272,6 +275,14 @@ component Bubble inherits HorizontalLayout {
                         accessible-label: "Copy coordinates " + root.msg.location;
                         clicked => { root.copy(root.msg.location); }
                     }
+                }
+            }
+            if root.msg.clip-time != "" && !root.msg.deleted: HorizontalLayout {
+                alignment: start;
+                QuietButton {
+                    text: "Play · " + root.msg.clip-time;
+                    accessible-label: "Play animated picture, " + root.msg.clip-time;
+                    clicked => { root.play-clip(); }
                 }
             }
             if root.msg.picture && !root.msg.has-image: Text {
@@ -585,6 +596,10 @@ export component AppWindow inherits Window {
     in property <bool> words-pending;
     in property <int> moved;
     callback change-words();
+    callback play-clip(string, string);
+    in property <[image]> player-frames;
+    in-out property <int> player-index;
+    in property <duration> player-interval: 66ms;
     callback draft-changed(string, bool);
     callback create-pack(string, string);
     in property <[StickerPackRow]> sticker-packs;
@@ -1273,6 +1288,7 @@ export component AppWindow inherits Window {
                             add-contact => { root.add-shared(root.current-id, m.seq); }
                             copy(t) => { root.copy-text(t); }
                             add-pack => { root.add-pack(root.current-id, m.seq); }
+                            play-clip => { root.play-clip(root.current-id, m.seq); }
                         }
                     }
                 }
@@ -2529,6 +2545,32 @@ export component AppWindow inherits Window {
                 outlined: true;
                 clicked => { root.open-sheet(Sheet.change-words); }
             }
+        }
+    }
+
+    if root.sheet == Sheet.player: SheetFrame {
+        title: "Animated picture";
+        close => { root.sheet = Sheet.none; }
+        if root.player-frames.length == 0: Secondary { text: root.busy ? "Getting it ready…" : "Enclave couldn't play this one."; }
+        if root.player-frames.length > 0: Rectangle {
+            height: self.width * root.player-frames[0].height / max(1, root.player-frames[0].width);
+            border-radius: Tokens.radius-control;
+            clip: true;
+            Image {
+                source: root.player-frames[min(root.player-index, root.player-frames.length - 1)];
+                width: parent.width;
+                height: parent.height;
+                image-fit: contain;
+                accessible-role: image;
+                accessible-label: "Animated picture";
+            }
+        }
+        // Plays on a loop while the sheet is open; reduce-motion shows the
+        // first frame only.
+        Timer {
+            interval: root.player-interval;
+            running: root.sheet == Sheet.player && root.player-frames.length > 1 && !Tokens.reduce-motion;
+            triggered => { root.player-index = mod(root.player-index + 1, root.player-frames.length); }
         }
     }
 

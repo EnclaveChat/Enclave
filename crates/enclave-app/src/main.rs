@@ -101,6 +101,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     Out::Snapshot(s) => view::apply(&ui, &s),
                     Out::Effect(e) => view::apply_effect(&ui, e),
                     Out::Preview(p) => view::apply_preview(&ui, p),
+                    Out::Clip(c) => view::apply_clip(&ui, c),
                     Out::File(..) | Out::Invite(_) => {}
                 });
             }
@@ -327,6 +328,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let t = tx.clone();
     ui.on_load_stickers(move || {
         let _ = t.send(Cmd::LoadStickers);
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_play_clip(move |id, seq| {
+        let Ok(seq) = seq.parse() else {
+            return;
+        };
+        if let Some(ui) = w.upgrade() {
+            ui.set_player_frames(slint::ModelRc::default());
+            ui.set_sheet(Sheet::Player);
+        }
+        let _ = t.send(Cmd::PlayClip(id.to_string(), seq));
     });
     let t = tx.clone();
     ui.on_change_words(move || {

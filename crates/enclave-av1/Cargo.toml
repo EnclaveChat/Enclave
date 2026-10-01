@@ -1,0 +1,30 @@
+[package]
+name = "enclave-av1"
+description = "AV1 decoding for Enclave's media process: a small wrapper over rav1d (the Rust port of dav1d), built without assembly. The one crate that calls a C-style interface; a declared exception."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Not the workspace lints: those forbid `unsafe`, and rav1d's only interface
+# is dav1d's C API. Every unsafe block here carries a SAFETY comment.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "allow"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+# No assembly: the decoder is pure Rust (slower, and nothing hand-written
+# runs on other people's clips). 8-bit only: we only ever send 8-bit.
+rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8"] }
+thiserror = "2"

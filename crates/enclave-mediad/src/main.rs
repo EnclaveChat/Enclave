@@ -65,6 +65,39 @@ fn handle(req: MediaRequest) -> MediaReply {
                 pixels: t.pixels,
             })
         }
+        MediaOp::Clip => enclave_media::video::clip_from_gif(&req.bytes).map(|c| MediaOut::Clip {
+            width: c.width,
+            height: c.height,
+            duration_ms: c.duration_ms,
+            bytes: c.bytes,
+            frames: Vec::new(),
+        }),
+        MediaOp::ClipPoster(side) => enclave_media::video::clip_poster(&req.bytes, u32::from(side))
+            .map(|(img, ms)| MediaOut::Clip {
+                width: img.width,
+                height: img.height,
+                duration_ms: ms,
+                bytes: Vec::new(),
+                frames: vec![img.pixels],
+            }),
+        MediaOp::ClipFrames(side) => {
+            let ms = enclave_media::video::parse_clip(&req.bytes).map(|i| i.duration_ms);
+            ms.and_then(|ms| {
+                let frames = enclave_media::video::clip_frames(
+                    &req.bytes,
+                    u32::from(side),
+                    enclave_ipc::media::MAX_CLIP_FRAMES,
+                )?;
+                let (width, height) = frames.first().map_or((0, 0), |f| (f.width, f.height));
+                Ok(MediaOut::Clip {
+                    width,
+                    height,
+                    duration_ms: ms,
+                    bytes: Vec::new(),
+                    frames: frames.into_iter().map(|f| f.pixels).collect(),
+                })
+            })
+        }
     };
     MediaReply {
         id: req.id,

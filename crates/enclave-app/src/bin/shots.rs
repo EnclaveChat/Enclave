@@ -744,6 +744,67 @@ fn main() -> Result<(), slint::PlatformError> {
         view::apply(&ui, &mv);
         shot("50-contact-moved-phone", phone);
         view::apply(&ui, &data);
+
+        // An animated picture: its poster with its length, then the player.
+        let (cw, ch) = (240u32, 160u32);
+        let frame = |k: u32| -> Vec<u8> {
+            let mut px = Vec::with_capacity((cw * ch * 4) as usize);
+            for y in 0..ch {
+                for x in 0..cw {
+                    let cx = 40.0 + k as f32 * 20.0;
+                    let (dx, dy) = (x as f32 - cx, y as f32 - 80.0);
+                    let ball = dx * dx + dy * dy < 22.0 * 22.0;
+                    let c = if ball {
+                        (242, 178, 48)
+                    } else {
+                        (29 + (y / 8) as u8, 86 + (y / 6) as u8, 70 + (y / 8) as u8)
+                    };
+                    px.extend_from_slice(&[c.0, c.1, c.2, 255]);
+                }
+            }
+            px
+        };
+        let mut clip = data.clone();
+        clip.messages.push(Msg {
+            outgoing: false,
+            time: "14:10".into(),
+            seq: 950,
+            file: "party.clip".into(),
+            image: true,
+            clip_ms: 2400,
+            ..Default::default()
+        });
+        view::apply(&ui, &clip);
+        let cid = data
+            .current
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        view::apply_preview(
+            &ui,
+            view::Preview {
+                conversation: cid,
+                seq: 950,
+                width: cw,
+                height: ch,
+                pixels: frame(0),
+            },
+        );
+        shot("51-clip-phone", phone);
+        view::apply_clip(
+            &ui,
+            view::ClipFrames {
+                width: cw,
+                height: ch,
+                interval_ms: 66,
+                frames: (0..9).map(frame).collect(),
+            },
+        );
+        ui.set_player_index(4);
+        ui.set_sheet(Sheet::Player);
+        shot("52-player-phone", phone);
+        ui.set_sheet(Sheet::None);
+        view::apply(&ui, &data);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

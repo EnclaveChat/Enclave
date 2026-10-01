@@ -16,7 +16,7 @@ Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes whic
 | View-once | M9 | Shredded after view; screenshots still possible (copy says so) | `14-storage.md` §3 |
 | Images | M6 | Re-encoded, EXIF/GPS stripped, sandboxed decode | `15-client.md` §5 |
 | Voice notes | M6 | Opus, sandboxed decode | `15-client.md` §5 |
-| Video | M9 | AV1 + Opus, own container | `15-client.md` §5 |
+| Video | M9 | AV1 + Opus, own container. Animated pictures are built as short AV1 clips (no sound); camera video waits for platform decoders | `15-client.md` §5.3 |
 | Files (up to 100 MiB) | M9 | Never previewed; bucketed | `08-envelope.md` §9 |
 | Typing indicators (**off by default**) | M6 | Only in a tick slot that would otherwise carry cover; never adds a unit (§7) | `09-transport.md` §6.7 |
 | Read receipts (optional, batched) | M6 | Batched in `Piggyback` | `05-ratchet.md` §12 |

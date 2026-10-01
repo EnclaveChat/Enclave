@@ -2,7 +2,7 @@
 //! the UI thread.
 
 use crate::{AppWindow, ContactRow, DeviceRow, MessageRow, PickRow, Screen, Sheet};
-pub use enclave_ipc::{Device, Effect, Msg, Pick, Preview, Row, Snapshot};
+pub use enclave_ipc::{ClipFrames, Device, Effect, Msg, Pick, Preview, Row, Snapshot};
 use slint::{
     Color, Image, Model, ModelRc, Rgb8Pixel, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
 };
@@ -21,6 +21,22 @@ fn preview(conversation: &str, seq: u64) -> Option<Image> {
 }
 
 /// Keep a preview and show it if its conversation is open.
+/// A clip's frames: into the player, from the first frame.
+pub fn apply_clip(ui: &AppWindow, c: ClipFrames) {
+    let frames: Vec<Image> = c
+        .frames
+        .iter()
+        .map(|f| {
+            Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                f, c.width, c.height,
+            ))
+        })
+        .collect();
+    ui.set_player_index(0);
+    ui.set_player_interval(i64::from(c.interval_ms.clamp(20, 2000)));
+    ui.set_player_frames(ModelRc::from(Rc::new(VecModel::from(frames))));
+}
+
 pub fn apply_preview(ui: &AppWindow, p: Preview) {
     let img = Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
         &p.pixels, p.width, p.height,
@@ -219,6 +235,12 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
                     .map(|&w| i32::from(w))
                     .collect::<Vec<_>>(),
             ))),
+            clip_time: if m.clip_ms > 0 {
+                let s = m.clip_ms.div_ceil(1000);
+                format!("{}:{:02}", s / 60, s % 60).into()
+            } else {
+                SharedString::new()
+            },
             voice_time: if m.voice_ms > 0 {
                 let s = m.voice_ms.div_ceil(1000);
                 format!("{}:{:02}", s / 60, s % 60).into()

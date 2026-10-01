@@ -287,3 +287,100 @@ async fn voice_note_through_the_engine() {
         "no metadata from the original"
     );
 }
+
+/// A small animated GIF: `n` frames of a block moving right, 100 ms each.
+fn animation(n: usize) -> Vec<u8> {
+    let (w, h) = (48u16, 32u16);
+    let mut out = Vec::new();
+    {
+        let mut e = gif::Encoder::new(&mut out, w, h, &[]).unwrap();
+        for i in 0..n {
+            let mut px = vec![0u8; w as usize * h as usize * 4];
+            for (j, p) in px.chunks_exact_mut(4).enumerate() {
+                let on = ((j % w as usize) / 8 + i).is_multiple_of(3);
+                p.copy_from_slice(if on {
+                    &[220, 60, 40, 255]
+                } else {
+                    &[20, 80, 60, 255]
+                });
+            }
+            let mut f = gif::Frame::from_rgba_speed(w, h, &mut px, 10);
+            f.delay = 10;
+            e.write_frame(&f).unwrap();
+        }
+    }
+    out
+}
+
+/// Animated pictures through the engine: a GIF goes out as a short AV1
+/// clip (never as a GIF), its poster shows in the conversation with its
+/// length, and without mediad the vault refuses to decode the AV1 itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn clips_through_the_engine() {
+    let (tx, mut rx) = enclave_vault::spawn(enclave_vault::Mode::Demo);
+    tx.send(Cmd::Create("Robin".into(), String::new())).unwrap();
+    let s = next(&mut rx, snapshot(|s| !s.requests.is_empty())).await;
+    let sam = s.requests[0].id.clone();
+    tx.send(Cmd::Accept(sam.clone())).unwrap();
+    next(
+        &mut rx,
+        snapshot(|s| s.contacts.iter().any(|c| c.id == sam && c.state == 2)),
+    )
+    .await;
+    tx.send(Cmd::Select(sam.clone())).unwrap();
+    tx.send(Cmd::SendFile(
+        sam.clone(),
+        "party.gif".into(),
+        animation(6),
+        String::new(),
+    ))
+    .unwrap();
+    let s = next(
+        &mut rx,
+        snapshot(|s| s.messages.iter().any(|m| m.clip_ms > 0)),
+    )
+    .await;
+    let m = s.messages.iter().find(|m| m.clip_ms > 0).unwrap().clone();
+    assert_eq!(m.clip_ms, 600);
+    assert_eq!(m.file, "party.clip");
+    assert!(m.image, "shown by its poster");
+
+    tx.send(Cmd::PlayClip(sam.clone(), m.seq)).unwrap();
+    let c = next(&mut rx, |o| match o {
+        Out::Clip(c) => Some(c),
+        _ => None,
+    })
+    .await;
+    assert!(
+        c.frames.is_empty(),
+        "other people's AV1 is decoded in mediad only, never in the vault"
+    );
+}
+
+/// The confined mediad encodes a GIF to a clip and plays it back: rav1e and
+/// rav1d run under its sandbox (no files, no network, 2 GiB cap). Needs the
+/// mediad binary; skipped otherwise.
+#[tokio::test]
+async fn mediad_plays_clips() {
+    let mediad = std::path::Path::new(env!("CARGO_BIN_EXE_enclave-vault"))
+        .with_file_name(format!("enclave-mediad{}", std::env::consts::EXE_SUFFIX));
+    if !mediad.exists() {
+        return;
+    }
+    let media = enclave_vault::media::Media::spawn_each(&[mediad]).unwrap();
+    assert!(media.separate());
+    let (clip, w, h, ms) = media.clip(animation(6)).await.unwrap();
+    assert_eq!((w, h, ms), (48, 32, 600));
+    let (poster, _) = media.clip_poster(clip.clone(), 64).await.unwrap();
+    assert_eq!((poster.width, poster.height), (48, 32));
+    let (frames, ms) = media.clip_frames(clip.clone(), 360).await.unwrap();
+    assert_eq!(ms, 600);
+    assert_eq!(frames.len(), 9, "600 ms at 15 frames a second");
+    let px = &frames[0].pixels[(16 * 48 + 2) * 4..][..3];
+    assert!(px[0] > 150 && px[1] < 110, "the red block, decoded: {px:?}");
+    // A damaged clip is refused, and mediad keeps going.
+    let mut bad = clip;
+    bad[70_000] ^= 0xff;
+    let _ = media.clip_frames(bad, 360).await;
+    assert!(media.thumbnail(photo(), 16).await.is_ok());
+}

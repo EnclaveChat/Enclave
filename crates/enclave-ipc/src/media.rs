@@ -7,6 +7,9 @@
 use crate::codec::{MAX_BYTES, Reader, Writer};
 use crate::{IpcError, Result};
 
+/// Most clip frames in one reply.
+pub const MAX_CLIP_FRAMES: usize = 64;
+
 /// What to do with the bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaOp {
@@ -23,6 +26,12 @@ pub enum MediaOp {
     VoiceInfo,
     /// A voice note as a WAV file.
     VoiceWav,
+    /// An animated GIF (ours) to an AV1 clip.
+    Clip,
+    /// A clip's poster, shrunk to at most this many pixels (no AV1 decoding).
+    ClipPoster(u16),
+    /// A clip's frames for playing, shrunk to at most this many pixels.
+    ClipFrames(u16),
 }
 
 /// Vault → mediad.
@@ -60,6 +69,20 @@ pub enum MediaOut {
         /// The file.
         bytes: Vec<u8>,
     },
+    /// A clip (`Clip`; `frames` empty) or decoded frames (`ClipPoster`,
+    /// `ClipFrames`; `bytes` empty), all `width × height` RGBA.
+    Clip {
+        /// Width.
+        width: u32,
+        /// Height.
+        height: u32,
+        /// Length of the clip.
+        duration_ms: u32,
+        /// The clip file.
+        bytes: Vec<u8>,
+        /// Frames, evenly spaced over the clip.
+        frames: Vec<Vec<u8>>,
+    },
     /// 8-bit RGBA pixels.
     Rgba {
         /// Width.
@@ -92,6 +115,9 @@ impl MediaRequest {
             MediaOp::VoiceNote => w.u8(4),
             MediaOp::VoiceInfo => w.u8(5),
             MediaOp::VoiceWav => w.u8(6),
+            MediaOp::Clip => w.u8(7),
+            MediaOp::ClipPoster(side) => w.u8(8).u32(u32::from(side)),
+            MediaOp::ClipFrames(side) => w.u8(9).u32(u32::from(side)),
         };
         w.bytes(&self.bytes[..self.bytes.len().min(MAX_BYTES)]);
         w.0
@@ -108,6 +134,9 @@ impl MediaRequest {
             4 => MediaOp::VoiceNote,
             5 => MediaOp::VoiceInfo,
             6 => MediaOp::VoiceWav,
+            7 => MediaOp::Clip,
+            8 => MediaOp::ClipPoster(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
+            9 => MediaOp::ClipFrames(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
             _ => return Err(IpcError::Malformed),
         };
         let bytes = r.bytes()?;
@@ -143,6 +172,25 @@ impl MediaReply {
                 bytes,
             }) if bytes.len() <= MAX_BYTES && waveform.len() <= 64 => {
                 w.u8(3).u32(*duration_ms).bytes(waveform).bytes(bytes);
+            }
+            Ok(MediaOut::Clip {
+                width,
+                height,
+                duration_ms,
+                bytes,
+                frames,
+            }) if bytes.len() + frames.iter().map(Vec::len).sum::<usize>() <= MAX_BYTES
+                && frames.len() <= MAX_CLIP_FRAMES =>
+            {
+                w.u8(4)
+                    .u32(*width)
+                    .u32(*height)
+                    .u32(*duration_ms)
+                    .bytes(bytes)
+                    .u32(frames.len() as u32);
+                for f in frames {
+                    w.bytes(f);
+                }
             }
             Ok(_) => {
                 w.u8(0).str("too large");
@@ -188,6 +236,29 @@ impl MediaReply {
                     duration_ms,
                     waveform,
                     bytes: r.bytes()?,
+                })
+            }
+            4 => {
+                let (width, height, duration_ms) = (r.u32()?, r.u32()?, r.u32()?);
+                let bytes = r.bytes()?;
+                let n = r.u32()? as usize;
+                if n > MAX_CLIP_FRAMES {
+                    return Err(IpcError::Malformed);
+                }
+                let mut frames = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let f = r.bytes()?;
+                    if crate::rgba_len(width, height) != Some(f.len()) {
+                        return Err(IpcError::Malformed);
+                    }
+                    frames.push(f);
+                }
+                Ok(MediaOut::Clip {
+                    width,
+                    height,
+                    duration_ms,
+                    bytes,
+                    frames,
                 })
             }
             _ => return Err(IpcError::Malformed),

@@ -21,6 +21,7 @@
 
 mod exif;
 mod resize;
+pub mod video;
 pub mod voice;
 
 /// Largest file accepted for decoding.

@@ -58,6 +58,7 @@ fn snapshot() -> Snapshot {
             voice: true,
             voice_ms: 4200,
             waveform: vec![10; 64],
+            clip_ms: 2400,
         }],
         code_groups: vec!["12345".into(); 12],
         status: "ok".into(),
@@ -229,6 +230,12 @@ fn round_trips() {
             height: 1,
             pixels: vec![1; 8],
         }),
+        Out::Clip(enclave_ipc::ClipFrames {
+            width: 2,
+            height: 1,
+            interval_ms: 66,
+            frames: vec![vec![1; 8], vec![2; 8]],
+        }),
     ] {
         assert_eq!(Out::decode(&o.encode()).unwrap(), o);
     }
@@ -346,6 +353,21 @@ fn media_messages_round_trip_and_check_sizes() {
             op: MediaOp::Shrink(512),
             bytes: vec![1, 2],
         },
+        MediaRequest {
+            id: 10,
+            op: MediaOp::Clip,
+            bytes: b"GIF89a".to_vec(),
+        },
+        MediaRequest {
+            id: 11,
+            op: MediaOp::ClipPoster(560),
+            bytes: vec![0; 10],
+        },
+        MediaRequest {
+            id: 12,
+            op: MediaOp::ClipFrames(360),
+            bytes: vec![0; 10],
+        },
     ] {
         assert_eq!(MediaRequest::decode(&r.encode()).unwrap(), r);
     }
@@ -371,6 +393,16 @@ fn media_messages_round_trip_and_check_sizes() {
             id: 3,
             result: Err("damaged".into()),
         },
+        MediaReply {
+            id: 5,
+            result: Ok(MediaOut::Clip {
+                width: 2,
+                height: 2,
+                duration_ms: 600,
+                bytes: vec![3; 9],
+                frames: vec![vec![1; 16], vec![2; 16]],
+            }),
+        },
     ] {
         assert_eq!(MediaReply::decode(&r.encode()).unwrap(), r);
     }
@@ -384,6 +416,27 @@ fn media_messages_round_trip_and_check_sizes() {
         }),
     };
     assert!(MediaReply::decode(&lying.encode()).is_err());
+    let lying_clip = MediaReply {
+        id: 6,
+        result: Ok(MediaOut::Clip {
+            width: 4,
+            height: 4,
+            duration_ms: 1,
+            bytes: Vec::new(),
+            frames: vec![vec![0; 64], vec![0; 63]],
+        }),
+    };
+    assert!(
+        MediaReply::decode(&lying_clip.encode()).is_err(),
+        "every frame checked"
+    );
+    let bad_clip = Out::Clip(enclave_ipc::ClipFrames {
+        width: 2,
+        height: 2,
+        interval_ms: 1,
+        frames: vec![vec![0; 15]],
+    });
+    assert!(Out::decode(&bad_clip.encode()).is_err());
     let bad_preview = Out::Preview(enclave_ipc::Preview {
         conversation: "ab".into(),
         seq: 1,

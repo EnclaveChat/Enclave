@@ -178,6 +178,9 @@ struct Engine {
     typing_until: HashMap<[u8; 64], std::time::Instant>,
     /// When we last told each contact we were typing.
     typing_sent: HashMap<[u8; 64], std::time::Instant>,
+    /// Clips' lengths (ms), by (conversation, message position), read from
+    /// their headers by mediad.
+    clips: HashMap<(String, u64), u32>,
     /// Conversation ids of contacts who changed their recovery words, old
     /// to new, so a window still showing the old id keeps working.
     renamed: HashMap<String, String>,
@@ -384,7 +387,51 @@ fn display(m: &enclave_core::Message, now: u64) -> Msg {
 /// An attachment we'd preview: a JPEG or PNG (by its stated type; the bytes
 /// are checked again before decoding) of a size worth fetching on its own.
 fn is_picture(a: &enclave_core::files::Attachment) -> bool {
-    matches!(a.mime.as_str(), "image/jpeg" | "image/png") && a.size <= PREVIEW_MAX_BYTES
+    (matches!(a.mime.as_str(), "image/jpeg" | "image/png") || is_clip(a))
+        && a.size <= PREVIEW_MAX_BYTES
+}
+
+/// An animated picture (a short AV1 clip): previewed by its poster.
+fn is_clip(a: &enclave_core::files::Attachment) -> bool {
+    a.mime == enclave_media::video::CLIP_MIME && a.size <= PREVIEW_MAX_BYTES
+}
+
+/// Longest side of a clip's frames in the player.
+const PLAYER_SIDE: u16 = 360;
+
+/// Decode a picture's preview, or a clip's poster (and note its
+/// length), and send it to the window.
+async fn send_preview(
+    media: &crate::media::Media,
+    clips: &mut HashMap<(String, u64), u32>,
+    out: &mpsc::UnboundedSender<Out>,
+    id: &str,
+    seq: u64,
+    bytes: Vec<u8>,
+) {
+    let t = if enclave_media::video::is_clip(&bytes) {
+        match media.clip_poster(bytes, PREVIEW_SIDE).await {
+            Ok((t, ms)) => {
+                clips.insert((id.to_string(), seq), ms);
+                t
+            }
+            Err(_) => return,
+        }
+    } else if enclave_media::detect(&bytes).is_some() {
+        match media.thumbnail(bytes, PREVIEW_SIDE).await {
+            Ok(t) => t,
+            Err(_) => return,
+        }
+    } else {
+        return;
+    };
+    let _ = out.send(Out::Preview(enclave_ipc::Preview {
+        conversation: id.to_string(),
+        seq,
+        width: t.width,
+        height: t.height,
+        pixels: t.pixels,
+    }));
 }
 
 /// `name` with its extension replaced by `ext`.
@@ -529,6 +576,7 @@ pub async fn run_with(
         typing_until: HashMap::new(),
         typing_sent: HashMap::new(),
         renamed: HashMap::new(),
+        clips: HashMap::new(),
         reveal_share: None,
         out,
     };
@@ -758,18 +806,7 @@ impl Engine {
                 continue;
             };
             self.previews.insert((id.clone(), seq));
-            if enclave_media::detect(&bytes).is_none() {
-                continue;
-            }
-            if let Ok(t) = self.media.thumbnail(bytes, PREVIEW_SIDE).await {
-                let _ = self.out.send(Out::Preview(enclave_ipc::Preview {
-                    conversation: id.clone(),
-                    seq,
-                    width: t.width,
-                    height: t.height,
-                    pixels: t.pixels,
-                }));
-            }
+            send_preview(&self.media, &mut self.clips, &self.out, &id, seq, bytes).await;
         }
     }
 
@@ -807,18 +844,7 @@ impl Engine {
                 continue;
             };
             self.previews.insert((id.clone(), seq));
-            if enclave_media::detect(&bytes).is_none() {
-                continue;
-            }
-            if let Ok(t) = self.media.thumbnail(bytes, PREVIEW_SIDE).await {
-                let _ = self.out.send(Out::Preview(enclave_ipc::Preview {
-                    conversation: id.clone(),
-                    seq,
-                    width: t.width,
-                    height: t.height,
-                    pixels: t.pixels,
-                }));
-            }
+            send_preview(&self.media, &mut self.clips, &self.out, &id, seq, bytes).await;
         }
     }
 
@@ -840,6 +866,7 @@ impl Engine {
                 | Cmd::LinkPick(..)
                 | Cmd::Add(..)
                 | Cmd::ChangeWords
+                | Cmd::PlayClip(..)
         );
         if bulk {
             self.bulk(true);
@@ -1509,6 +1536,21 @@ impl Engine {
                             return;
                         }
                     }
+                } else if enclave_media::video::is_gif(&bytes) {
+                    // An animated picture: sent as a short AV1 clip, so
+                    // nobody's app ever decodes a GIF from someone else.
+                    match self.media.clip(bytes).await {
+                        Ok((clip, ..)) => (
+                            with_extension(&name, "clip"),
+                            enclave_media::video::CLIP_MIME,
+                            clip,
+                        ),
+                        Err(_) => {
+                            self.status = "Enclave couldn't read that GIF, so it wasn't sent. Try another file.".into();
+                            self.busy = false;
+                            return;
+                        }
+                    }
                 } else if enclave_media::detect(&bytes).is_some() {
                     match self.media.sanitize(bytes).await {
                         Ok(s) => (
@@ -1878,6 +1920,51 @@ impl Engine {
                 if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
                     let _ = c.set_verified(&root, true);
                 }
+            }
+            Cmd::PlayClip(id, seq) => {
+                self.busy = true;
+                self.push();
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let mut bytes = None;
+                if let Some(c) = self.client.as_mut() {
+                    let att = match (root, gid) {
+                        (Some(r), _) => c
+                            .messages(&r)
+                            .ok()
+                            .and_then(|v| v.into_iter().find(|m| m.seq == seq))
+                            .and_then(|m| m.attachment),
+                        (None, Some(g)) => c
+                            .group_messages(&g)
+                            .ok()
+                            .and_then(|v| v.into_iter().find(|m| m.seq == seq))
+                            .and_then(|m| m.attachment),
+                        _ => None,
+                    };
+                    if let Some(a) = att.filter(is_clip) {
+                        bytes = c.fetch_file(&a).await.ok();
+                    }
+                }
+                let played = match bytes {
+                    Some(b) => self.media.clip_frames(b, PLAYER_SIDE).await.ok(),
+                    None => None,
+                };
+                let clip = match played {
+                    Some((frames, ms)) if !frames.is_empty() => enclave_ipc::ClipFrames {
+                        width: frames[0].width,
+                        height: frames[0].height,
+                        interval_ms: ms / frames.len() as u32,
+                        frames: frames.into_iter().map(|f| f.pixels).collect(),
+                    },
+                    // The player then says it couldn't play it.
+                    _ => enclave_ipc::ClipFrames {
+                        width: 0,
+                        height: 0,
+                        interval_ms: 0,
+                        frames: Vec::new(),
+                    },
+                };
+                let _ = self.out.send(Out::Clip(clip));
+                self.busy = false;
             }
             Cmd::ChangeWords => {
                 self.busy = true;
@@ -2655,6 +2742,17 @@ impl Engine {
             .unwrap_or_default();
         s.link_status = self.link_status.clone();
         s.can_link = c.can_link();
+        let conv = self
+            .selected
+            .map(|r| hex_id(&r))
+            .or(self.selected_group.map(|g| group_id_str(&g)));
+        if let Some(conv) = conv {
+            for m in &mut s.messages {
+                if let Some(ms) = self.clips.get(&(conv.clone(), m.seq)) {
+                    m.clip_ms = *ms;
+                }
+            }
+        }
         s
     }
 }

@@ -54,6 +54,9 @@ exceptions = [
     # software is based in part on the work of the Independent JPEG Group"
     # (README "Acknowledgements", and LICENSES/IJG-jpeg-encoder.txt).
     { allow = ["IJG"], crate = "jpeg-encoder" },
+    # libFuzzer's NCSA licence. Only rav1e's `cfg(fuzzing)` builds pull it
+    # in (and our own fuzz harness); never part of a shipped build.
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
 
 [bans]
