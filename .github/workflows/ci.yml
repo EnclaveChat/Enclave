@@ -1,13 +1,22 @@
 name: CI
-# TODO(M10): pin every action to a full commit SHA once verified.
+# Every action is pinned to a full commit SHA (the tag is in the comment);
+# Dependabot (.github/dependabot.yml) proposes updates.
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
+
+# The toolchain is rust-toolchain.toml's (1.94.1); rustup on the runners
+# installs it on first use.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,15 +24,11 @@ env:
 
 jobs:
   check:
-    name: fmt, clippy, test
+    name: fmt, clippy, test (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.94.1
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: Install system OpenSSL (test oracle only) and UI build dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libfontconfig1-dev libxkbcommon-dev
       - run: cargo fmt --all -- --check
@@ -33,26 +38,54 @@ jobs:
         run: cargo xtask labels
       - name: Render UI screenshots (software renderer, light and dark)
         run: cargo run --release -p enclave-app --bin enclave-shots -- target/shots
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: screenshots
           path: target/shots
+
+  build-macos:
+    name: build and test (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --release
+
+  build-windows:
+    name: build and test (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --release
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
+
+  deny-ios:
+    name: cargo-deny (iOS licences)
+    runs-on: ubuntu-24.04
+    # Fails until equix/hashx are relicensed or replaced (completion plan X25,
+    # external gate G14); required from milestone I1.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
+        with:
+          arguments: --target aarch64-apple-ios --config deny-ios.toml
+          command: check licenses
 
   repro:
     name: reproducible builds
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.94.1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Two clean builds of each binary must be byte-identical
         run: |
           cargo xtask repro enclave-relay
@@ -62,11 +95,21 @@ jobs:
     name: formal models (ProVerif)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.94.1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install ProVerif
         run: sudo apt-get update && sudo apt-get install -y proverif
       - name: Every query gives its expected result
         run: cargo xtask proverif
+
+  done-gate:
+    name: completion gate (report)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      # Reports what is left; becomes the blocking `cargo xtask done` at 1.0.
+      - run: cargo xtask done --report | tee done-gate.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: done-gate
+          path: done-gate.txt

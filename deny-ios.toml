@@ -1,4 +1,8 @@
-# cargo-deny configuration. See docs/PLAN.md §22 (Rust-everywhere policy).
+# cargo-deny configuration for iOS builds (docs/15b-platform-constraints.md PC-09,
+# legal/ADDITIONAL-PERMISSIONS.md): the same as deny.toml, except that no
+# third-party crate may be GPL or LGPL, because App Store terms conflict with
+# them and our section 7 permission covers only our own code. Our own crates
+# are unpublished and so not checked here ([licenses.private]).
 
 [graph]
 all-features = false
@@ -34,10 +38,9 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "OFL-1.1",
-    "GPL-3.0-only",
-    "GPL-3.0-or-later",
-    "LGPL-3.0-or-later",
     "BSL-1.0",
+    # Slint on iOS is used under its Royalty-free License 2.0 (PC-80, AboutSlint).
+    "LicenseRef-Slint-Royalty-free-2.0",
     "CDLA-Permissive-2.0",
     # Public-domain dedication (async_executors, via arti).
     "Unlicense",
@@ -45,7 +48,6 @@ allow = [
     # compatible, but LGPL-3.0's installation-information terms are a risk
     # for App Store builds that our section 7 permission cannot waive for
     # third-party code. Tracked in legal/ADDITIONAL-PERMISSIONS.md.
-    "LGPL-3.0-only",
 ]
 # Per-crate exceptions: allowed for that crate only.
 exceptions = [
@@ -58,6 +60,9 @@ exceptions = [
     # in (and our own fuzz harness); never part of a shipped build.
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
+
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "warn"
