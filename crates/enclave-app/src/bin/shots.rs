@@ -572,6 +572,17 @@ fn main() -> Result<(), slint::PlatformError> {
         .collect();
         view::apply(&ui, &notes);
         shot("40-notes-phone", phone);
+        let mut shared = data.clone();
+        shared.messages.push(Msg {
+            outgoing: false,
+            time: "14:06".into(),
+            status: 2,
+            seq: 99,
+            contact_name: "Tomasz Nowak".into(),
+            ..Default::default()
+        });
+        view::apply(&ui, &shared);
+        shot("41-shared-contact-phone", phone);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

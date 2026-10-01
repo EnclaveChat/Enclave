@@ -129,6 +129,13 @@ pub enum Content {
     /// Our signed key-transparency head for an epoch where the sender's
     /// gossip disagreed, as a sealed file reference (RT-04).
     KtHead(Vec<u8>),
+    /// A contact card, shared so the recipient can add that person.
+    ContactShare {
+        /// Message id.
+        id: MsgId,
+        /// The encoded card (never with an invite).
+        card: Vec<u8>,
+    },
     /// Pin (or unpin) a message of the conversation, for both people.
     Pin {
         /// Target message.
@@ -163,6 +170,7 @@ const K_VETO: u8 = 15;
 const K_KT_HEAD: u8 = 16;
 const K_RECOVERY_SHARE: u8 = 17;
 const K_PIN: u8 = 18;
+const K_CONTACT_SHARE: u8 = 19;
 /// Longest recovery share (33 words of at most 8 letters).
 pub const MAX_RECOVERY_SHARE: usize = 512;
 /// Largest content a self-copy can wrap.
@@ -340,6 +348,12 @@ impl Content {
             Content::Pin { target, on } => {
                 w.u8(K_PIN).fixed(target).u8(u8::from(*on));
             }
+            Content::ContactShare { id, card } => {
+                if card.len() > MAX_CARD {
+                    return too_large;
+                }
+                w.u8(K_CONTACT_SHARE).fixed(id).bytes(card);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -415,6 +429,10 @@ impl Content {
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
+            K_CONTACT_SHARE => Content::ContactShare {
+                id: r.array()?,
+                card: r.bytes(MAX_CARD)?.to_vec(),
+            },
             K_PIN => Content::Pin {
                 target: r.array()?,
                 on: match r.u8()? {
@@ -488,6 +506,10 @@ mod tests {
             Content::Pin {
                 target: [4; 16],
                 on: true,
+            },
+            Content::ContactShare {
+                id: [3; 16],
+                card: vec![7; 200],
             },
             Content::SelfCopy {
                 to: [9; 64],

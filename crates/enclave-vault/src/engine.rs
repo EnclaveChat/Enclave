@@ -912,6 +912,48 @@ impl Engine {
                 }
                 self.busy = false;
             }
+            Cmd::ShareContact(id, who) => {
+                let (Some(to), Some(who)) = (self.root_of(&id), self.root_of(&who)) else {
+                    return;
+                };
+                if let Some(c) = self.client.as_mut()
+                    && c.share_contact(&to, &who).await.is_err()
+                {
+                    self.status = "Couldn't share that contact. They need to have shared their code with you first.".into();
+                }
+            }
+            Cmd::AddShared(id, seq) => {
+                let Some(root) = self.root_of(&id) else {
+                    return;
+                };
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let card = c
+                    .messages(&root)
+                    .ok()
+                    .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                    .and_then(|m| c.shared_contacts(&root).remove(&m.id));
+                let Some(card) = card else {
+                    return;
+                };
+                self.busy = true;
+                self.push();
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                match c.add_contact(&card, "").await {
+                    Ok(()) => {
+                        self.selected = Some(card.root);
+                        self.status = format!(
+                            "Request sent to {}. Check their security code when you meet.",
+                            card.name
+                        );
+                    }
+                    Err(err) => self.status = link_error(&err),
+                }
+                self.busy = false;
+            }
             Cmd::Block(id, on) => {
                 let Some(root) = self.root_of(&id) else {
                     return;
@@ -1686,7 +1728,10 @@ impl Engine {
                 name: ct.name.clone(),
                 preview: join.unwrap_or_else(|| {
                     last.map(|m| {
-                        let t = display(m, now).text;
+                        let mut t = display(m, now).text;
+                        if t.is_empty() {
+                            t = "Shared a contact".into();
+                        }
                         if m.outgoing { format!("You: {t}") } else { t }
                     })
                     .unwrap_or_default()
@@ -1710,11 +1755,19 @@ impl Engine {
                 s.current = Some(row.clone());
                 s.timer = ct.timer;
                 let pinned = c.pinned_ids(&Place::Contact(ct.root));
+                let shared = c.shared_contacts(&ct.root);
+                let me = c.root();
                 s.messages = msgs
                     .iter()
-                    .map(|m| Msg {
-                        pinned: !m.deleted && pinned.contains(&m.id),
-                        ..display(m, now)
+                    .map(|m| {
+                        let card = shared.get(&m.id).filter(|_| !m.deleted);
+                        Msg {
+                            pinned: !m.deleted && pinned.contains(&m.id),
+                            contact_name: card.map(|k| k.name.clone()).unwrap_or_default(),
+                            contact_known: card
+                                .is_some_and(|k| k.root == me || c.contact(&k.root).is_some()),
+                            ..display(m, now)
+                        }
                     })
                     .collect();
                 s.pins = pinned

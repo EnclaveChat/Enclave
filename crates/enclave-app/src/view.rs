@@ -189,6 +189,9 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             poll_state: m.poll_state,
             poll_ours: m.poll_ours,
             pinned: m.pinned,
+            contact_name: m.contact_name.clone().into(),
+            contact_initials: initials(&m.contact_name).into(),
+            contact_known: m.contact_known,
             poll_options: ModelRc::from(Rc::new(VecModel::from(
                 m.poll_options
                     .iter()

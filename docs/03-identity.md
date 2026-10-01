@@ -338,6 +338,10 @@ URI scheme `enclave:` followed by `c/` and base32 of:
 - Username contacts land in Message requests until accepted, like any stranger.
 - The UI says: "A username is public, like an email address."
 
+### 9.4 Sharing a contact
+
+**As implemented** (`enclave-core/src/client/sharing.rs`): `Content::ContactShare { id, card }` (content kind 19) carries a contact's card inside the session, so the recipient can add that person as if they had scanned the code: an ordinary message request, trusted on first use. Only a card the person gave us can be shared (their QR fields; any invite secret is stripped on both ends), only with an accepted contact, and never a contact to themselves. The person shared is not told, and the request they receive doesn't say who shared them. The card's name is what that person typed and is shown as such; the app reminds the recipient to check the security code when they meet. Cards are kept per conversation, by message id, and removed with the conversation. The app shares from the attach sheet ("Share a contact instead") and shows a card with **Add** in the conversation. Test `share_a_contact`.
+
 ## 10. Errors
 
 | Condition | Behavior | User-facing copy |

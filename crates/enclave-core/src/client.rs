@@ -113,6 +113,7 @@ mod polls;
 mod prefs;
 mod push;
 mod search;
+mod sharing;
 mod social;
 mod usernames;
 
@@ -915,7 +916,7 @@ impl Client {
         for (k, _) in self.store.scan(&ns)? {
             self.store.delete(&ns, &k)?;
         }
-        Ok(())
+        self.forget_shared_contacts(root)
     }
 
     /// Send a text message.

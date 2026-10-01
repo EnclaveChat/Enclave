@@ -611,6 +611,12 @@ impl Client {
                 self.save_contact(&c)?;
                 events.push(Event::TimerChanged { root: *root, secs });
             }
+            Content::ContactShare { id, card } => {
+                if let Some(ev) = self.on_contact_share(root, id, &card, false, now)? {
+                    self.bump_unread(root)?;
+                    events.push(ev);
+                }
+            }
             Content::Pin { target, on } => {
                 let place = Place::Contact(*root);
                 if self.find(root, &target).is_ok() && self.apply_pin(&place, &target, on)? {
@@ -719,6 +725,9 @@ impl Client {
                 let c = c.clone();
                 self.save_contact(&c)?;
                 events.push(Event::TimerChanged { root: *to, secs });
+            }
+            Content::ContactShare { id, card } => {
+                events.extend(self.on_contact_share(to, id, &card, true, now)?);
             }
             Content::Pin { target, on } => {
                 let place = Place::Contact(*to);

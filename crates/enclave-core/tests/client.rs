@@ -1502,6 +1502,49 @@ async fn group_reactions_edits_deletes() {
     }
 }
 
+/// Sharing a contact: Ada shares Jo's card with Mo, who adds Jo from it.
+/// The card carries no invite secret, and Jo sees an ordinary request.
+#[tokio::test(flavor = "multi_thread")]
+async fn share_a_contact() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    assert!(
+        ada.share_contact(&mo.root(), &mo.root()).await.is_err(),
+        "not to themselves"
+    );
+    let m = ada.share_contact(&mo.root(), &jo.root()).await.unwrap();
+    assert!(ada.shared_contacts(&mo.root()).contains_key(&m.id));
+    let ev = mo.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Message { message, .. } if message.id == m.id))
+    );
+    let shared = mo.shared_contacts(&ada.root());
+    let card = shared.get(&m.id).expect("card kept");
+    assert_eq!(card.root, jo.root());
+    assert_eq!(card.name, "Jo");
+    assert!(card.invite.is_none());
+
+    mo.add_contact(card, "Ada said to say hi").await.unwrap();
+    let ev = jo.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { root, .. } if *root == mo.root())),
+        "{ev:?}"
+    );
+}
+
 /// Blocking: the blocked contact's tokens are revoked at our server, so
 /// their writes fail; nothing from them shows. Unblocking sends fresh
 /// tokens and the conversation works again.

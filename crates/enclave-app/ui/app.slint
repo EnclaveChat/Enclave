@@ -78,10 +78,14 @@ export struct MessageRow {
     poll-options: [PollOption],
     poll-ours: bool,
     pinned: bool,
+    // A shared contact (empty when the message isn't one).
+    contact-name: string,
+    contact-initials: string,
+    contact-known: bool,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -109,6 +113,7 @@ component Bubble inherits HorizontalLayout {
     callback tapped();
     callback vote(int);
     callback close-poll();
+    callback add-contact();
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
@@ -121,7 +126,7 @@ component Bubble inherits HorizontalLayout {
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
-        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + root.msg.text + ", " + root.msg.time;
         accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
@@ -148,6 +153,33 @@ component Bubble inherits HorizontalLayout {
                     image-fit: fill;
                     accessible-role: image;
                     accessible-label: "Picture: " + root.msg.file;
+                }
+            }
+            if root.msg.contact-name != "": HorizontalLayout {
+                spacing: Tokens.space-sm;
+                VerticalLayout {
+                    alignment: center;
+                    Avatar { initials: root.msg.contact-initials; tint: Tokens.pine; size: 36px; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.msg.contact-name;
+                        font-size: Tokens.type-body;
+                        font-weight: 600;
+                        color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                    }
+                    Text {
+                        text: root.msg.outgoing ? "Contact you shared" : root.msg.contact-known ? "Someone you already talk to" : "Contact. Check their code when you meet.";
+                        font-size: Tokens.type-caption;
+                        color: root.msg.outgoing ? Tokens.meta-on-bubble-out : Tokens.text-muted;
+                        wrap: word-wrap;
+                    }
+                }
+                if !root.msg.outgoing && !root.msg.contact-known: VerticalLayout {
+                    alignment: center;
+                    QuietButton { text: "Add"; outlined: true; clicked => { root.add-contact(); } }
                 }
             }
             if root.msg.picture && !root.msg.has-image: Text {
@@ -439,6 +471,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show-archived;
     callback conv-prefs(string, bool, bool, bool);
     callback block(string, bool);
+    callback share-contact(string, string);
+    callback add-shared(string, string);
     in property <[MessageRow]> messages;
     in-out property <string> current-id;
     in property <ContactRow> current;
@@ -1102,6 +1136,7 @@ export component AppWindow inherits Window {
                             }
                             vote(i) => { root.vote(root.current-id, m.seq, i); }
                             close-poll => { root.close-poll(root.current-id, m.seq); }
+                            add-contact => { root.add-shared(root.current-id, m.seq); }
                         }
                     }
                 }
@@ -1493,7 +1528,38 @@ export component AppWindow inherits Window {
                 enabled: root.attach-path != "" && !root.busy;
                 clicked => { root.send-file(root.current-id, root.attach-path, root.attach-caption); }
             }
+            QuietButton {
+                text: "Share a contact instead";
+                clicked => { root.sheet = Sheet.share-contact; }
+            }
         }
+    }
+
+    if root.sheet == Sheet.share-contact: SheetFrame {
+        title: "Share a contact";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: root.current.name + " gets their code and can send them a request. Nobody is told who shared it."; }
+        for p in root.friends: Rectangle {
+            visible: p.id != root.current-id;
+            height: self.visible ? 56px : 0px;
+            border-radius: Tokens.radius-control;
+            background: share-touch.has-hover ? Tokens.bubble-in : transparent;
+            accessible-role: button;
+            accessible-label: "Share " + p.name;
+            accessible-action-default => { root.share-contact(root.current-id, p.id); root.sheet = Sheet.none; }
+            share-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.share-contact(root.current-id, p.id); root.sheet = Sheet.none; }
+            }
+            HorizontalLayout {
+                padding-left: Tokens.space-s;
+                padding-right: Tokens.space-s;
+                spacing: Tokens.space-sm;
+                VerticalLayout { alignment: center; Avatar { initials: p.initials; tint: p.tint; size: 36px; } }
+                Body { text: p.name; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+            }
+        }
+        if root.friends.length < 2: Secondary { text: "You can share people you already talk to."; }
     }
 
     if root.sheet == Sheet.poll: SheetFrame {

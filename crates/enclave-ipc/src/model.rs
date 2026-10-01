@@ -110,6 +110,10 @@ pub struct Msg {
     pub poll_ours: bool,
     /// Pinned in this conversation.
     pub pinned: bool,
+    /// A shared contact: their name (empty when the message isn't one).
+    pub contact_name: String,
+    /// The shared contact is already someone we talk to (or us).
+    pub contact_known: bool,
 }
 
 /// Everything the window shows.
@@ -327,6 +331,10 @@ pub enum Cmd {
     ConvPrefs(String, bool, bool, bool),
     /// Block (true) or unblock a contact.
     Block(String, bool),
+    /// Share a contact into a conversation: conversation, contact.
+    ShareContact(String, String),
+    /// Add the contact shared at a message: conversation, position.
+    AddShared(String, u64),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -476,7 +484,9 @@ impl Snapshot {
             w.i32(m.poll_mine)
                 .i32(m.poll_state)
                 .bool(m.poll_ours)
-                .bool(m.pinned);
+                .bool(m.pinned)
+                .str(&m.contact_name)
+                .bool(m.contact_known);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -584,6 +594,8 @@ impl Snapshot {
                     poll_state: r.i32()?,
                     poll_ours: r.bool()?,
                     pinned: r.bool()?,
+                    contact_name: r.str()?,
+                    contact_known: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -751,6 +763,8 @@ impl Cmd {
             Cmd::Pin(c, s, on) => w.u8(48).str(c).u64(*s).bool(*on),
             Cmd::ConvPrefs(c, a, p, m) => w.u8(49).str(c).bool(*a).bool(*p).bool(*m),
             Cmd::Block(c, on) => w.u8(50).str(c).bool(*on),
+            Cmd::ShareContact(c, who) => w.u8(51).str(c).str(who),
+            Cmd::AddShared(c, s) => w.u8(52).str(c).u64(*s),
         };
         w.0
     }
@@ -809,6 +823,8 @@ impl Cmd {
             48 => Cmd::Pin(r.str()?, r.u64()?, r.bool()?),
             49 => Cmd::ConvPrefs(r.str()?, r.bool()?, r.bool()?, r.bool()?),
             50 => Cmd::Block(r.str()?, r.bool()?),
+            51 => Cmd::ShareContact(r.str()?, r.str()?),
+            52 => Cmd::AddShared(r.str()?, r.u64()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

@@ -310,6 +310,16 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::Search(q.to_string()));
     });
     let t = tx.clone();
+    ui.on_share_contact(move |id, who| {
+        let _ = t.send(Cmd::ShareContact(id.to_string(), who.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_add_shared(move |id, seq| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::AddShared(id.to_string(), seq));
+        }
+    });
+    let t = tx.clone();
     ui.on_block(move |id, on| {
         let _ = t.send(Cmd::Block(id.to_string(), on));
     });
