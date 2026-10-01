@@ -1,0 +1,130 @@
+(* Invite-link PSK (docs/03-identity.md §7.3, §9.2), symbolic model.
+
+   An invite link carries a 256-bit secret s. Its owner registers
+   single-use request-inbox capabilities cap_i = KMAC(s, "invite_cap", i)
+   at their server, and both sides mix psk = KMAC(s, "invite_psk") into
+   EnclaveCombine as a one-way PSK.
+
+   The handshake is EQXDH's first message as in eqxdh_quantum.pv (Bob's
+   reply adds nothing these queries depend on), against the same
+   attacker: it takes discrete logs and opens every ML-KEM and McEliece
+   ciphertext. It is also the server: it sees every capability. Shown:
+
+   - a session started from a link the attacker never saw stays secret,
+     even though it holds the link's capabilities (the labels separate
+     them from the PSK);
+   - the sanity check: the same handshake from a link posted publicly is
+     broken, so the result above is not vacuous.
+
+   Authentication (Bob accepts a privately linked greeting only if Alice
+   sent it) is not queried here: against this attacker ProVerif did not
+   finish it in 25 minutes.
+
+   Each query carries its expected result: `cargo xtask proverif` checks
+   them in order. *)
+
+set attacker = active.
+
+free c: channel.
+free pub: channel.  (* where Bob's prekeys and Alice's keys are published *)
+
+type exponent.
+type G.
+const g: G [data].
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+type nonce.
+type ksk.
+type key.
+
+(* ML-KEM-1024 and Classic McEliece, each an ideal KEM. *)
+fun mlpk(ksk): bitstring.
+fun mlct(bitstring, nonce): bitstring.
+fun mlss(bitstring, nonce): key.
+reduc forall sk: ksk, r: nonce; mldec(sk, mlct(mlpk(sk), r)) = mlss(mlpk(sk), r).
+reduc forall pk: bitstring, r: nonce; mlbreak(mlct(pk, r)) = mlss(pk, r).
+reduc forall x: exponent; dlog(exp(g, x)) = x.
+
+fun mcpk(ksk): bitstring.
+fun mcct(bitstring, nonce): bitstring.
+fun mcss(bitstring, nonce): key.
+reduc forall sk: ksk, r: nonce; mcdec(sk, mcct(mcpk(sk), r)) = mcss(mcpk(sk), r).
+reduc forall pk: bitstring, r: nonce; mcbreak(mcct(pk, r)) = mcss(pk, r).
+
+(* EnclaveCombine and the reply's root mix (KMAC256). *)
+type psk.
+fun combine(G, G, G, G, key, key, key, psk, bitstring): key.
+
+(* The link secret and the two KMAC derivations from it. *)
+type link.
+fun invite_psk(link): psk.
+fun invite_cap(link, nonce): bitstring.
+
+(* How the link travelled: privately, or posted where anyone reads it. *)
+type route.
+const private_link: route [data].
+const public_link: route [data].
+
+(* EnclaveSeal as authenticated encryption. *)
+fun seal(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; open(k, seal(k, m)) = m.
+
+free secretA: bitstring [private].
+free plainA: bitstring [private].
+
+event AliceSends(route, key).
+event BobAccepts(route, key).
+
+(* A link delivered privately: the session stays secret. *)
+(* expect: true *)
+query attacker(secretA).
+(* A link posted publicly: broken. *)
+(* expect: false *)
+query attacker(plainA).
+
+let alice(rt: route, ika: exponent, auth_a: ksk, ikb: G, spk: G, opk: G, pqopk: bitstring, vault: bitstring, auth_b: bitstring, p: psk, msg: bitstring) =
+  new ek: exponent;
+  new r1: nonce; new r2: nonce; new r3: nonce;
+  let ika_pub = exp(g, ika) in
+  let ekp = exp(g, ek) in
+  let ct1 = mlct(pqopk, r1) in
+  let ct2 = mcct(vault, r2) in
+  let ct3 = mlct(auth_b, r3) in
+  let transcript = (ika_pub, ikb, spk, opk, pqopk, vault, auth_b, mlpk(auth_a), ekp, ct1, ct2, ct3) in
+  let sk = combine(exp(spk, ika), exp(ikb, ek), exp(spk, ek), exp(opk, ek),
+                   mlss(pqopk, r1), mcss(vault, r2), mlss(auth_b, r3), p, transcript) in
+  event AliceSends(rt, sk);
+  out(c, (ika_pub, ekp, ct1, ct2, ct3, seal(sk, msg))).
+
+let bob(rt: route, ikb: exponent, spk: exponent, opk: exponent, pqopk: ksk, vault: ksk, auth_b: ksk, ika_pub: G, auth_a: bitstring, p: psk) =
+  in(c, (=ika_pub, ekp: G, ct1: bitstring, ct2: bitstring, ct3: bitstring, body: bitstring));
+  let ikb_pub = exp(g, ikb) in
+  let transcript = (ika_pub, ikb_pub, exp(g, spk), exp(g, opk), mlpk(pqopk), mcpk(vault), mlpk(auth_b), auth_a, ekp, ct1, ct2, ct3) in
+  let sk = combine(exp(ika_pub, spk), exp(ekp, ikb), exp(ekp, spk), exp(ekp, opk),
+                   mldec(pqopk, ct1), mcdec(vault, ct2), mldec(auth_b, ct3), p, transcript) in
+  let m = open(sk, body) in
+  event BobAccepts(rt, sk).
+
+process
+  new ika: exponent; new auth_a: ksk;
+  new ikb: exponent; new spk: exponent; new vault: ksk; new auth_b: ksk;
+  (* Long-term and medium-term public keys are public. *)
+  out(pub, (exp(g, ika), mlpk(auth_a), exp(g, ikb), exp(g, spk), mcpk(vault), mlpk(auth_b)));
+  (
+    (* A link sent privately: the attacker (as the server) sees its
+       capabilities but never the link. *)
+    ! (new opk: exponent; new pqopk: ksk;
+       out(pub, (exp(g, opk), mlpk(pqopk)));
+       new s: link; new i: nonce;
+       out(c, invite_cap(s, i));
+       ( alice(private_link, ika, auth_a, exp(g, ikb), exp(g, spk), exp(g, opk), mlpk(pqopk), mcpk(vault), mlpk(auth_b), invite_psk(s), secretA)
+       | bob(private_link, ikb, spk, opk, pqopk, vault, auth_b, exp(g, ika), mlpk(auth_a), invite_psk(s)) ))
+    (* A link posted publicly. *)
+  | ! (new opk: exponent; new pqopk: ksk;
+       out(pub, (exp(g, opk), mlpk(pqopk)));
+       new s: link;
+       out(pub, s);
+       ( alice(public_link, ika, auth_a, exp(g, ikb), exp(g, spk), exp(g, opk), mlpk(pqopk), mcpk(vault), mlpk(auth_b), invite_psk(s), plainA)
+       | bob(public_link, ikb, spk, opk, pqopk, vault, auth_b, exp(g, ika), mlpk(auth_a), invite_psk(s)) ))
+  )
