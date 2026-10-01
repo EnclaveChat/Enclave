@@ -319,6 +319,11 @@ fn media_messages_round_trip_and_check_sizes() {
             op: MediaOp::Thumbnail(560),
             bytes: vec![7; 1000],
         },
+        MediaRequest {
+            id: 9,
+            op: MediaOp::Shrink(512),
+            bytes: vec![1, 2],
+        },
     ] {
         assert_eq!(MediaRequest::decode(&r.encode()).unwrap(), r);
     }

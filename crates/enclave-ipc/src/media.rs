@@ -14,6 +14,9 @@ pub enum MediaOp {
     Sanitize,
     /// Decode and shrink to at most this many pixels on the long side.
     Thumbnail(u16),
+    /// Re-encode like `Sanitize`, at most this many pixels on the long
+    /// side (stickers).
+    Shrink(u16),
 }
 
 /// Vault → mediad.
@@ -69,6 +72,7 @@ impl MediaRequest {
         match self.op {
             MediaOp::Sanitize => w.u8(1),
             MediaOp::Thumbnail(side) => w.u8(2).u32(u32::from(side)),
+            MediaOp::Shrink(side) => w.u8(3).u32(u32::from(side)),
         };
         w.bytes(&self.bytes[..self.bytes.len().min(MAX_BYTES)]);
         w.0
@@ -81,6 +85,7 @@ impl MediaRequest {
         let op = match r.u8()? {
             1 => MediaOp::Sanitize,
             2 => MediaOp::Thumbnail(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
+            3 => MediaOp::Shrink(u16::try_from(r.u32()?).map_err(|_| IpcError::Malformed)?),
             _ => return Err(IpcError::Malformed),
         };
         let bytes = r.bytes()?;

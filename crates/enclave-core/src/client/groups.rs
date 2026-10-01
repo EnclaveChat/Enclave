@@ -92,8 +92,10 @@ pub struct GroupMessage {
     pub edited: bool,
     /// Deleted by its author.
     pub deleted: bool,
-    /// Attached file.
+    /// Attached file (for a sticker, its pack).
     pub attachment: Option<Attachment>,
+    /// A sticker: its index in the pack.
+    pub sticker: Option<u8>,
 }
 
 fn put_who(w: &mut Writer, who: &Option<[u8; 64]>) {
@@ -114,7 +116,7 @@ fn get_who(r: &mut Reader<'_>) -> enclave_proto::Result<Option<[u8; 64]>> {
 impl GroupMessage {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(5).u64(self.seq);
+        w.u8(6).u64(self.seq);
         put_who(&mut w, &self.from);
         w.bytes(self.from_name.as_bytes())
             .bytes(self.text.as_bytes())
@@ -138,13 +140,17 @@ impl GroupMessage {
                 .map(Attachment::encode)
                 .unwrap_or_default(),
         );
+        match self.sticker {
+            Some(i) => w.u8(1).u8(i),
+            None => w.u8(0),
+        };
         w.finish()
     }
 
     fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if !(1..=5).contains(&version) {
+        if !(1..=6).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let seq = r.u64()?;
@@ -184,6 +190,11 @@ impl GroupMessage {
         } else {
             None
         };
+        let sticker = if version >= 6 && r.u8()? == 1 {
+            Some(r.u8()?)
+        } else {
+            None
+        };
         r.end()?;
         Ok(Self {
             seq,
@@ -198,6 +209,7 @@ impl GroupMessage {
             edited,
             deleted,
             attachment,
+            sticker,
         })
     }
 }
@@ -1181,6 +1193,7 @@ impl Client {
             edited: false,
             deleted: false,
             attachment: None,
+            sticker: None,
         };
         self.store
             .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;

@@ -168,6 +168,7 @@ fn set_reaction(m: &mut GroupMessage, who: Option<[u8; 64]>, emoji: &str) {
 fn wipe(m: &mut GroupMessage) {
     m.text.clear();
     m.attachment = None;
+    m.sticker = None;
     m.reactions.clear();
     m.deleted = true;
     m.edited = false;

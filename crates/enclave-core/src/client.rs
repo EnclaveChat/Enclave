@@ -118,6 +118,7 @@ mod reports;
 mod search;
 mod sharing;
 mod social;
+mod stickers;
 mod tokens;
 mod usernames;
 
@@ -134,6 +135,7 @@ pub use polls::{MAX_OPTIONS, PollView};
 pub use prefs::{ConvPrefs, MAX_PINNED_CONVERSATIONS};
 pub use search::{Hit, Place};
 pub use social::{MAX_HOLDERS, words_from_shares};
+pub use stickers::{InstalledPack, MAX_STICKERS, PACK_MIME, StickerPack};
 pub use usernames::AUDIT_EVERY_SECS;
 
 /// Something the UI should show.

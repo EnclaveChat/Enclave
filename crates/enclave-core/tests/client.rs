@@ -1778,6 +1778,73 @@ async fn pre_rekey_pq_step() {
     );
 }
 
+/// Stickers: Ada makes a pack and sends a sticker to Mo and to a group;
+/// Mo and Jo decode the same picture from the pack and can add it.
+#[tokio::test(flavor = "multi_thread")]
+async fn sticker_packs() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let pics = vec![vec![1u8; 3000], vec![2u8; 5000], vec![3u8; 700]];
+    let pack = ada
+        .create_sticker_pack(" Cats ", pics.clone())
+        .await
+        .unwrap();
+    assert_eq!((pack.title.as_str(), pack.count), ("Cats", 3));
+    assert_eq!(ada.sticker_packs(), vec![pack.clone()]);
+    assert!(
+        ada.send_sticker(&mo.root(), &pack.key, 3).await.is_err(),
+        "no fourth"
+    );
+
+    let sent = ada.send_sticker(&mo.root(), &pack.key, 1).await.unwrap();
+    mo.sync().await.unwrap();
+    let got = mo
+        .messages(&ada.root())
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == sent.id)
+        .expect("arrived");
+    assert_eq!(got.sticker, Some(1));
+    let att = got.attachment.clone().unwrap();
+    assert!(!mo.has_sticker_pack(&att));
+    assert_eq!(mo.sticker_picture(&att, 1).await.unwrap(), pics[1]);
+    let added = mo.add_sticker_pack(&att).await.unwrap();
+    assert_eq!(added.title, "Cats");
+    assert!(mo.has_sticker_pack(&att));
+
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    let gs = mo.send_group_sticker(&gid, &added.key, 2).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let at_jo = jo
+        .group_messages(&gid)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == gs.id)
+        .expect("arrived");
+    assert_eq!(at_jo.sticker, Some(2));
+    assert_eq!(
+        jo.sticker_picture(at_jo.attachment.as_ref().unwrap(), 2)
+            .await
+            .unwrap(),
+        pics[2]
+    );
+}
+
 /// Files in groups: sealed chunks on the sender's server, a reference in
 /// the group message; every member downloads and verifies the same bytes.
 #[tokio::test(flavor = "multi_thread")]

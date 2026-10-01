@@ -71,6 +71,8 @@ pub struct Message {
     /// A shared place. Kept in the message record itself, so it is
     /// sealed and shredded with it.
     pub location: Option<Location>,
+    /// A sticker: its index in the pack, which is `attachment`.
+    pub sticker: Option<u8>,
 }
 
 impl Message {
@@ -90,12 +92,13 @@ impl Message {
             expires_secs: 0,
             expires_at: None,
             location: None,
+            sticker: None,
         }
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(3).u64(self.seq).fixed(&self.id);
+        w.u8(4).u64(self.seq).fixed(&self.id);
         w.u8(u8::from(self.outgoing))
             .u8(u8::from(self.delivered))
             .u8(u8::from(self.read))
@@ -123,13 +126,17 @@ impl Message {
                 .map(Location::encode)
                 .unwrap_or_default(),
         );
+        match self.sticker {
+            Some(i) => w.u8(1).u8(i),
+            None => w.u8(0),
+        };
         w.finish()
     }
 
     pub(crate) fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if version != 2 && version != 3 {
+        if !(2..=4).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let s = |r: &mut Reader<'_>, n| {
@@ -165,6 +172,11 @@ impl Message {
         } else {
             None
         };
+        let sticker = if version >= 4 && r.u8()? == 1 {
+            Some(r.u8()?)
+        } else {
+            None
+        };
         r.end()?;
         Ok(Self {
             seq,
@@ -181,6 +193,7 @@ impl Message {
             expires_secs,
             expires_at,
             location,
+            sticker,
         })
     }
 
@@ -646,6 +659,17 @@ impl Client {
                     self.queue_pq_reply(root)?;
                 }
             }
+            Content::Sticker {
+                id,
+                pack,
+                index,
+                expires,
+            } => {
+                if let Some(ev) = self.on_sticker(root, id, &pack, index, expires, false, now)? {
+                    self.bump_unread(root)?;
+                    events.push(ev);
+                }
+            }
             Content::ContactShare { id, card } => {
                 if let Some(ev) = self.on_contact_share(root, id, &card, false, now)? {
                     self.bump_unread(root)?;
@@ -774,6 +798,14 @@ impl Client {
             Content::ContactShare { id, card } => {
                 events.extend(self.on_contact_share(to, id, &card, true, now)?);
             }
+            Content::Sticker {
+                id,
+                pack,
+                index,
+                expires,
+            } => {
+                events.extend(self.on_sticker(to, id, &pack, index, expires, true, now)?);
+            }
             Content::Location {
                 id,
                 location,
@@ -804,6 +836,7 @@ impl Client {
 pub(crate) fn wipe(m: &mut Message) {
     m.deleted = true;
     m.location = None;
+    m.sticker = None;
     m.text.clear();
     m.attachment = None;
     m.reactions.clear();

@@ -132,8 +132,14 @@ pub fn decode(bytes: &[u8]) -> Result<Rgba> {
 
 /// Re-encode a picture for sending (see the crate docs).
 pub fn sanitize(bytes: &[u8]) -> Result<Sanitized> {
+    sanitize_max(bytes, MAX_SIDE)
+}
+
+/// [`sanitize`], shrunk to at most `max_side` pixels on the long side
+/// (stickers).
+pub fn sanitize_max(bytes: &[u8], max_side: u32) -> Result<Sanitized> {
     let img = decode(bytes)?;
-    let img = resize::fit(&img, MAX_SIDE);
+    let img = resize::fit(&img, max_side.clamp(1, MAX_SIDE));
     if img.opaque() {
         let mut out = Vec::new();
         let rgb: Vec<u8> = img

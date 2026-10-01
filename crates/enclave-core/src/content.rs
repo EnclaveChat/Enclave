@@ -144,6 +144,18 @@ pub enum Content {
         /// Answer with a `PqStep` of our own.
         reply: bool,
     },
+    /// A sticker: index `index` in the pack behind the sealed file
+    /// reference `pack`.
+    Sticker {
+        /// Message id.
+        id: MsgId,
+        /// The pack's encoded file reference.
+        pack: Vec<u8>,
+        /// Which sticker.
+        index: u8,
+        /// Disappearing timer (seconds, 0 = off).
+        expires: u32,
+    },
     /// A contact card, shared so the recipient can add that person.
     ContactShare {
         /// Message id.
@@ -188,6 +200,7 @@ const K_PIN: u8 = 18;
 const K_CONTACT_SHARE: u8 = 19;
 const K_LOCATION: u8 = 20;
 const K_PQ_STEP: u8 = 21;
+const K_STICKER: u8 = 22;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -370,6 +383,21 @@ impl Content {
             Content::PqStep { reply } => {
                 w.u8(K_PQ_STEP).u8(u8::from(*reply));
             }
+            Content::Sticker {
+                id,
+                pack,
+                index,
+                expires,
+            } => {
+                if pack.len() > MAX_ATTACHMENT_REF || *expires > MAX_TIMER {
+                    return too_large;
+                }
+                w.u8(K_STICKER)
+                    .fixed(id)
+                    .bytes(pack)
+                    .u8(*index)
+                    .u32(*expires);
+            }
             Content::ContactShare { id, card } => {
                 if card.len() > MAX_CARD {
                     return too_large;
@@ -461,6 +489,12 @@ impl Content {
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
+            K_STICKER => Content::Sticker {
+                id: r.array()?,
+                pack: r.bytes(MAX_ATTACHMENT_REF)?.to_vec(),
+                index: r.u8()?,
+                expires: timer(r.u32()?)?,
+            },
             K_PQ_STEP => Content::PqStep {
                 reply: match r.u8()? {
                     0 => false,
@@ -561,6 +595,12 @@ mod tests {
                 expires: 3600,
             },
             Content::PqStep { reply: true },
+            Content::Sticker {
+                id: [6; 16],
+                pack: vec![2; 300],
+                index: 3,
+                expires: 0,
+            },
             Content::SelfCopy {
                 to: [9; 64],
                 content: vec![K_TEXT, 0, 0, 0, 0, 0],

@@ -176,6 +176,24 @@ impl Media {
         }
     }
 
+    /// Re-encode a picture at most `side` pixels on the long side (a sticker).
+    pub async fn shrink(&self, bytes: Vec<u8>, side: u16) -> Result<Sanitized, String> {
+        match self.call(MediaOp::Shrink(side), bytes).await? {
+            MediaOut::Sanitized {
+                png,
+                width,
+                height,
+                bytes,
+            } => Ok(Sanitized {
+                format: if png { Format::Png } else { Format::Jpeg },
+                width,
+                height,
+                bytes,
+            }),
+            MediaOut::Rgba { .. } => Err("unexpected reply".into()),
+        }
+    }
+
     /// Decode a picture to at most `side` pixels on the long side.
     pub async fn thumbnail(&self, bytes: Vec<u8>, side: u16) -> Result<Rgba, String> {
         match self.call(MediaOp::Thumbnail(side), bytes).await? {
@@ -201,6 +219,14 @@ fn local(op: MediaOp, bytes: &[u8]) -> Result<MediaOut, String> {
             height: s.height,
             bytes: s.bytes,
         }),
+        MediaOp::Shrink(side) => {
+            enclave_media::sanitize_max(bytes, u32::from(side)).map(|s| MediaOut::Sanitized {
+                png: s.format == Format::Png,
+                width: s.width,
+                height: s.height,
+                bytes: s.bytes,
+            })
+        }
         MediaOp::Thumbnail(side) => {
             enclave_media::thumbnail(bytes, u32::from(side)).map(|t| MediaOut::Rgba {
                 width: t.width,

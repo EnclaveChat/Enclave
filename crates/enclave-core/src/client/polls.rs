@@ -36,6 +36,7 @@ const K_REACT: u8 = 5;
 const K_EDIT: u8 = 6;
 const K_DELETE: u8 = 7;
 const K_ATTACHMENT: u8 = 8;
+const K_STICKER: u8 = 9;
 
 pub(crate) enum Rich {
     Poll {
@@ -75,6 +76,12 @@ pub(crate) enum Rich {
         id: [u8; 16],
         attachment: Vec<u8>,
         caption: String,
+    },
+    /// A sticker (`stickers.rs`): the pack's reference and an index.
+    Sticker {
+        id: [u8; 16],
+        pack: Vec<u8>,
+        index: u8,
     },
 }
 
@@ -127,6 +134,9 @@ impl Rich {
                     .bytes(attachment)
                     .bytes(caption.as_bytes());
             }
+            Rich::Sticker { id, pack, index } => {
+                w.u8(K_STICKER).fixed(id).bytes(pack).u8(*index);
+            }
         }
         w.finish()
     }
@@ -167,6 +177,11 @@ impl Rich {
                 text: get_str(&mut r, MAX_TEXT)?,
             },
             K_DELETE => Rich::Delete { id: r.array()? },
+            K_STICKER => Rich::Sticker {
+                id: r.array()?,
+                pack: r.bytes(MAX_ATTACHMENT_REF)?.to_vec(),
+                index: r.u8()?,
+            },
             K_ATTACHMENT => Rich::Attachment {
                 id: r.array()?,
                 attachment: r.bytes(MAX_ATTACHMENT_REF)?.to_vec(),
@@ -486,6 +501,9 @@ impl Client {
                 attachment,
                 caption,
             } => self.on_group_attachment(gid, from, name, id, &attachment, &caption, now),
+            Rich::Sticker { id, pack, index } => {
+                self.on_group_sticker(gid, from, name, id, &pack, index, now)
+            }
             Rich::Pin { id, on } => {
                 let place = Place::Group(*gid);
                 let known = self.group_messages(gid)?.iter().any(|m| m.id == id);

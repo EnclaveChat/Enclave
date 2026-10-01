@@ -26,6 +26,14 @@ fn handle(req: MediaRequest) -> MediaReply {
             height: s.height,
             bytes: s.bytes,
         }),
+        MediaOp::Shrink(side) => {
+            enclave_media::sanitize_max(&req.bytes, u32::from(side)).map(|s| MediaOut::Sanitized {
+                png: s.format == enclave_media::Format::Png,
+                width: s.width,
+                height: s.height,
+                bytes: s.bytes,
+            })
+        }
         MediaOp::Thumbnail(side) => {
             enclave_media::thumbnail(&req.bytes, u32::from(side)).map(|t| MediaOut::Rgba {
                 width: t.width,
