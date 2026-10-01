@@ -12,7 +12,7 @@
 
 #![allow(clippy::expect_used)]
 
-use enclave_crypto::kem::{MlKemCiphertext, MlKemPublic, MlKemSecret, X448Public, X448Secret};
+use enclave_crypto::kem::{MlKemCiphertext, MlKemPublic, MlKemSecret};
 use enclave_crypto::kmac::Kmac256;
 use enclave_crypto::rng::{HedgedRng, XofRng};
 use enclave_crypto::sig::{CompositeSigningKey, RootPublic, RootSigningKey};
@@ -152,6 +152,7 @@ fn slhdsa_cross_verify() {
 #[cfg(not(windows))]
 #[test]
 fn x448_matches_openssl() {
+    use enclave_crypto::kem::{X448Public, X448Secret};
     use openssl::derive::Deriver;
     use openssl::pkey::{Id, PKey};
     let mut r = rng();
