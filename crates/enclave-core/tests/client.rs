@@ -2111,3 +2111,108 @@ async fn social_recovery() {
         .unwrap();
     assert_eq!(restored.root(), root);
 }
+
+/// A transport that loses every droppable request, as a busy tick would.
+#[derive(Clone)]
+struct NoFreeSlots(LocalTransport);
+
+#[async_trait::async_trait]
+impl enclave_net::transport::Transport for NoFreeSlots {
+    async fn exchange(
+        &self,
+        server: &enclave_net::transport::ServerId,
+        request: Vec<u8>,
+    ) -> enclave_net::Result<Vec<u8>> {
+        self.0.exchange(server, request).await
+    }
+    async fn exchange_droppable(
+        &self,
+        _: &enclave_net::transport::ServerId,
+        _: Vec<u8>,
+    ) -> enclave_net::Result<Vec<u8>> {
+        Err(enclave_net::NetError::Dropped)
+    }
+    async fn server_key(
+        &self,
+        server: &enclave_net::transport::ServerId,
+    ) -> enclave_net::Result<enclave_rpc::ServerKey> {
+        self.0.server_key(server).await
+    }
+    fn now(&self) -> u64 {
+        self.0.now()
+    }
+}
+
+/// Typing indicators (16-features): off by default and both ways; sent as
+/// droppable requests, and a dropped one costs nothing but a token.
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_indicators() {
+    let net = network();
+    let (mut ada, _) = Client::create(memory(), Arc::new(NoFreeSlots(net.clone())), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut mo, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Mo")
+        .await
+        .unwrap();
+    connect(&mut ada, &mut mo).await;
+    async fn sent(s: Option<enclave_core::Sending>) -> Result<(), CoreError> {
+        s.expect("typing indicators are on").await
+    }
+    let typing = |ev: &[Event]| {
+        ev.iter()
+            .filter_map(|e| match e {
+                Event::Typing { on, .. } => Some(*on),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert!(!mo.typing_enabled(), "off by default");
+    assert!(mo.send_typing(&ada.root(), true).await.unwrap().is_none());
+
+    mo.set_typing_enabled(true).unwrap();
+    sent(mo.send_typing(&ada.root(), true).await.unwrap())
+        .await
+        .unwrap();
+    assert!(
+        typing(&ada.sync().await.unwrap()).is_empty(),
+        "Ada has them off, so she doesn't see Mo's"
+    );
+    ada.set_typing_enabled(true).unwrap();
+    sent(mo.send_typing(&ada.root(), true).await.unwrap())
+        .await
+        .unwrap();
+    sent(mo.send_typing(&ada.root(), false).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(typing(&ada.sync().await.unwrap()), vec![true, false]);
+
+    // Ada's transport never has a free slot: hers are all dropped, and the
+    // conversation carries on as if they had never been written.
+    for _ in 0..3 {
+        let r = sent(ada.send_typing(&mo.root(), true).await.unwrap()).await;
+        assert!(matches!(r, Err(CoreError::Net(_))), "dropped: {r:?}");
+    }
+    ada.send_text(&mo.root(), "still here").await.unwrap();
+    let ev = mo.sync().await.unwrap();
+    assert!(typing(&ev).is_empty());
+    assert!(
+        mo.messages(&ada.root())
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "still here")
+    );
+    mo.send_text(&ada.root(), "good").await.unwrap();
+    ada.sync().await.unwrap();
+    assert!(
+        ada.messages(&mo.root())
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "good"),
+        "replies still decrypt after the dropped units"
+    );
+
+    // Blocked contacts get none.
+    mo.block(&ada.root()).await.unwrap();
+    assert!(mo.send_typing(&ada.root(), true).await.unwrap().is_none());
+}

@@ -122,8 +122,10 @@ mod sharing;
 mod social;
 mod stickers;
 mod tokens;
+mod typing;
 mod usernames;
 
+pub use crate::rpc::Sending;
 pub use gossip::{GossipItem, KtAlert};
 pub use groups::{GroupInfo, GroupMessage, GroupReaction};
 pub use guard::RecoveryAlert;
@@ -138,6 +140,7 @@ pub use prefs::{ConvPrefs, MAX_PINNED_CONVERSATIONS};
 pub use search::{Hit, Place};
 pub use social::{MAX_HOLDERS, words_from_shares};
 pub use stickers::{InstalledPack, MAX_STICKERS, PACK_MIME, StickerPack};
+pub use typing::{TYPING_RESERVE, TYPING_SHOW_SECS};
 pub use usernames::AUDIT_EVERY_SECS;
 
 /// Something the UI should show.
@@ -177,6 +180,15 @@ pub enum Event {
         root: [u8; 64],
         /// New timer in seconds (0 = off).
         secs: u32,
+    },
+    /// The contact started or stopped typing (only with typing indicators
+    /// on, [`Client::typing_enabled`]). Show it for a few seconds at most:
+    /// a "stopped" may never arrive.
+    Typing {
+        /// Conversation.
+        root: [u8; 64],
+        /// Typing (else stopped).
+        on: bool,
     },
     /// A device was linked to (or is now talking with) this account.
     DevicesChanged,
@@ -1559,6 +1571,21 @@ impl Client {
     }
 
     async fn send_content(&mut self, root: &[u8; 64], content: &Content, now: u64) -> Result<()> {
+        let (server, h, env) = self.seal_content(root, content, false)?;
+        self.rpc
+            .call_ok(&server, h, &env, now, &mut self.rng)
+            .await?;
+        Ok(())
+    }
+
+    /// Seal `content` for `root`'s devices, spending a write token. A
+    /// `droppable` envelope carries no PQ step: it may never be sent.
+    pub(crate) fn seal_content(
+        &mut self,
+        root: &[u8; 64],
+        content: &Content,
+        droppable: bool,
+    ) -> Result<(ServerId, RequestHeader, Vec<u8>)> {
         if self.is_blocked(root) {
             return Err(CoreError::NotAccepted);
         }
@@ -1592,7 +1619,12 @@ impl Client {
             if refs.is_empty() {
                 return Err(CoreError::NotAccepted);
             }
-            let carrier = refs.iter().position(|s| s.wants_pq_slot());
+            // A dropped unit must not take a PQ step with it.
+            let carrier = if droppable {
+                None
+            } else {
+                refs.iter().position(|s| s.wants_pq_slot())
+            };
             let env = envelope::seal_direct(&mut refs, &bytes, carrier, &mut self.rng)?;
             drop(refs);
             for k in keys {
@@ -1609,10 +1641,7 @@ impl Client {
             mailbox: inbox,
             token,
         };
-        self.rpc
-            .call_ok(&server, h, &env, now, &mut self.rng)
-            .await?;
-        Ok(())
+        Ok((server, h, env))
     }
 
     async fn maintain_prekeys(&mut self, now: u64) -> Result<()> {

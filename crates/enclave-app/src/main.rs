@@ -329,6 +329,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::LoadStickers);
     });
     let t = tx.clone();
+    ui.on_set_typing_setting(move |on| {
+        let _ = t.send(Cmd::TypingSetting(on));
+    });
+    let t = tx.clone();
+    ui.on_draft_changed(move |id, on| {
+        let _ = t.send(Cmd::Typing(id.to_string(), on));
+    });
+    let t = tx.clone();
     let w = ui.as_weak();
     ui.on_create_pack(move |title, paths| {
         let Some(ui) = w.upgrade() else {

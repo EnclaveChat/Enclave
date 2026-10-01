@@ -144,6 +144,12 @@ pub enum Content {
         /// Answer with a `PqStep` of our own.
         reply: bool,
     },
+    /// The sender started (`on`) or stopped typing in this conversation.
+    /// Sent only in cover slots, so it may never arrive (`docs/16-features.md`).
+    Typing {
+        /// Typing (else stopped).
+        on: bool,
+    },
     /// A sticker: index `index` in the pack behind the sealed file
     /// reference `pack`.
     Sticker {
@@ -201,6 +207,7 @@ const K_CONTACT_SHARE: u8 = 19;
 const K_LOCATION: u8 = 20;
 const K_PQ_STEP: u8 = 21;
 const K_STICKER: u8 = 22;
+const K_TYPING: u8 = 23;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -383,6 +390,9 @@ impl Content {
             Content::PqStep { reply } => {
                 w.u8(K_PQ_STEP).u8(u8::from(*reply));
             }
+            Content::Typing { on } => {
+                w.u8(K_TYPING).u8(u8::from(*on));
+            }
             Content::Sticker {
                 id,
                 pack,
@@ -502,6 +512,13 @@ impl Content {
                     _ => return Err(ProtoError::Decode),
                 },
             },
+            K_TYPING => Content::Typing {
+                on: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(ProtoError::Decode),
+                },
+            },
             K_LOCATION => Content::Location {
                 id: r.array()?,
                 location: r.bytes(MAX_LOCATION)?.to_vec(),
@@ -595,6 +612,8 @@ mod tests {
                 expires: 3600,
             },
             Content::PqStep { reply: true },
+            Content::Typing { on: true },
+            Content::Typing { on: false },
             Content::Sticker {
                 id: [6; 16],
                 pack: vec![2; 300],

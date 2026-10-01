@@ -249,6 +249,10 @@ pub struct Snapshot {
     pub can_lock: bool,
     /// Invite links that still work.
     pub invites: u32,
+    /// Typing indicators are on (Settings).
+    pub typing_setting: bool,
+    /// The open conversation's contact is typing.
+    pub typing: bool,
 }
 
 /// UI → vault.
@@ -376,6 +380,10 @@ pub enum Cmd {
     AddPack(String, u64),
     /// Send the UI previews of every added pack's stickers.
     LoadStickers,
+    /// Turn typing indicators on or off.
+    TypingSetting(bool),
+    /// The draft in a conversation changed: non-empty (typing) or not.
+    Typing(String, bool),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -606,7 +614,9 @@ impl Snapshot {
         w.bool(self.locked)
             .str(&self.unlock_error)
             .bool(self.can_lock)
-            .u32(self.invites);
+            .u32(self.invites)
+            .bool(self.typing_setting)
+            .bool(self.typing);
         w.0
     }
 
@@ -779,6 +789,8 @@ impl Snapshot {
             unlock_error: r.str()?,
             can_lock: r.bool()?,
             invites: r.u32()?,
+            typing_setting: r.bool()?,
+            typing: r.bool()?,
         };
         r.end()?;
         Ok(s)
@@ -854,6 +866,8 @@ impl Cmd {
             Cmd::SendSticker(c, p, i) => w.u8(56).str(c).str(p).u32(*i),
             Cmd::AddPack(c, s) => w.u8(57).str(c).u64(*s),
             Cmd::LoadStickers => w.u8(58),
+            Cmd::TypingSetting(on) => w.u8(59).bool(*on),
+            Cmd::Typing(c, on) => w.u8(60).str(c).bool(*on),
         };
         w.0
     }
@@ -924,6 +938,8 @@ impl Cmd {
             56 => Cmd::SendSticker(r.str()?, r.str()?, r.u32()?),
             57 => Cmd::AddPack(r.str()?, r.u64()?),
             58 => Cmd::LoadStickers,
+            59 => Cmd::TypingSetting(r.bool()?),
+            60 => Cmd::Typing(r.str()?, r.bool()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

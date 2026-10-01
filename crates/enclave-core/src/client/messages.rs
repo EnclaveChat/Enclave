@@ -659,6 +659,9 @@ impl Client {
                     self.queue_pq_reply(root)?;
                 }
             }
+            Content::Typing { on } => {
+                events.extend(self.on_typing(root, on));
+            }
             Content::Sticker {
                 id,
                 pack,

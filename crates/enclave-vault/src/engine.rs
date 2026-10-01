@@ -173,6 +173,11 @@ struct Engine {
     meet_error: String,
     meet_done: String,
     restore_error: String,
+    /// Contacts typing, until when (an indicator lasts
+    /// `TYPING_SHOW_SECS` unless renewed: a "stopped" may never arrive).
+    typing_until: HashMap<[u8; 64], std::time::Instant>,
+    /// When we last told each contact we were typing.
+    typing_sent: HashMap<[u8; 64], std::time::Instant>,
     /// The contact whose recovery share is on screen (only while shown).
     reveal_share: Option<[u8; 64]>,
     out: mpsc::UnboundedSender<Out>,
@@ -518,6 +523,8 @@ pub async fn run_with(
         meet_error: String::new(),
         meet_done: String::new(),
         restore_error: String::new(),
+        typing_until: HashMap::new(),
+        typing_sent: HashMap::new(),
         reveal_share: None,
         out,
     };
@@ -544,9 +551,13 @@ pub async fn run_with(
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return };
+                // Keystrokes change nothing the window shows.
+                let quiet = matches!(cmd, Cmd::Typing(..));
                 e.handle(cmd).await;
-                e.push();
-                e.load_media().await;
+                if !quiet {
+                    e.push();
+                    e.load_media().await;
+                }
             }
             _ = tick.tick() => {
                 if e.client.is_some() {
@@ -983,6 +994,8 @@ impl Engine {
                 let Some(root) = self.root_of(&id) else {
                     return;
                 };
+                // The message itself ends their "typing…".
+                self.typing_sent.remove(&root);
                 // Show it as "sending privately" right away.
                 self.push();
                 if let Some(c) = self.client.as_mut()
@@ -1854,6 +1867,44 @@ impl Engine {
                     let _ = c.set_verified(&root, true);
                 }
             }
+            Cmd::TypingSetting(on) => {
+                if let Some(c) = self.client.as_mut() {
+                    let _ = c.set_typing_enabled(on);
+                }
+                self.typing_until.clear();
+                self.typing_sent.clear();
+            }
+            Cmd::Typing(id, on) => {
+                let Some(root) = self.root_of(&id) else {
+                    return;
+                };
+                let now = std::time::Instant::now();
+                let send = if on {
+                    // Renew well within the receiver's display time.
+                    self.typing_sent.get(&root).is_none_or(|t| {
+                        now.duration_since(*t).as_secs() >= enclave_core::TYPING_SHOW_SECS / 2
+                    })
+                } else {
+                    self.typing_sent.contains_key(&root)
+                };
+                if !send {
+                    return;
+                }
+                if on {
+                    self.typing_sent.insert(root, now);
+                } else {
+                    self.typing_sent.remove(&root);
+                }
+                if let Some(c) = self.client.as_mut()
+                    && let Ok(Some(sending)) = c.send_typing(&root, on).await
+                {
+                    // Waits for a cover slot, or is dropped: never hold up
+                    // anything else for it.
+                    tokio::spawn(async move {
+                        let _ = sending.await;
+                    });
+                }
+            }
             Cmd::Privacy(p) => {
                 if let Some(c) = self.client.as_mut() {
                     let _ = c.set_setting("privacy", &[p as u8]);
@@ -2029,6 +2080,21 @@ impl Engine {
                     {
                         self.username_problem = format!("@{address}");
                     }
+                    let now = std::time::Instant::now();
+                    for e in &events {
+                        match e {
+                            Event::Typing { root, on: true } => {
+                                self.typing_until.insert(
+                                    *root,
+                                    now + Duration::from_secs(enclave_core::TYPING_SHOW_SECS),
+                                );
+                            }
+                            Event::Typing { root, on: false } | Event::Message { root, .. } => {
+                                self.typing_until.remove(root);
+                            }
+                            _ => {}
+                        }
+                    }
                     if events.contains(&Event::RemovedFromAccount) {
                         self.status = "This device was removed from your account on another device. It can't get new messages.".into();
                     }
@@ -2137,6 +2203,12 @@ impl Engine {
             })
             .collect();
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
+        s.typing_setting = c.typing_enabled();
+        s.typing = self.selected.is_some_and(|r| {
+            self.typing_until
+                .get(&r)
+                .is_some_and(|t| *t > std::time::Instant::now())
+        });
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.joining = c.joining().into_iter().map(|(_, n)| n).collect();
         s.friends = c

@@ -222,6 +222,8 @@ fn fixture() -> Snapshot {
         unlock_error: String::new(),
         can_lock: true,
         invites: 1,
+        typing_setting: false,
+        typing: false,
     }
 }
 
@@ -717,6 +719,15 @@ fn main() -> Result<(), slint::PlatformError> {
         });
         view::apply(&ui, &vn);
         shot("46-voice-notes-phone", phone);
+        let mut ty = data.clone();
+        ty.typing = true;
+        ty.typing_setting = true;
+        view::apply(&ui, &ty);
+        shot("47-typing-phone", phone);
+        ui.set_sheet(Sheet::Settings);
+        shot("48-typing-setting-phone", phone);
+        ui.set_sheet(Sheet::None);
+        view::apply(&ui, &data);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

@@ -447,14 +447,14 @@ component SwitchRow inherits Rectangle {
     in property <string> detail;
     in property <bool> on;
     callback toggled();
-    min-height: Tokens.space-touch-target-min;
+    min-height: max(Tokens.space-touch-target-min, row.preferred-height);
     accessible-role: checkbox;
     accessible-checked: root.on;
     accessible-label: root.label;
     accessible-description: root.detail;
     accessible-action-default => { root.toggled(); }
     TouchArea { mouse-cursor: pointer; clicked => { root.toggled(); } }
-    HorizontalLayout {
+    row := HorizontalLayout {
         spacing: Tokens.space-m;
         VerticalLayout {
             alignment: center;
@@ -578,6 +578,10 @@ export component AppWindow inherits Window {
     callback add-pack(string, string);
     callback send-sticker(string, string, int);
     callback load-stickers();
+    in property <bool> typing-setting;
+    in property <bool> typing;
+    callback set-typing-setting(bool);
+    callback draft-changed(string, bool);
     callback create-pack(string, string);
     in property <[StickerPackRow]> sticker-packs;
     in property <[StickerCell]> sticker-cells;
@@ -1155,7 +1159,14 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: Tokens.space-xs;
                                 if root.current.kind == 0: Seal { state: root.current.verified ? SealState.checked : SealState.unchecked; size: 16px; }
-                                Caption {
+                                if root.typing && root.current.kind == 0: Caption {
+                                    text: "typing…";
+                                    color: Tokens.pine;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    accessible-label: root.current.name + " is typing";
+                                }
+                                if !(root.typing && root.current.kind == 0): Caption {
                                     text: root.current.kind == 2
                                         ? "Only you, on your devices"
                                         : root.current.kind == 1
@@ -1427,6 +1438,11 @@ export component AppWindow inherits Window {
                             placeholder: root.editing-seq != "" ? "Edit your message" : "Message";
                             text <=> root.draft;
                             horizontal-stretch: 1;
+                            edited => {
+                                if root.current.kind == 0 && root.editing-seq == "" {
+                                    root.draft-changed(root.current-id, root.draft != "");
+                                }
+                            }
                             accepted => {
                                 if root.draft != "" {
                                     if root.editing-seq != "" {
@@ -2076,6 +2092,12 @@ export component AppWindow inherits Window {
                     Secondary { text: option.text; }
                 }
             }
+        }
+        SwitchRow {
+            label: "Typing indicators";
+            detail: "Show people when you're typing, and see when they are. They only replace cover traffic, so they never use more data, and some may not arrive.";
+            on: root.typing-setting;
+            toggled => { root.set-typing-setting(!root.typing-setting); }
         }
         if root.usernames: Rectangle { height: 1px; background: Tokens.hairline; }
         if root.usernames: Body { text: "Username"; font-weight: 600; }

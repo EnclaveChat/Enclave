@@ -18,7 +18,7 @@ Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes whic
 | Voice notes | M6 | Opus, sandboxed decode | `15-client.md` §5 |
 | Video | M9 | AV1 + Opus, own container | `15-client.md` §5 |
 | Files (up to 100 MiB) | M9 | Never previewed; bucketed | `08-envelope.md` §9 |
-| Typing indicators (**off by default**) | M6 | Rides in `Piggyback`; never its own unit | `08-envelope.md` §5.6 |
+| Typing indicators (**off by default**) | M6 | Only in a tick slot that would otherwise carry cover; never adds a unit (§7) | `09-transport.md` §6.7 |
 | Read receipts (optional, batched) | M6 | Batched in `Piggyback` | `05-ratchet.md` §12 |
 | Encrypted profile (name, photo, about) | M6 | Shared only inside sessions | `05-ratchet.md` §12 |
 | Usernames | M6 | Optional; KT-backed; "public, like an email address" | `12-servers.md` §3.3 |
@@ -76,6 +76,19 @@ Local only, in the app (`enclave-app/ui/app.slint`, sheet `gallery`): the conver
 ## 5. As implemented: stickers
 
 `enclave-core/src/client/stickers.rs`. A pack is a title (at most 64 B) and 1 to 40 pictures, encoded `"ESP1" ‖ bytes(title) ‖ u8 n ‖ n × bytes(picture)` (at most 512 KiB each, 8 MiB in all), and sealed like any file (`08-envelope.md` §9): chunks padded to a size bucket at random IDs on its creator's server, under a key only holders of the reference have. That reference is the "pack secret". The app redraws each picture in `mediad` first (`MediaOp::Shrink`: at most 512 px a side, metadata gone). Sending a sticker sends the reference and an index: `Content::Sticker` (content kind 22, with the conversation's timer) or, in a group, `FLAG_RICH` kind 9. The server sees an ordinary unit. A recipient downloads the whole pack once (every chunk of its bucket, hash-checked), decodes the one picture in `mediad`, and can **Add pack**; added packs are listed per device. The app's sticker button opens a picker of added packs (thumbnails decoded in `mediad`) and **Make a pack** from picture files. Tests `sticker_packs` and `sticker_pack_through_the_engine`. Not done: animated stickers (they would be short AV1 clips), removing a pack from the app, and a pack's own preview before adding it.
+
+## 7. As implemented: typing indicators
+
+`enclave-core/src/client/typing.rs`; 1:1 conversations only.
+
+- **Off by default, and both ways**: Settings → Typing indicators. With them off we send none and show none.
+- **Wire**: `Content::Typing { on }` (content kind 23), sealed like any message. The spec said typing would ride in `Piggyback`, inside a real message's padding, but you type *before* there is a message to ride on, so that can't work. Instead each indicator is its own unit sent with `Transport::exchange_droppable`: it may take only a slot of the next two ticks that would otherwise carry cover, and is dropped if none is free. The pattern on the wire is the same with typing indicators on or off, which is what "never its own unit" was protecting.
+- **What a dropped one costs**: the write token it spent (the contact's server never sees it), and one skipped message key on the receiving side, which the ratchet already handles as a lost message. It carries **no PQ slot**, so a dropped unit never loses a PQ step, and **no self-copy**, so our other devices don't learn we were typing.
+- **Tokens**: none is sent while the contact has given us `TYPING_RESERVE` (8) write tokens or fewer, so real messages always have tokens left.
+- **Timing**: the app sends "typing" when the draft becomes non-empty and repeats it at most every 5 s while the person types, and sends "stopped" when the draft is cleared. A message itself ends the indicator. The receiving app shows "typing…" under the name for `TYPING_SHOW_SECS` (10 s) after the last one, since a "stopped" may never arrive. The sending is detached from the vault's command loop, so waiting for a slot never delays anything else.
+- **Not built**: typing indicators in groups.
+
+Test `typing_indicators` (`crates/enclave-core/tests/client.rs`): off by default, both ways; on and off arrive in order; with a transport that drops every droppable request, the conversation continues normally afterwards; blocked contacts get none. Screenshots 47–48.
 
 ## Open questions
 

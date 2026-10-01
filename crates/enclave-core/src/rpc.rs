@@ -20,6 +20,10 @@ pub(crate) struct Reply {
 /// Proof-of-work efforts tried in order when a server asks for more.
 pub(crate) const EFFORT_LADDER: [u32; 7] = [8, 16, 64, 256, 1024, 4096, 16_384];
 
+/// A sealed request on its way: resolves once it was sent and answered,
+/// or dropped.
+pub type Sending = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
 pub(crate) struct Rpc {
     transport: Arc<dyn Transport>,
     keys: HashMap<ServerId, ServerKey>,
@@ -93,6 +97,31 @@ impl Rpc {
             return Err(CoreError::Server(r.status));
         }
         Ok(r)
+    }
+
+    /// Seal a write that may be dropped rather than add traffic
+    /// ([`Transport::exchange_droppable`]), and return the sending as a
+    /// future that borrows nothing, so the caller needn't wait for a slot.
+    pub async fn prepare_droppable(
+        &mut self,
+        server: &ServerId,
+        h: RequestHeader,
+        env: &[u8],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Sending> {
+        let key = self.key(server, now).await?;
+        let (bytes, ex) = enclave_rpc::seal_request(&key, &h, env, rng)?;
+        let transport = Arc::clone(&self.transport);
+        let server = *server;
+        Ok(Box::pin(async move {
+            let reply = transport.exchange_droppable(&server, bytes).await?;
+            let (rh, _) = ex.open_reply(&reply)?;
+            match Status::from_u8(rh.flags) {
+                Status::Ok => Ok(()),
+                s => Err(CoreError::Server(s)),
+            }
+        }))
     }
 
     async fn dir(

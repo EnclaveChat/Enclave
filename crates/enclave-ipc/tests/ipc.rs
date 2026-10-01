@@ -122,6 +122,8 @@ fn snapshot() -> Snapshot {
         unlock_error: "no".into(),
         can_lock: true,
         invites: 2,
+        typing_setting: true,
+        typing: true,
     }
 }
 
@@ -156,6 +158,8 @@ fn cmds() -> Vec<Cmd> {
         Cmd::SendSticker("a".into(), "p".into(), 2),
         Cmd::AddPack("a".into(), 5),
         Cmd::LoadStickers,
+        Cmd::TypingSetting(true),
+        Cmd::Typing("c1".into(), false),
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),
