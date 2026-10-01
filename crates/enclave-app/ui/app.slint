@@ -32,6 +32,7 @@ export struct ContactRow {
     pinned: bool,
     muted: bool,
     archived: bool,
+    blocked: bool,
 }
 
 export struct PickRow {
@@ -281,7 +282,7 @@ component ContactItem inherits Rectangle {
             HorizontalLayout {
                 spacing: Tokens.space-s;
                 Text {
-                    text: root.item.state == 1 ? "Wants to talk" : root.item.state == 0 ? "Waiting for them to accept" : root.item.preview;
+                    text: root.item.blocked ? "Blocked" : root.item.state == 1 ? "Wants to talk" : root.item.state == 0 ? "Waiting for them to accept" : root.item.preview;
                     font-size: Tokens.type-secondary;
                     color: Tokens.text-muted;
                     overflow: elide;
@@ -436,6 +437,7 @@ export component AppWindow inherits Window {
     in property <[ContactRow]> archived;
     in-out property <bool> show-archived;
     callback conv-prefs(string, bool, bool, bool);
+    callback block(string, bool);
     in property <[MessageRow]> messages;
     in-out property <string> current-id;
     in property <ContactRow> current;
@@ -1113,6 +1115,12 @@ export component AppWindow inherits Window {
                                 alignment: start;
                                 PrimaryButton { text: "Accept"; clicked => { root.accept(root.current-id); } }
                                 QuietButton { text: "Delete"; danger: true; clicked => { root.decline(root.current-id); } }
+                                QuietButton {
+                                    text: "Block";
+                                    danger: true;
+                                    accessible-label: "Block " + root.current.name;
+                                    clicked => { root.block(root.current-id, true); }
+                                }
                             }
                         }
                     }
@@ -1218,7 +1226,20 @@ export component AppWindow inherits Window {
                     horizontal-alignment: center;
                     wrap: word-wrap;
                 }
-                if root.current.state == 2: Rectangle {
+                if root.current.blocked: Rectangle {
+                    VerticalLayout {
+                        padding: Tokens.space-m;
+                        Notice {
+                            title: "You blocked " + root.current.name;
+                            text: "They can't send you messages, and they aren't told. Anything they send is dropped.";
+                            HorizontalLayout {
+                                alignment: start;
+                                QuietButton { text: "Unblock"; outlined: true; clicked => { root.block(root.current-id, false); } }
+                            }
+                        }
+                    }
+                }
+                if root.current.state == 2 && !root.current.blocked: Rectangle {
                     HorizontalLayout {
                         padding: Tokens.space-m;
                         spacing: Tokens.space-s;
@@ -1393,10 +1414,20 @@ export component AppWindow inherits Window {
         }
         if root.current.kind == 0: HorizontalLayout {
             alignment: start;
+            spacing: Tokens.space-s;
             QuietButton {
                 text: root.timer > 0 ? "Disappearing messages: on" : "Disappearing messages: off";
                 outlined: true;
                 clicked => { root.open-sheet(Sheet.timer); }
+            }
+            QuietButton {
+                text: root.current.blocked ? "Unblock" : "Block";
+                danger: !root.current.blocked;
+                accessible-label: (root.current.blocked ? "Unblock " : "Block ") + root.current.name;
+                clicked => {
+                    root.block(root.current-id, !root.current.blocked);
+                    root.sheet = Sheet.none;
+                }
             }
         }
     }

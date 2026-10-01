@@ -96,6 +96,7 @@ impl Contact {
 }
 
 mod backup;
+mod blocks;
 mod devices;
 mod gossip;
 mod group_edits;
@@ -1029,6 +1030,7 @@ impl Client {
             .filter(|c| {
                 c.state == ContactState::Accepted && c.received_since_refill >= REFILL_AFTER + 4
             })
+            .filter(|c| !self.is_blocked(&c.root))
             .map(|c| (c.root, refill_size(c.received_since_refill)))
             .collect();
         for (root, n) in due {
@@ -1232,6 +1234,13 @@ impl Client {
             return Err(ProtoError::Decode.into());
         };
         let root = resp.identity.root;
+        if self.is_blocked(&root) {
+            // Spend the prekey and remember the message, but keep nothing.
+            self.store
+                .put(NS_REPLAY, &rid, &now.to_be_bytes(), &mut self.rng)?;
+            self.save_prekeys()?;
+            return Ok(None);
+        }
         let card = ContactCard::decode(&card).ok().filter(|c| c.root == root);
         // A group introduction is accepted automatically, but only from a
         // current member of a group we are in.
@@ -1369,6 +1378,9 @@ impl Client {
             let s = s.clone();
             self.save_session(&root, &dev, &s)?;
         }
+        if self.is_blocked(&root) {
+            return Ok(Vec::new()); // dropped without a trace
+        }
         let (content, gossip) = gossip::unwrap(&content)?;
         if root != self.account.root_public.0 {
             self.on_gossip(&root, &gossip)?;
@@ -1496,6 +1508,9 @@ impl Client {
     }
 
     async fn send_content(&mut self, root: &[u8; 64], content: &Content, now: u64) -> Result<()> {
+        if self.is_blocked(root) {
+            return Err(CoreError::NotAccepted);
+        }
         let bytes = content.encode()?;
         // Key-transparency gossip rides in space the envelope pads anyway.
         let items = self.gossip_items();

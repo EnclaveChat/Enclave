@@ -91,6 +91,7 @@ fn row(r: &Row) -> ContactRow {
         pinned: r.pinned,
         muted: r.muted,
         archived: r.archived,
+        blocked: r.blocked,
     }
 }
 

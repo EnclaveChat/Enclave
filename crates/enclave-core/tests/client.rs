@@ -1482,6 +1482,50 @@ async fn group_reactions_edits_deletes() {
     }
 }
 
+/// Blocking: the blocked contact's tokens are revoked at our server, so
+/// their writes fail; nothing from them shows. Unblocking sends fresh
+/// tokens and the conversation works again.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_and_unblock() {
+    let net = network();
+    let (mut ada, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut mo, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Mo")
+        .await
+        .unwrap();
+    connect(&mut ada, &mut mo).await;
+    let count = |c: &Client, root: &[u8; 64]| c.messages(root).unwrap().len();
+
+    ada.block(&mo.root()).await.unwrap();
+    assert!(ada.is_blocked(&mo.root()));
+    assert_eq!(ada.blocked(), vec![mo.root()]);
+    assert!(
+        ada.send_text(&mo.root(), "hi").await.is_err(),
+        "we can't write either"
+    );
+    let before = count(&ada, &mo.root());
+    assert!(
+        mo.send_text(&ada.root(), "are you there?").await.is_err(),
+        "their tokens were revoked at Ada's server"
+    );
+    let ev = ada.sync().await.unwrap();
+    assert!(ev.is_empty(), "nothing from them: {ev:?}");
+    assert_eq!(count(&ada, &mo.root()), before);
+
+    ada.unblock(&mo.root()).await.unwrap();
+    assert!(!ada.is_blocked(&mo.root()));
+    mo.sync().await.unwrap(); // fresh tokens
+    mo.send_text(&ada.root(), "hello again").await.unwrap();
+    ada.sync().await.unwrap();
+    assert!(
+        ada.messages(&mo.root())
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "hello again")
+    );
+}
+
 /// Archive, pin to the top and mute: local to this device. A new message
 /// brings an archived conversation back unless it is muted; at most four
 /// conversations are pinned.

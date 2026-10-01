@@ -20,6 +20,7 @@ fn snapshot() -> Snapshot {
         pinned: true,
         muted: true,
         archived: false,
+        blocked: true,
     };
     Snapshot {
         my_name: "Robin".into(),
@@ -132,6 +133,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::RevealShare(String::new()),
         Cmd::Pin("id".into(), 3, true),
         Cmd::ConvPrefs("id".into(), true, false, true),
+        Cmd::Block("id".into(), true),
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),

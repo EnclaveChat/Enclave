@@ -111,7 +111,9 @@ h_i       = KMAC256(t_i, "", 256, "enclave/v1/tokens/hash")              # what 
 - **Use.** A `Write` carries `t_i` in the header's token field. The server computes `h_i`, accepts the write only if `h_i` is registered, and deletes it (burns it). Reuse gets `Denied` (RT-24). The server cannot tell which contact a token belongs to, and two writes by one contact are unlinkable.
 - Hashing is the only cryptography in a token, so nothing here weakens under a quantum computer.
 
-Not implemented yet: returning the burned token to the owner as a session hint, refill control messages, weekly re-registration under a new address, token hashes bound to the address, revocation on block, and self tokens.
+- **Block** (`enclave-core/src/client/blocks.rs`, RT-25). Tokens are `t_i = KMAC(k_contact, i)` with a counter, so the owner can recompute the hashes it issued. Blocking someone sends `RegisterTokens` with `FLAG_REVOKE` and the hashes of the last 64 tokens issued to them (more than anyone holds: 32 outstanding plus a refill in flight), so their writes to the inbox fail with `Denied`; they get no refills, and they are not told. Anything that still arrives from them is dropped without a trace: messages already in the inbox, a new greeting through the request inbox (its prekey is spent and the replay marker kept, but no contact or session is stored), and their messages, reactions and pins in groups we share (their group state updates still apply, so the membership stays consistent). We can't send to them either. Unblocking sends 32 fresh tokens. The app offers **Block** on a message request and in the conversation sheet, and a blocked conversation shows a notice with **Unblock** instead of the composer. Test `block_and_unblock` checks that the server refuses the blocked contact's write.
+
+Not implemented yet: returning the burned token to the owner as a session hint, refill control messages, weekly re-registration under a new address, token hashes bound to the address, and self tokens.
 
 ## 4. Request inbox
 

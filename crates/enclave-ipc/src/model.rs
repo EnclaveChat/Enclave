@@ -42,6 +42,8 @@ pub struct Row {
     pub muted: bool,
     /// Archived.
     pub archived: bool,
+    /// Blocked.
+    pub blocked: bool,
 }
 
 /// A contact that can be picked for a new group.
@@ -323,6 +325,8 @@ pub enum Cmd {
     Pin(String, u64, bool),
     /// How to list a conversation: id, archived, pinned to the top, muted.
     ConvPrefs(String, bool, bool, bool),
+    /// Block (true) or unblock a contact.
+    Block(String, bool),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -390,7 +394,8 @@ fn put_row(w: &mut Writer, r: &Row) {
         .i32(r.members)
         .bool(r.pinned)
         .bool(r.muted)
-        .bool(r.archived);
+        .bool(r.archived)
+        .bool(r.blocked);
 }
 
 fn get_row(r: &mut Reader<'_>) -> Result<Row> {
@@ -409,6 +414,7 @@ fn get_row(r: &mut Reader<'_>) -> Result<Row> {
         pinned: r.bool()?,
         muted: r.bool()?,
         archived: r.bool()?,
+        blocked: r.bool()?,
     })
 }
 
@@ -744,6 +750,7 @@ impl Cmd {
             Cmd::RevealShare(id) => w.u8(47).str(id),
             Cmd::Pin(c, s, on) => w.u8(48).str(c).u64(*s).bool(*on),
             Cmd::ConvPrefs(c, a, p, m) => w.u8(49).str(c).bool(*a).bool(*p).bool(*m),
+            Cmd::Block(c, on) => w.u8(50).str(c).bool(*on),
         };
         w.0
     }
@@ -801,6 +808,7 @@ impl Cmd {
             47 => Cmd::RevealShare(r.str()?),
             48 => Cmd::Pin(r.str()?, r.u64()?, r.bool()?),
             49 => Cmd::ConvPrefs(r.str()?, r.bool()?, r.bool()?, r.bool()?),
+            50 => Cmd::Block(r.str()?, r.bool()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

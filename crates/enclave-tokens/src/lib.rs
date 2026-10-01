@@ -86,6 +86,15 @@ impl TokenIssuer {
         }
         (toks, hashes)
     }
+
+    /// Hashes of the last `n` tokens issued (fewer if fewer were), to
+    /// revoke them at the server when the contact is blocked.
+    pub fn recent_hashes(&self, n: usize) -> Vec<[u8; 32]> {
+        let from = self.next.saturating_sub(n as u64);
+        (from..self.next)
+            .map(|i| token_hash(&write_token(&self.k_contact, i)))
+            .collect()
+    }
 }
 
 /// Mix `real` token hashes with `dummies` random hashes and shuffle, so the
@@ -185,6 +194,8 @@ mod tests {
         let batch = registration_batch(&h, 22, &mut rng).unwrap();
         assert_eq!(batch.len(), 32);
         assert!(h.iter().all(|x| batch.contains(x)));
+        assert_eq!(iss.recent_hashes(4), h[6..].to_vec());
+        assert_eq!(iss.recent_hashes(50), h, "no more than were issued");
     }
 
     #[test]

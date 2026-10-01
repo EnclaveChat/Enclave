@@ -891,6 +891,36 @@ impl Engine {
                 }
                 self.busy = false;
             }
+            Cmd::Block(id, on) => {
+                let Some(root) = self.root_of(&id) else {
+                    return;
+                };
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let r = if on {
+                    c.block(&root).await
+                } else {
+                    c.unblock(&root).await
+                };
+                if r.is_err() {
+                    self.status = if on {
+                        "Blocked on this device, but couldn't reach your server to stop their messages. We'll drop anything they send."
+                    } else {
+                        "Unblocked, but couldn't send them a way to write to you yet. Check your connection."
+                    }
+                    .into();
+                }
+                if on && self.selected == Some(root) {
+                    // A request we blocked goes away.
+                    let request = c
+                        .contact(&root)
+                        .is_some_and(|ct| ct.state == ContactState::Request);
+                    if request {
+                        self.selected = None;
+                    }
+                }
+            }
             Cmd::ConvPrefs(id, archived, pinned, muted) => {
                 let place = match (self.root_of(&id), self.group_of(&id)) {
                     (Some(r), _) => Place::Contact(r),
@@ -1615,6 +1645,10 @@ impl Engine {
         s.recovery_saved = matches!(c.setting("recovery-saved"), Ok(Some(v)) if v == [1]);
         let mut rows: Vec<(u64, Row)> = Vec::new();
         for ct in c.contacts() {
+            let blocked = c.is_blocked(&ct.root);
+            if blocked && ct.state == ContactState::Request {
+                continue; // a blocked request just goes away
+            }
             let msgs = c.messages(&ct.root).unwrap_or_default();
             let last = msgs.last();
             let join = (ct.state == ContactState::Request)
@@ -1644,6 +1678,7 @@ impl Engine {
                 tint: tint_for(&ct.root),
                 kind: 0,
                 members: 0,
+                blocked,
                 ..prefs_row(c.conv_prefs(&Place::Contact(ct.root)))
             };
             if self.selected == Some(ct.root) {

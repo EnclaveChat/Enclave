@@ -530,6 +530,19 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Conversation);
         shot("38-conversation-sheet-phone", phone);
         ui.set_sheet(Sheet::None);
+        let mut blocked = data.clone();
+        if let Some(r) = blocked.current.as_mut() {
+            r.blocked = true;
+        }
+        if let Some(r) = blocked
+            .contacts
+            .iter_mut()
+            .find(|r| Some(&r.id) == data.current.as_ref().map(|c| &c.id))
+        {
+            r.blocked = true;
+        }
+        view::apply(&ui, &blocked);
+        shot("39-blocked-phone", phone);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

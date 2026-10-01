@@ -972,6 +972,9 @@ impl Client {
             }
             return Ok(Some(Event::GroupChanged { group_id: *gid }));
         }
+        if self.is_blocked(&sender_root) {
+            return Ok(None); // their state updates still apply, above
+        }
         if msg.flags & FLAG_RICH != 0 {
             let name = {
                 let e = self.groups.get(gid).ok_or(CoreError::NotFound)?;

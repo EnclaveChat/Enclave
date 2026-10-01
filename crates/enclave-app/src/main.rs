@@ -310,6 +310,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::Search(q.to_string()));
     });
     let t = tx.clone();
+    ui.on_block(move |id, on| {
+        let _ = t.send(Cmd::Block(id.to_string(), on));
+    });
+    let t = tx.clone();
     ui.on_conv_prefs(move |id, archived, pinned, muted| {
         let _ = t.send(Cmd::ConvPrefs(id.to_string(), archived, pinned, muted));
     });
