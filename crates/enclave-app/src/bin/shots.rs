@@ -543,6 +543,35 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         view::apply(&ui, &blocked);
         shot("39-blocked-phone", phone);
+        let mut notes = data.clone();
+        let row = Row {
+            id: "notes".into(),
+            name: "Note to self".into(),
+            preview: "Passport renewal: book before June".into(),
+            time: "09:12".into(),
+            state: 2,
+            kind: 2,
+            ..Default::default()
+        };
+        notes.contacts.insert(0, row.clone());
+        notes.current = Some(row);
+        notes.messages = [
+            "Wi-Fi at the cabin: ask Priya",
+            "Passport renewal: book before June",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| Msg {
+            text: (*t).into(),
+            outgoing: true,
+            time: if i == 0 { "Mon 18:40" } else { "09:12" }.into(),
+            status: -1,
+            seq: i as u64,
+            ..Default::default()
+        })
+        .collect();
+        view::apply(&ui, &notes);
+        shot("40-notes-phone", phone);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

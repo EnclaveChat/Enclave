@@ -217,7 +217,8 @@ component Bubble inherits HorizontalLayout {
                     color: root.msg.outgoing ? Tokens.meta-on-bubble-out : Tokens.text-muted;
                     vertical-alignment: center;
                 }
-                if root.msg.outgoing: VerticalLayout {
+                // A negative status (notes to self) shows no mark.
+                if root.msg.outgoing && root.msg.status >= 0: VerticalLayout {
                     alignment: center;
                     DeliveryMark { status: root.msg.status; }
                 }
@@ -1002,7 +1003,9 @@ export component AppWindow inherits Window {
                                 spacing: Tokens.space-xs;
                                 if root.current.kind == 0: Seal { state: root.current.verified ? SealState.checked : SealState.unchecked; size: 16px; }
                                 Caption {
-                                    text: root.current.kind == 1
+                                    text: root.current.kind == 2
+                                        ? "Only you, on your devices"
+                                        : root.current.kind == 1
                                         ? root.current.members + " people · Off the record"
                                         : (root.current.met ? "Met in person" : root.current.verified ? "Checked" : "Not checked yet") + " · Off the record";
                                     vertical-alignment: center;
@@ -1083,7 +1086,7 @@ export component AppWindow inherits Window {
                         alignment: end;
                         padding: Tokens.space-m;
                         spacing: Tokens.space-s;
-                        if root.show-delivery-hint && root.current.state == 2: Caption {
+                        if root.show-delivery-hint && root.current.state == 2 && root.current.kind != 2: Caption {
                             text: "Private delivery takes a few seconds. That pause is part of what hides who you talk to.";
                             horizontal-alignment: center;
                             wrap: word-wrap;
@@ -1143,7 +1146,7 @@ export component AppWindow inherits Window {
                         padding-right: Tokens.space-m;
                         padding-top: Tokens.space-s;
                         spacing: Tokens.space-xs;
-                        for e in ["👍", "❤", "😂", "😮", "😢", "🙏"]: Rectangle {
+                        for e in root.current.kind == 2 ? [] : ["👍", "❤", "😂", "😮", "😢", "🙏"]: Rectangle {
                             width: Tokens.space-touch-target-min;
                             height: Tokens.space-touch-target-min;
                             border-radius: Tokens.radius-control;
@@ -1172,7 +1175,7 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         for m in root.messages: HorizontalLayout {
                             spacing: Tokens.space-xs;
-                            if m.seq == root.selected-seq: QuietButton {
+                            if m.seq == root.selected-seq && root.current.kind != 2: QuietButton {
                                 text: m.pinned ? "Unpin" : "Pin";
                                 accessible-label: m.pinned ? "Unpin for everyone" : "Pin for everyone";
                                 clicked => {
@@ -1191,7 +1194,7 @@ export component AppWindow inherits Window {
                             if m.seq == root.selected-seq && m.outgoing && !m.deleted: QuietButton {
                                 text: "Delete";
                                 danger: true;
-                                accessible-label: "Delete for everyone";
+                                accessible-label: root.current.kind == 2 ? "Delete note" : "Delete for everyone";
                                 clicked => {
                                     root.delete-message(root.current-id, m.seq);
                                     root.selected-seq = "";

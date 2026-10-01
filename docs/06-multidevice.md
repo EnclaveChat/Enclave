@@ -65,6 +65,8 @@ ChoosePQCarrier(sessions):
 
 PLAN D5: each message is exactly 2 envelopes, one to the recipient's account inbox and one self-copy to the sender's own account inbox, wrapped for the sender's other devices through their intra-account sessions. The self-copy is sent even for a single-device account (all slots random), so the server sees 2 writes per message regardless of device count. The recipient's envelope and the self-copy are built separately, each with its own body key and slot table, so identical ciphertexts never appear in two inboxes. Self-copies are sent with priority "own-device sync" (`09-transport.md` §6.2).
 
+**Note to self, as implemented** (`enclave-core/src/client/notes.rs`): notes are messages stored under the account's own root in the sealed store, and each one (and each delete) goes to our other devices as `Content::SelfCopy { to: own root, Text | Delete }` over the intra-account sessions. Nothing is written to anyone else's inbox; a single-device account sends nothing at all for a note today (the always-sent self-copy above is not built yet). The app always lists **Note to self** ("Me"), with no delivery marks, reactions or pins, and it can be pinned, muted or archived like any conversation. Notes are not in local search yet. Tested in `link_a_second_device`.
+
 ## 5. Intra-account sessions and sync (not yet implemented)
 
 Every pair of the account's own devices has a Lockstep session, established by EQXDH when a device is linked. Own-device sync carries sent messages, read state, contact and group changes, settings, verification states and fetch positions, but never ratchet state.

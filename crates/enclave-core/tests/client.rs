@@ -580,6 +580,26 @@ async fn link_a_second_device() {
     let ev = a2.sync().await.unwrap();
     assert!(ev.iter().any(|e| matches!(e, Event::Message { message, .. } if message.outgoing && message.text == "and from the first")));
 
+    // Notes to self reach the other device, and so does deleting one;
+    // nothing reaches Ben.
+    assert!(a.send_note("  ").await.is_err(), "empty note");
+    let note = a.send_note("Buy stamps").await.unwrap();
+    let ev = a2.sync().await.unwrap();
+    assert!(ev.contains(&Event::NotesChanged), "{ev:?}");
+    assert_eq!(a2.notes().unwrap()[0].text, "Buy stamps");
+    b.sync().await.unwrap();
+    assert!(
+        b.messages(&a.root())
+            .unwrap()
+            .iter()
+            .all(|m| m.text != "Buy stamps")
+    );
+    let seq = a2.notes().unwrap()[0].seq;
+    a2.delete_note(seq).await.unwrap();
+    a.sync().await.unwrap();
+    let on_first = a.notes().unwrap();
+    assert!(on_first[0].deleted && on_first[0].id == note.id);
+
     // Ada removes the new device. Only the primary can; Ben and the removed
     // device find out, and nothing new reaches it.
     let a2_id = a.devices().iter().find(|d| !d.this_device).unwrap().id;

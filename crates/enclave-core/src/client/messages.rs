@@ -70,7 +70,7 @@ pub struct Message {
 }
 
 impl Message {
-    fn new(seq: u64, id: MsgId, outgoing: bool, at: u64, text: String) -> Self {
+    pub(crate) fn new(seq: u64, id: MsgId, outgoing: bool, at: u64, text: String) -> Self {
         Self {
             seq,
             id,
@@ -629,6 +629,14 @@ impl Client {
         inner: &[u8],
         now: u64,
     ) -> Result<Vec<Event>> {
+        if *to == self.account.root_public.0 {
+            let changed = self.on_note_copy(Content::decode(inner)?, now)?;
+            return Ok(if changed {
+                vec![Event::NotesChanged]
+            } else {
+                Vec::new()
+            });
+        }
         if !self.contacts.contains_key(to) {
             return Ok(Vec::new());
         }
@@ -732,7 +740,7 @@ impl Client {
     }
 }
 
-fn wipe(m: &mut Message) {
+pub(crate) fn wipe(m: &mut Message) {
     m.deleted = true;
     m.text.clear();
     m.attachment = None;

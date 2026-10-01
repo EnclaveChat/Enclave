@@ -107,6 +107,7 @@ mod invites;
 mod link;
 mod meet;
 mod messages;
+mod notes;
 mod pins;
 mod polls;
 mod prefs;
@@ -236,6 +237,8 @@ pub enum Event {
         /// Group.
         group_id: [u8; 32],
     },
+    /// Another of our devices wrote or deleted a note to self.
+    NotesChanged,
     /// A reaction, edit or delete changed a group message.
     GroupMessageChanged {
         /// Group.

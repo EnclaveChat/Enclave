@@ -127,6 +127,8 @@ struct Engine {
     demo: Option<Demo>,
     selected: Option<[u8; 64]>,
     selected_group: Option<[u8; 32]>,
+    /// Note to self is open.
+    selected_notes: bool,
     picked: BTreeSet<[u8; 64]>,
     link_offer: Option<enclave_core::LinkOffer>,
     link_status: String,
@@ -218,6 +220,9 @@ fn mime_for(name: &str) -> &'static str {
 
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
+
+/// The id the UI uses for the note-to-self conversation.
+const NOTES_ID: &str = "notes";
 
 /// How a group message reads in the conversation.
 fn group_text(m: &enclave_core::GroupMessage) -> String {
@@ -429,6 +434,7 @@ pub async fn run_with(
         demo: None,
         selected: None,
         selected_group: None,
+        selected_notes: false,
         picked: BTreeSet::new(),
         link_offer: None,
         link_status: String::new(),
@@ -708,11 +714,26 @@ impl Engine {
             Cmd::Select(id) => {
                 self.selected = self.root_of(&id);
                 self.selected_group = self.group_of(&id);
+                self.selected_notes = id == NOTES_ID;
                 if let (Some(c), Some(r)) = (self.client.as_mut(), self.selected) {
                     let _ = c.mark_read(&r).await;
                 }
                 if let (Some(c), Some(g)) = (self.client.as_mut(), self.selected_group) {
                     let _ = c.mark_group_read(&g);
+                }
+            }
+            Cmd::Send(id, text) if id == NOTES_ID => {
+                if let Some(c) = self.client.as_mut()
+                    && c.send_note(&text).await.is_err()
+                {
+                    self.status = "Couldn't save that note.".into();
+                }
+            }
+            Cmd::Delete(id, seq) if id == NOTES_ID => {
+                if let Some(c) = self.client.as_mut()
+                    && c.delete_note(seq).await.is_err()
+                {
+                    self.status = "Couldn't delete that note.".into();
                 }
             }
             Cmd::Send(id, text) if id.starts_with('g') => {
@@ -925,7 +946,10 @@ impl Engine {
                 let place = match (self.root_of(&id), self.group_of(&id)) {
                     (Some(r), _) => Place::Contact(r),
                     (None, Some(g)) => Place::Group(g),
-                    (None, None) => return,
+                    (None, None) => match self.client.as_ref() {
+                        Some(c) if id == NOTES_ID => Place::Contact(c.root()),
+                        _ => return,
+                    },
                 };
                 let prefs = enclave_core::ConvPrefs {
                     archived,
@@ -1186,6 +1210,7 @@ impl Engine {
                 self.locked = true;
                 self.selected = None;
                 self.selected_group = None;
+                self.selected_notes = false;
                 self.reveal_words = false;
                 self.search.clear();
             }
@@ -1815,6 +1840,33 @@ impl Engine {
             }
             rows.push((last.map(|m| m.at).unwrap_or(0), row));
         }
+        // Note to self: always listed, so it can be found.
+        let notes = c.notes().unwrap_or_default();
+        let last = notes.iter().rev().find(|m| !m.deleted);
+        let row = Row {
+            id: NOTES_ID.into(),
+            name: "Note to self".into(),
+            preview: last
+                .map(|m| m.text.clone())
+                .unwrap_or_else(|| "Write things down for yourself".into()),
+            time: last.map(|m| clock(m.at)).unwrap_or_default(),
+            state: 2,
+            tint: 0,
+            kind: 2,
+            ..prefs_row(c.conv_prefs(&Place::Contact(c.root())))
+        };
+        if self.selected_notes {
+            s.current = Some(row.clone());
+            s.messages = notes
+                .iter()
+                .map(|m| Msg {
+                    can_edit: false,
+                    status: -1, // nothing is delivered anywhere
+                    ..display(m, now)
+                })
+                .collect();
+        }
+        rows.push((last.map(|m| m.at).unwrap_or(0), row));
         // Pinned first, then newest first.
         rows.sort_by(|a, b| b.1.pinned.cmp(&a.1.pinned).then(b.0.cmp(&a.0)));
         for (_, r) in rows {

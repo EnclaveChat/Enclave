@@ -78,7 +78,12 @@ fn row(r: &Row) -> ContactRow {
     ContactRow {
         id: r.id.clone().into(),
         name: r.name.clone().into(),
-        initials: initials(&r.name).into(),
+        // Note to self is "Me".
+        initials: if r.kind == 2 {
+            "Me".into()
+        } else {
+            initials(&r.name).into()
+        },
         tint: tint(r.tint),
         preview: r.preview.clone().into(),
         time: r.time.clone().into(),
