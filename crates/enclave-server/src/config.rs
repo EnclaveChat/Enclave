@@ -104,16 +104,11 @@ impl Default for PolicySection {
 pub struct KtSection {
     /// Run a key-transparency log (usernames).
     pub enabled: bool,
-    /// Seconds between epochs.
-    pub epoch_secs: u64,
 }
 
 impl Default for KtSection {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            epoch_secs: 600,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -208,9 +203,6 @@ impl FileConfig {
             return Err(ConfigError(
                 "policy.ttl_days and inbox_quota must be positive".into(),
             ));
-        }
-        if self.kt.epoch_secs < 10 {
-            return Err(ConfigError("kt.epoch_secs must be at least 10".into()));
         }
         Ok(())
     }

@@ -19,6 +19,9 @@ async-trait = "0.1"
 thiserror = "2"
 protobuf = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+redb = "4.3.0"
 
 [dev-dependencies]
+# akd's storage-layer test suite, run against `KtStore`.
+akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf", "public_tests"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

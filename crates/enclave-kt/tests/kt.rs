@@ -25,7 +25,7 @@ async fn cosign_all(
             .cosign(log.public_key(), &heads, proof.clone(), NOW + 5, rng)
             .await
             .unwrap();
-        log.add_cosignature(latest, c);
+        log.add_cosignature(latest, c).unwrap();
     }
 }
 

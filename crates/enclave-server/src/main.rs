@@ -18,6 +18,7 @@
 //! start, nothing persisted. It is what a bare `enclave-server [ADDR]`
 //! runs, for local development and the test suites.
 
+use enclave_kt::{KtService, KtStore};
 use enclave_server::config::FileConfig;
 use enclave_server::db::Db;
 use enclave_server::keys::ServerKeys;
@@ -115,25 +116,37 @@ fn db_path(cfg: &FileConfig) -> PathBuf {
     cfg.server.data_dir.join("server.redb")
 }
 
-/// Write `server-<unix time>.redb` into `dir` and keep the newest `keep`.
-fn snapshot(db: &Db, dir: &Path, keep: usize) -> Result<PathBuf, String> {
+fn kt_path(cfg: &FileConfig) -> PathBuf {
+    cfg.server.data_dir.join("kt.redb")
+}
+
+/// Write `server-<unix time>.redb` (and `kt-<unix time>.redb`) into `dir`
+/// and keep the newest `keep` of each.
+fn snapshot(db: &Db, kt: Option<&KtStore>, dir: &Path, keep: usize) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("server-{}.redb", now()));
+    let t = now();
+    let path = dir.join(format!("server-{t}.redb"));
     db.snapshot(&path).map_err(|e| e.to_string())?;
-    let mut old: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("server-") && n.ends_with(".redb"))
-        })
-        .collect();
-    old.sort();
-    while old.len() > keep.max(1) {
-        let p = old.remove(0);
-        let _ = std::fs::remove_file(p);
+    if let Some(kt) = kt {
+        kt.snapshot(&dir.join(format!("kt-{t}.redb")))
+            .map_err(|e| e.to_string())?;
+    }
+    for prefix in ["server-", "kt-"] {
+        let mut old: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".redb"))
+            })
+            .collect();
+        old.sort();
+        while old.len() > keep.max(1) {
+            let p = old.remove(0);
+            let _ = std::fs::remove_file(p);
+        }
     }
     Ok(path)
 }
@@ -147,7 +160,12 @@ fn backup_now(args: &[String]) -> Result<(), String> {
     // redb allows one process per file: this works only while `run` is
     // stopped; a running server takes its own snapshots (`[backup]`).
     let db = Db::open(&db_path(&cfg)).map_err(|e| e.to_string())?;
-    let p = snapshot(&db, Path::new(dir), usize::MAX)?;
+    let kt = if kt_path(&cfg).exists() {
+        Some(KtStore::open(&kt_path(&cfg)).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let p = snapshot(&db, kt.as_ref(), Path::new(dir), usize::MAX)?;
     println!("{}", p.display());
     Ok(())
 }
@@ -184,19 +202,43 @@ async fn run(args: &[String]) -> Result<(), String> {
     let db = Db::open(&db_path(&cfg)).map_err(|e| e.to_string())?;
     let mut server =
         Server::open(cfg.policy(id), db, keys.chain.keys()).map_err(|e| e.to_string())?;
-    if cfg.kt.enabled {
-        match enclave_kt::KtService::start_dev(id, &cfg.server.domain) {
-            Ok((kt, policy)) => {
-                server.enable_kt(kt);
-                let _ = std::fs::create_dir_all(&cfg.server.public_dir);
-                let pins = cfg.server.public_dir.join("kt-pins.bin");
-                if let Err(e) = std::fs::write(&pins, policy.encode()) {
-                    eprintln!("couldn't write {}: {e}", pins.display());
-                }
-            }
-            Err(e) => eprintln!("usernames disabled: {e}"),
+    // The username log: its own file, the same head key and VRF secret
+    // every run, so what clients pin stays valid. Witnesses are other
+    // operators' services (`docs/12-servers.md` §3.3); until they are
+    // configured, heads carry no cosignatures and clients refuse lookups.
+    let kt_store = if cfg.kt.enabled {
+        // Clients never count a witness run by the log's own operator, so
+        // the log has to say who runs it.
+        if cfg.server.operator.is_empty() {
+            return Err("set server.operator (key transparency names the operator)".into());
         }
-    }
+        let store = KtStore::open(&kt_path(&cfg)).map_err(|e| e.to_string())?;
+        let kt = KtService::open(
+            store.clone(),
+            id,
+            &cfg.server.domain,
+            &cfg.server.operator,
+            keys.kt_head_copy().map_err(|e| e.to_string())?,
+            *keys.kt_vrf,
+            Vec::new(),
+            now(),
+        )
+        .map_err(|e| format!("key transparency: {e}"))?;
+        let policy = enclave_kt::KtPolicy {
+            servers: vec![kt.info().clone()],
+            witnesses: enclave_kt::WitnessPolicy {
+                witnesses: Vec::new(),
+                threshold: 1,
+            },
+        };
+        server.enable_kt(kt);
+        std::fs::create_dir_all(&cfg.server.public_dir).map_err(|e| e.to_string())?;
+        let pins = cfg.server.public_dir.join("kt-pins.bin");
+        std::fs::write(&pins, policy.encode()).map_err(|e| format!("{}: {e}", pins.display()))?;
+        Some(store)
+    } else {
+        None
+    };
     eprintln!(
         "enclave-server {} ({}) listening on {}",
         hex(&id),
@@ -235,12 +277,13 @@ async fn run(args: &[String]) -> Result<(), String> {
         let server = Arc::clone(&server);
         let every = Duration::from_secs(cfg.backup.interval_hours.max(1) * 3600);
         let keep = cfg.backup.keep;
+        let kt = kt_store.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(every);
             loop {
                 tick.tick().await;
                 let s = server.lock().await;
-                match snapshot(s.db(), &dir, keep) {
+                match snapshot(s.db(), kt.as_ref(), &dir, keep) {
                     Ok(p) => eprintln!("backup written: {}", p.display()),
                     Err(e) => eprintln!("backup failed: {e}"),
                 }

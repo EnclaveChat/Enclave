@@ -13,6 +13,7 @@
 
 use crate::head::WitnessPolicy;
 use crate::log::{KtLog, Witness};
+use crate::store::KtStore;
 use crate::wire::{KtInfo, KtPolicy, LookupReply};
 use crate::{KtError, Result};
 use enclave_crypto::rng::HedgedRng;
@@ -40,11 +41,24 @@ enum Job {
 pub struct KtService {
     tx: mpsc::Sender<Job>,
     info: KtInfo,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for KtService {
+    /// Stop the log's thread and wait for it, so its store is closed (and
+    /// can be opened again) when this returns.
+    fn drop(&mut self) {
+        let (dead, _) = mpsc::channel();
+        drop(std::mem::replace(&mut self.tx, dead));
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 impl KtService {
-    /// Start a log for `server`. `vrf_secret` must stay fixed for the life of
-    /// the log.
+    /// Start a log for `server` in memory. `vrf_secret` must stay fixed for
+    /// the life of the log.
     pub fn start(
         server: [u8; 16],
         domain: &str,
@@ -53,16 +67,47 @@ impl KtService {
         vrf_secret: [u8; 32],
         witnesses: Vec<Witness>,
     ) -> Result<Self> {
+        Self::open(
+            KtStore::memory()?,
+            server,
+            domain,
+            operator,
+            signing,
+            vrf_secret,
+            witnesses,
+            0,
+        )
+    }
+
+    /// Run the log kept in `store` (see [`KtLog::open`]): the same server,
+    /// head key and VRF secret every time, so clients' pins survive a
+    /// restart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(
+        store: KtStore,
+        server: [u8; 16],
+        domain: &str,
+        operator: &str,
+        signing: CompositeSigningKey,
+        vrf_secret: [u8; 32],
+        witnesses: Vec<Witness>,
+        now: u64,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Job>();
         let (init_tx, init_rx) = mpsc::channel();
         let head_key = signing.public().clone();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("enclave-kt".into())
-            .spawn(move || run(server, signing, vrf_secret, witnesses, rx, init_tx))
+            .spawn(move || {
+                run(
+                    store, server, signing, vrf_secret, witnesses, now, rx, init_tx,
+                )
+            })
             .map_err(|e| KtError::Directory(e.to_string()))?;
         let vrf_public = init_rx.recv().map_err(|_| KtError::Stopped)??;
         Ok(Self {
             tx,
+            thread: Some(thread),
             info: KtInfo {
                 server,
                 domain: domain.to_string(),
@@ -204,11 +249,14 @@ impl KtService {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
+    store: KtStore,
     server: [u8; 16],
     signing: CompositeSigningKey,
     vrf_secret: [u8; 32],
     mut witnesses: Vec<Witness>,
+    now: u64,
     rx: mpsc::Receiver<Job>,
     init: mpsc::Sender<Result<Vec<u8>>>,
 ) {
@@ -230,7 +278,9 @@ fn run(
             return;
         }
     };
-    let mut log = match rt.block_on(KtLog::new(server, signing, vrf_secret)) {
+    let mut log = match rt.block_on(KtLog::open(
+        store, server, signing, vrf_secret, now, &mut rng,
+    )) {
         Ok(l) => l,
         Err(e) => {
             let _ = init.send(Err(e));
@@ -240,8 +290,18 @@ fn run(
     if init.send(Ok(log.vrf_public().to_vec())).is_err() {
         return;
     }
-    // Last epoch each witness cosigned.
-    let mut last: Vec<Option<u64>> = vec![None; witnesses.len()];
+    // Last epoch each witness cosigned (remembered across restarts by
+    // witnesses with a store).
+    let mut last: Vec<Option<u64>> = witnesses.iter().map(|w| w.last_epoch(&server)).collect();
+    // Heads signed while a witness was unreachable (or before a restart)
+    // get their cosignatures now.
+    rt.block_on(cosign_all(
+        &mut log,
+        &mut witnesses,
+        &mut last,
+        now,
+        &mut rng,
+    ));
     while let Ok(job) = rx.recv() {
         match job {
             Job::Publish {
@@ -298,8 +358,10 @@ async fn cosign_all(
             None => (log.heads_after(epoch.saturating_sub(1), epoch), None),
         };
         if let Ok(c) = w.cosign(&server_key, &heads, proof, now, rng).await {
-            log.add_cosignature(epoch, c);
             *seen = Some(epoch);
+            if let Err(e) = log.add_cosignature(epoch, c) {
+                eprintln!("enclave-kt: couldn't store a cosignature: {e}");
+            }
         }
     }
 }

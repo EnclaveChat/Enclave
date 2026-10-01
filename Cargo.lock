@@ -175,10 +175,15 @@ dependencies = [
  "akd_core",
  "async-recursion",
  "async-trait",
+ "colored",
  "dashmap",
  "hex",
  "log",
+ "once_cell",
+ "paste",
  "protobuf",
+ "rand 0.9.5",
+ "serde",
  "tokio",
 ]
 
@@ -192,9 +197,13 @@ dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
  "hex",
+ "paste",
  "protobuf",
  "protobuf-codegen",
  "protobuf-parse",
+ "rand 0.9.5",
+ "serde",
+ "serde_bytes",
  "tokio",
  "zeroize",
 ]
@@ -1315,6 +1324,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "colored"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2183,6 +2202,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8 0.10.2",
+ "serde",
  "signature 2.2.0",
 ]
 
@@ -2418,6 +2438,7 @@ dependencies = [
  "async-trait",
  "enclave-crypto",
  "protobuf",
+ "redb",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -7424,6 +7445,16 @@ checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
 dependencies = [
  "ordered-float 2.10.1",
  "serde",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

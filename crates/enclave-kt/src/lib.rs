@@ -24,6 +24,7 @@ pub mod config;
 pub mod head;
 pub mod log;
 pub mod service;
+pub mod store;
 pub mod username;
 pub mod wire;
 
@@ -31,6 +32,7 @@ pub use config::EnclaveKtConfig;
 pub use head::{Cosignature, SignedHead, TreeHead, WitnessPolicy};
 pub use log::{KtLog, Witness, verify_lookup};
 pub use service::KtService;
+pub use store::KtStore;
 pub use wire::{KtInfo, KtPolicy, LookupReply, UsernameClaim};
 
 /// Errors from key transparency.

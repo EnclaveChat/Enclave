@@ -36,6 +36,21 @@ impl TreeHead {
         b
     }
 
+    /// Decode [`TreeHead::encode`].
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let b: &[u8; 64] = b.try_into().map_err(|_| KtError::Malformed)?;
+        let mut server = [0u8; 16];
+        server.copy_from_slice(&b[..16]);
+        let mut root = [0u8; 32];
+        root.copy_from_slice(&b[24..56]);
+        Ok(Self {
+            server,
+            epoch: u64::from_be_bytes(b[16..24].try_into().map_err(|_| KtError::Malformed)?),
+            root,
+            time: u64::from_be_bytes(b[56..].try_into().map_err(|_| KtError::Malformed)?),
+        })
+    }
+
     /// 32-byte digest gossiped between contacts in message padding.
     pub fn gossip_digest(&self) -> [u8; 32] {
         let mut v = b"enclave/v1/kt/gossip".to_vec();

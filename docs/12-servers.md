@@ -10,7 +10,7 @@ Source: PLAN.md §12.1 to §12.3 and §12.5. Crates: `enclave-server`, `enclave-
 
 ### 1.1 Configuration
 
-Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be overridden from the environment as `ENCLAVE_<SECTION>__<KEY>` (for example `ENCLAVE_SERVER__DOMAIN=a.example`), which is how the compose file sets per-deployment values; integers and `true`/`false` keep their type. Unknown keys are refused, so a typo never silently falls back to a default. `load` also checks that `server.domain` is a domain name, that `policy.ttl_days` and `policy.inbox_quota` are positive and that `kt.epoch_secs` is at least 10.
+Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be overridden from the environment as `ENCLAVE_<SECTION>__<KEY>` (for example `ENCLAVE_SERVER__DOMAIN=a.example`), which is how the compose file sets per-deployment values; integers and `true`/`false` keep their type. Unknown keys are refused, so a typo never silently falls back to a default. `load` also checks that `server.domain` is a domain name, that `policy.ttl_days` and `policy.inbox_quota` are positive. `run` also requires `server.operator` when key transparency is on: clients never count a witness run by the log's own operator, so the log has to name it.
 
 | Section | Key | Default | Meaning |
 |---|---|---|---|
@@ -21,7 +21,7 @@ Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be over
 | | `listen` | `127.0.0.1:7443` | Where the ingress reaches the server |
 | | `public_dir` | `/var/lib/enclave/public` | Files the front serves (KT pins, descriptor) |
 | `[policy]` | `effort_request`, `effort_claim`, `effort_blob`, `effort_username`, `inbox_quota`, `request_quota`, `token_quota`, `ttl_days` | as `Config` below | Abuse controls |
-| `[kt]` | `enabled`, `epoch_secs` | `true`, 600 | Username log |
+| `[kt]` | `enabled` | `true` | Username log (`data_dir/kt.redb`, §3.1) |
 | `[push]` | `forward` | none | Push egress address for due wakes |
 | `[backup]` | `dir`, `interval_hours`, `keep` | none, 24, 7 | Snapshots (§1.5) |
 
@@ -85,11 +85,13 @@ Nothing in this table is an IP address, a Nym identity or an account identifier.
 
 ### 1.4 Identity and daily request keys
 
-`enclave-server init` creates the key directory (mode 0700) with two files (mode 0600, written atomically, never overwritten):
+`enclave-server init` creates the key directory (mode 0700) with four files (mode 0600, written atomically, never overwritten):
 
 | File | Contents |
 |---|---|
 | `identity.key` | The server's composite Ed448 + ML-DSA-87 signing key |
+| `kt-head.key` | The key-transparency head-signing key (composite) |
+| `kt-vrf.key` | The key-transparency VRF secret (32 B) |
 | `request-chain.key` | `u32(day) ‖ today's chain seed (32) ‖ 0x00`, or `… ‖ 0x01 ‖ yesterday's chain seed (32)` while yesterday's key is still served |
 
 The **server id** is the first 16 bytes of `SHAKE256("enclave/v1/net/server-id" ‖ identity public key)`: self-certifying, so a descriptor or key certificate signed by the identity proves which id it speaks for.
@@ -107,7 +109,7 @@ enclave-server healthcheck [--config FILE]   exit 0 if the server answers
 enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
 ```
 
-`run` listens on `server.listen` with the length-prefixed frame transport (`09-transport.md` §1); in a deployment only the Nym ingress on the stack's internal network can reach it. Once a minute it steps the request-key chain if the day changed and expires old objects. With `[backup] dir` set it writes `server-<unix time>.redb` snapshots every `interval_hours` and keeps the newest `keep`. On SIGTERM or Ctrl-C it waits for the request in flight (which has already committed) and exits. A restore needs both a snapshot and the key directory; the key directory must be backed up separately, encrypted and off the host. `dev` is the all-in-memory development server: random keys every start, nothing persisted; a bare `enclave-server [ADDR]` runs it.
+`run` listens on `server.listen` with the length-prefixed frame transport (`09-transport.md` §1); in a deployment only the Nym ingress on the stack's internal network can reach it. Once a minute it steps the request-key chain if the day changed and expires old objects. With `[backup] dir` set it writes `server-<unix time>.redb` and `kt-<unix time>.redb` snapshots at start and every `interval_hours`, and keeps the newest `keep` of each. On SIGTERM or Ctrl-C it waits for the request in flight (which has already committed) and exits. A restore needs both a snapshot and the key directory; the key directory must be backed up separately, encrypted and off the host. `dev` is the all-in-memory development server: random keys every start, nothing persisted; a bare `enclave-server [ADDR]` runs it.
 
 ## 2. Directory
 
@@ -148,7 +150,7 @@ Each one-time prekey is served once. Manifests and publications are stored in th
 
 ### 3.1 Tree and configuration
 
-- `KtLog` wraps Meta's **akd** 0.13 (NCC-audited 2023) with an in-memory store and a VRF key held in memory. Each `publish` call is one epoch. `heartbeat` starts an epoch with no username change (label `0x00 ‖ "heartbeat"`, which no valid username can equal) so heads stay fresh.
+- `KtLog` wraps Meta's **akd** 0.13 (NCC-audited 2023). Its storage is `KtStore` (`store.rs`), akd's `Database` trait over redb in its own file, `kt.redb`; akd's own storage-layer test suite runs against it (`tests/store.rs`). Next to the tree it keeps the signed heads with their cosignatures, the confusable-skeleton index, and, for witnesses run with a store, the head each last cosigned. akd commits an epoch in one `batch_set`, which is one redb transaction. `KtLog::open` refuses a store whose heads don't verify under the head key or whose tree root doesn't match the last signed head; if the process stopped between committing an epoch and storing its head, that head is signed on open. The head-signing key and the VRF secret are files in the server's key directory (§1.4), so the pins clients hold survive restarts. Each `publish` call is one epoch; batching claims into one epoch per window (so claims made together can't be told apart by epoch) is not implemented (S5). `heartbeat` starts an epoch with no username change (label `0x00 ‖ "heartbeat"`, which no valid username can equal) so heads stay fresh.
 - `KtService` runs the log on its own thread with its own tokio runtime (akd spawns tasks), so the synchronous request handler can call it from any context. After every epoch it asks each attached witness to cosign (§3.3). A lookup against a head older than 1 h first starts a heartbeat epoch.
 - `EnclaveKtConfig` replaces every akd hash with domain-separated SHAKE256-256:
 
@@ -225,7 +227,7 @@ The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons
 
 ### 3.6 Not implemented yet
 
-The device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses); a persistent KT store; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+The device-clock warning based on trusted time; C2SP cosignature interoperability; witness descriptors and remote witnesses (the dev server runs three in-process witnesses; `enclave-server run` has none yet, so its heads carry no cosignatures and clients refuse its lookups until S2 adds remote witnesses); non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
 
 ### 3.7 Claims and lookups
 

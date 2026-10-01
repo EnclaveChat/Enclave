@@ -2,11 +2,11 @@
 
 use crate::config::EnclaveKtConfig;
 use crate::head::{CTX_COSIGN, Cosignature, SignedHead, TreeHead, WitnessPolicy, cosign_message};
+use crate::store::KtStore;
 use crate::username::{normalize, skeleton};
 use crate::{KtError, Result};
 use akd::ecvrf::{VRFKeyStorage, VrfError};
 use akd::storage::StorageManager;
-use akd::storage::memory::AsyncInMemoryDatabase;
 use akd::{AkdLabel, AkdValue, AppendOnlyProof, AzksParallelismConfig, Directory, LookupProof};
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::{CompositePublic, CompositeSigningKey};
@@ -28,11 +28,12 @@ fn akd_err(e: impl core::fmt::Display) -> KtError {
     KtError::Directory(e.to_string())
 }
 
-type Dir = Directory<EnclaveKtConfig, AsyncInMemoryDatabase, VrfKey>;
+type Dir = Directory<EnclaveKtConfig, KtStore, VrfKey>;
 
 /// A server's key-transparency log.
 pub struct KtLog {
     server: [u8; 16],
+    store: KtStore,
     dir: Dir,
     signing: CompositeSigningKey,
     heads: Vec<SignedHead>,
@@ -42,13 +43,33 @@ pub struct KtLog {
 }
 
 impl KtLog {
-    /// Create an empty log. `vrf_secret` must stay fixed for the life of the log.
+    /// Create an empty log in memory. `vrf_secret` must stay fixed for the
+    /// life of the log.
     pub async fn new(
         server: [u8; 16],
         signing: CompositeSigningKey,
         vrf_secret: [u8; 32],
     ) -> Result<Self> {
-        let storage = StorageManager::new_no_cache(AsyncInMemoryDatabase::new());
+        let mut rng = HedgedRng::new().map_err(|_| KtError::Directory("rng".into()))?;
+        Self::open(KtStore::memory()?, server, signing, vrf_secret, 0, &mut rng).await
+    }
+
+    /// Open the log kept in `store` (empty or written by an earlier run with
+    /// the same keys). The signing key and VRF secret must be the ones the
+    /// log was started with: a head that doesn't verify under the signing
+    /// key, or a tree whose root doesn't match the last signed head, is
+    /// refused rather than served. If the process stopped between
+    /// committing an epoch and storing its head, that one head is signed
+    /// now (at `now`).
+    pub async fn open(
+        store: KtStore,
+        server: [u8; 16],
+        signing: CompositeSigningKey,
+        vrf_secret: [u8; 32],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Self> {
+        let storage = StorageManager::new_no_cache(store.clone());
         let vrf = VrfKey(Arc::new(vrf_secret));
         let dir = Directory::new(storage, vrf, AzksParallelismConfig::default())
             .await
@@ -59,14 +80,38 @@ impl KtLog {
             .map_err(akd_err)?
             .as_bytes()
             .to_vec();
-        Ok(Self {
+        let heads = store.heads()?;
+        for (i, h) in heads.iter().enumerate() {
+            h.verify_server(signing.public())?;
+            if h.head.server != server || h.head.epoch != i as u64 + 1 {
+                return Err(KtError::Directory(
+                    "stored heads don't belong to this log".into(),
+                ));
+            }
+        }
+        let mut log = Self {
             server,
+            store,
             dir,
             signing,
-            heads: Vec::new(),
+            heads,
             vrf_public,
             skeletons: HashMap::new(),
-        })
+        };
+        log.skeletons = log.store.skeletons()?;
+        let tree = log.dir.get_epoch_hash().await.map_err(akd_err)?;
+        let signed = log.heads.last().map_or(0, |h| h.head.epoch);
+        if tree.epoch() == signed + 1 {
+            log.sign_head(tree.epoch(), tree.hash(), now, rng)?;
+        } else if tree.epoch() != signed
+            || log.heads.last().is_some_and(|h| h.head.root != tree.hash())
+        {
+            return Err(KtError::Directory(format!(
+                "tree is at epoch {}, last signed head at {signed}",
+                tree.epoch()
+            )));
+        }
+        Ok(log)
     }
 
     /// Server identifier.
@@ -104,6 +149,7 @@ impl KtLog {
         let sh = self
             .publish_raw(AkdLabel::from(n.as_str()), value, now, rng)
             .await?;
+        self.store.put_skeleton(&sk, &n)?;
         self.skeletons.insert(sk, n);
         Ok(sh)
     }
@@ -133,13 +179,24 @@ impl KtLog {
             .publish(vec![(label, AkdValue(value))])
             .await
             .map_err(akd_err)?;
+        self.sign_head(eh.epoch(), eh.hash(), now, rng)
+    }
+
+    fn sign_head(
+        &mut self,
+        epoch: u64,
+        root: [u8; 32],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<SignedHead> {
         let head = TreeHead {
             server: self.server,
-            epoch: eh.epoch(),
-            root: eh.hash(),
+            epoch,
+            root,
             time: now,
         };
         let sh = SignedHead::sign(head, &self.signing, rng)?;
+        self.store.put_head(&sh)?;
         self.heads.push(sh.clone());
         Ok(sh)
     }
@@ -159,12 +216,14 @@ impl KtLog {
     }
 
     /// Attach a witness cosignature to the head of `epoch`.
-    pub fn add_cosignature(&mut self, epoch: u64, c: Cosignature) {
+    pub fn add_cosignature(&mut self, epoch: u64, c: Cosignature) -> Result<()> {
         if let Some(h) = self.heads.iter_mut().find(|h| h.head.epoch == epoch)
             && !h.cosignatures.iter().any(|x| x.witness == c.witness)
         {
             h.cosignatures.push(c);
+            self.store.put_head(h)?;
         }
+        Ok(())
     }
 
     /// Lookup proof for `name` against the latest head.
@@ -220,17 +279,42 @@ pub struct Witness {
     pub operator: String,
     signing: CompositeSigningKey,
     last: HashMap<[u8; 16], TreeHead>,
+    store: Option<KtStore>,
 }
 
 impl Witness {
-    /// New witness.
+    /// New witness that remembers what it cosigned only in memory.
     pub fn new(id: [u8; 16], operator: &str, signing: CompositeSigningKey) -> Self {
         Self {
             id,
             operator: operator.to_string(),
             signing,
             last: HashMap::new(),
+            store: None,
         }
+    }
+
+    /// A witness that keeps what it last cosigned for each server in
+    /// `store`, so after a restart it still refuses a head that doesn't
+    /// extend the one it cosigned before.
+    pub fn with_store(
+        id: [u8; 16],
+        operator: &str,
+        signing: CompositeSigningKey,
+        store: KtStore,
+    ) -> Result<Self> {
+        Ok(Self {
+            id,
+            operator: operator.to_string(),
+            signing,
+            last: store.witnessed(&id)?,
+            store: Some(store),
+        })
+    }
+
+    /// The last epoch this witness cosigned for `server`.
+    pub fn last_epoch(&self, server: &[u8; 16]) -> Option<u64> {
+        self.last.get(server).map(|h| h.epoch)
     }
 
     /// Public key clients pin.
@@ -279,6 +363,11 @@ impl Witness {
             .signing
             .sign(CTX_COSIGN, &cosign_message(&newest.head, now), rng)
             .map_err(|_| KtError::Signature)?;
+        // Remember the head before handing out the cosignature: a witness
+        // that forgot it could later be talked into cosigning a fork.
+        if let Some(store) = &self.store {
+            store.put_witnessed(&self.id, &newest.head)?;
+        }
         self.last.insert(server, newest.head);
         Ok(Cosignature {
             witness: self.id,
