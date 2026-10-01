@@ -1593,6 +1593,56 @@ async fn share_a_contact() {
     );
 }
 
+/// Reports go to the reported person's server, with the quotes the
+/// reporter chose and nothing about the reporter; the operator can close
+/// the reported request inbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn report_to_the_operator() {
+    use enclave_rpc::api::ReportReason;
+    let net = network();
+    let (mut ada, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut mo, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Mo")
+        .await
+        .unwrap();
+    connect(&mut ada, &mut mo).await;
+    for t in ["one", "two", "three"] {
+        mo.send_text(&ada.root(), t).await.unwrap();
+    }
+    ada.sync().await.unwrap();
+    ada.report(&mo.root(), ReportReason::Spam, 2).await.unwrap();
+    let mo_inbox = mo.card().request_inbox;
+    let reports = net.with_server(&S2, |s| s.take_reports()).unwrap();
+    assert_eq!(reports.len(), 1, "to Mo's server");
+    assert_eq!(reports[0].request_inbox, mo_inbox);
+    assert_eq!(reports[0].body.reason, ReportReason::Spam);
+    assert_eq!(
+        reports[0].body.quotes,
+        vec!["two", "three"],
+        "the latest two"
+    );
+    assert_eq!(
+        net.with_server(&S1, |s| s.reports().count()).unwrap(),
+        0,
+        "not to Ada's own server"
+    );
+    ada.report(&mo.root(), ReportReason::Other, 0)
+        .await
+        .unwrap();
+    let r = net.with_server(&S2, |s| s.take_reports()).unwrap();
+    assert!(r[0].body.quotes.is_empty(), "quotes are optional");
+
+    assert!(
+        net.with_server(&S2, |s| s.disable_request_inbox(&mo_inbox))
+            .unwrap()
+    );
+    assert!(
+        ada.report(&mo.root(), ReportReason::Spam, 0).await.is_err(),
+        "inbox closed"
+    );
+}
+
 /// Blocking: the blocked contact's tokens are revoked at our server, so
 /// their writes fail; nothing from them shows. Unblocking sends fresh
 /// tokens and the conversation works again.

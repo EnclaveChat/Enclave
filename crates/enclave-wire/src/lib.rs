@@ -130,6 +130,9 @@ pub enum Op {
     /// Register (or, empty, remove) the sealed push token for the caller's
     /// inbox (`docs/10-push.md` §2).
     PushRegister = 10,
+    /// Report an account to this server's operator (`docs/13-operators.md`
+    /// §2); needs a proof of work.
+    Report = 11,
 }
 
 impl Op {
@@ -146,6 +149,7 @@ impl Op {
             8 => Op::RegisterTokens,
             9 => Op::KeyTransparency,
             10 => Op::PushRegister,
+            11 => Op::Report,
             _ => return Err(WireError::Malformed),
         })
     }

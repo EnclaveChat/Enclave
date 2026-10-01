@@ -113,6 +113,7 @@ mod pins;
 mod polls;
 mod prefs;
 mod push;
+mod reports;
 mod search;
 mod sharing;
 mod social;

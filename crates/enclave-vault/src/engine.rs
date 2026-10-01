@@ -922,6 +922,45 @@ impl Engine {
                     self.status = "Couldn't share that contact. They need to have shared their code with you first.".into();
                 }
             }
+            Cmd::Report(id, reason, quote, block) => {
+                use enclave_rpc::api::ReportReason;
+                let Some(root) = self.root_of(&id) else {
+                    return;
+                };
+                let reason = match reason {
+                    1 => ReportReason::Spam,
+                    2 => ReportReason::Abuse,
+                    _ => ReportReason::Other,
+                };
+                self.busy = true;
+                self.push();
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let sent = c
+                    .report(&root, reason, if quote { 10 } else { 0 })
+                    .await
+                    .is_ok();
+                let blocked = block && c.block(&root).await.is_ok();
+                self.status = match (sent, blocked) {
+                    (true, true) => "Reported and blocked. Their server's operator can close their account's request inbox.",
+                    (true, false) => "Reported. Their server's operator can close their account's request inbox.",
+                    (false, true) => "Blocked, but the report didn't go through. Check your connection.",
+                    (false, false) => "Couldn't send the report. Check your connection.",
+                }
+                .into();
+                if blocked && self.selected == Some(root) {
+                    let request = self
+                        .client
+                        .as_ref()
+                        .and_then(|c| c.contact(&root))
+                        .is_some_and(|ct| ct.state == ContactState::Request);
+                    if request {
+                        self.selected = None;
+                    }
+                }
+                self.busy = false;
+            }
             Cmd::ShareLocation(id, lat, lon, label) => {
                 let Some(root) = self.root_of(&id) else {
                     return;

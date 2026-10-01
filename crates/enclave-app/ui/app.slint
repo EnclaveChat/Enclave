@@ -88,7 +88,7 @@ export struct MessageRow {
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -501,6 +501,10 @@ export component AppWindow inherits Window {
     callback share-contact(string, string);
     callback add-shared(string, string);
     callback share-location(string, string, string, string);
+    callback report(string, int, bool, bool);
+    in-out property <int> report-reason: 1;
+    in-out property <bool> report-quote: true;
+    in-out property <bool> report-block: true;
     in-out property <string> location-lat;
     // Photos and files in the open conversation.
     in property <int> gallery-count;
@@ -1193,6 +1197,12 @@ export component AppWindow inherits Window {
                                     accessible-label: "Block " + root.current.name;
                                     clicked => { root.block(root.current-id, true); }
                                 }
+                                QuietButton {
+                                    text: "Report";
+                                    danger: true;
+                                    accessible-label: "Report " + root.current.name;
+                                    clicked => { root.open-sheet(Sheet.report); }
+                                }
                             }
                         }
                     }
@@ -1501,6 +1511,12 @@ export component AppWindow inherits Window {
                 clicked => { root.open-sheet(Sheet.timer); }
             }
             QuietButton {
+                text: "Report";
+                danger: true;
+                accessible-label: "Report " + root.current.name;
+                clicked => { root.sheet = Sheet.report; }
+            }
+            QuietButton {
                 text: root.current.blocked ? "Unblock" : "Block";
                 danger: !root.current.blocked;
                 accessible-label: (root.current.blocked ? "Unblock " : "Block ") + root.current.name;
@@ -1577,6 +1593,54 @@ export component AppWindow inherits Window {
             QuietButton {
                 text: "Share a location";
                 clicked => { root.sheet = Sheet.location; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.report: SheetFrame {
+        title: "Report " + root.current.name;
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "The report goes to the people who run " + root.current.name + "'s server. It doesn't say who you are. They can close the account's message requests; they can't read your conversations."; }
+        for option in [
+            { label: "Spam", value: 1 },
+            { label: "Harassment or threats", value: 2 },
+            { label: "Something else", value: 3 },
+        ]: Rectangle {
+            height: Tokens.space-touch-target-min;
+            border-radius: Tokens.radius-control;
+            border-width: root.report-reason == option.value ? 2px : 1px;
+            border-color: root.report-reason == option.value ? Tokens.pine : Tokens.hairline;
+            accessible-role: radio-button;
+            accessible-checked: root.report-reason == option.value;
+            accessible-label: option.label;
+            accessible-action-default => { root.report-reason = option.value; }
+            TouchArea { clicked => { root.report-reason = option.value; } }
+            HorizontalLayout {
+                padding-left: Tokens.space-m;
+                Body { text: option.label; vertical-alignment: center; }
+            }
+        }
+        SwitchRow {
+            label: "Include their last messages";
+            detail: "Up to 10, as you see them. This chat is off the record, so the operator can't confirm who wrote them.";
+            on: root.report-quote;
+            toggled => { root.report-quote = !root.report-quote; }
+        }
+        SwitchRow {
+            label: "Also block them";
+            detail: "They can't send you anything more, and they aren't told.";
+            on: root.report-block;
+            toggled => { root.report-block = !root.report-block; }
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Sending…" : "Send report";
+                enabled: !root.busy;
+                clicked => {
+                    root.report(root.current-id, root.report-reason, root.report-quote, root.report-block);
+                    root.sheet = Sheet.none;
+                }
             }
         }
     }

@@ -44,6 +44,7 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | `BlobGet` | Return the chunk, or `NotFound`. No credential. |
 | `Directory` | §2. A payload that does not parse gets `Malformed`. |
 | `KeyTransparency` | Not wired to `enclave-kt` yet: `NotFound`. |
+| `Report` | The mailbox must be one of this server's request inboxes (`NotFound`). Verify the PoW over `"report" ‖ mailbox ‖ SHA3-512(envelope)` at the request effort (`Pow`); the payload must parse as a `ReportBody` (`Malformed`). Queue it for the operator with the day it arrived; at most 1,000 are kept, oldest dropped first. `Server::take_reports()` hands them to the operator and `Server::disable_request_inbox()` closes a reported account's request inbox. |
 
 `Server::expire(now)` deletes envelopes and blobs older than `ttl_secs` and bundle claims older than 600 s. `Server::rotate(day)` adds a new daily request key and keeps at most two (`09-transport.md` §2.1). `Server::stats()` returns aggregate counters only (requests, cover, stored, tokens burned, denied).
 

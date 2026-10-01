@@ -141,6 +141,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::ShareContact("a".into(), "b".into()),
         Cmd::AddShared("a".into(), 4),
         Cmd::ShareLocation("a".into(), "52.5".into(), "13.4".into(), "Here".into()),
+        Cmd::Report("a".into(), 1, true, false),
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),

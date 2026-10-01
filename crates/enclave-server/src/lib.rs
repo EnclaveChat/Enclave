@@ -156,12 +156,30 @@ pub struct Server {
     /// Chunked lookup replies by reply id.
     kt_replies: HashMap<[u8; 32], (Vec<u8>, u64)>,
     stats: Stats,
+    /// User reports for the operator, oldest first (`docs/13-operators.md`).
+    reports: VecDeque<Report>,
     /// Every object ever stored, by length, for invariant checks in tests.
     stored_lengths: HashSet<usize>,
     rng: HedgedRng,
 }
 
 pub use enclave_rpc::api::{device_key, manifest_key};
+
+/// Most reports kept for the operator; older ones are dropped.
+pub const MAX_REPORTS: usize = 1000;
+
+/// A user report as the operator sees it: the reported account's request
+/// inbox, the day it arrived, and what the reporter chose to include.
+/// Nothing names the reporter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// The reported account's request inbox (from its contact card).
+    pub request_inbox: [u8; 32],
+    /// Day it arrived (Unix days).
+    pub day: u64,
+    /// Reason and quotes.
+    pub body: api::ReportBody,
+}
 
 /// A device some manifest of an account listed.
 struct SeenDevice {
@@ -201,6 +219,7 @@ impl Server {
             names_by_root: HashMap::new(),
             kt_replies: HashMap::new(),
             stats: Stats::default(),
+            reports: VecDeque::new(),
             stored_lengths: HashSet::new(),
             rng,
         })
@@ -367,6 +386,7 @@ impl Server {
             },
             Op::KeyTransparency => (Status::NotFound, 0, none, Reply::Empty),
             Op::PushRegister => (self.push_register(h, env), 0, none, Reply::Empty),
+            Op::Report => (self.report(h, env, now), 0, none, Reply::Empty),
         }
     }
 
@@ -582,6 +602,50 @@ impl Server {
         let s = self.store(&h.mailbox, env, now);
         self.cfg.inbox_quota = saved;
         s
+    }
+
+    /// A user report about the account whose request inbox is `h.mailbox`
+    /// (it must be one of ours). Costs a proof of work; the queue keeps the
+    /// newest [`MAX_REPORTS`].
+    fn report(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
+        if !self.inboxes.get(&h.mailbox).is_some_and(|ib| ib.request) {
+            return Status::NotFound;
+        }
+        let ctx = api::pow_context_report(&h.mailbox, &sha3_512(env));
+        if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
+            return Status::Pow;
+        }
+        let Ok(body) = api::unframe(env).and_then(api::ReportBody::decode) else {
+            return Status::Malformed;
+        };
+        if self.reports.len() >= MAX_REPORTS {
+            self.reports.pop_front();
+        }
+        self.reports.push_back(Report {
+            request_inbox: h.mailbox,
+            day: now / 86_400,
+            body,
+        });
+        Status::Ok
+    }
+
+    /// Reports waiting for the operator, oldest first.
+    pub fn reports(&self) -> impl Iterator<Item = &Report> {
+        self.reports.iter()
+    }
+
+    /// Hand the waiting reports to the operator and forget them here.
+    pub fn take_reports(&mut self) -> Vec<Report> {
+        self.reports.drain(..).collect()
+    }
+
+    /// Operator action on a report: close the account's request inbox, so
+    /// nobody can send it new requests and it can't receive replies to them.
+    /// Returns whether it existed.
+    pub fn disable_request_inbox(&mut self, request_inbox: &[u8; 32]) -> bool {
+        self.inboxes
+            .remove(request_inbox)
+            .is_some_and(|ib| ib.request)
     }
 
     fn check_read(&self, h: &RequestHeader) -> Option<&Inbox> {

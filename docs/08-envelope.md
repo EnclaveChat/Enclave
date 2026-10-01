@@ -69,6 +69,8 @@ Sum: 1 + 1 + 6 + 32 + 32 = **72**.
 | 7 | `Directory` | unit | unused (zero) | unused (zero) | API payload: `DirRequest` (§9.3) | API payload: `DirReply` |
 | 8 | `RegisterTokens` | unit | inbox address | owner secret | API payload: concatenated 32 B token hashes (ignored on create) | status only |
 | 9 | `KeyTransparency` | — | — | — | — | not implemented: always `NotFound` |
+| 10 | `PushRegister` | unit | inbox address | owner secret | API payload: sealed push token (empty removes it) | status only |
+| 11 | `Report` | unit | the reported account's request inbox | proof of work | API payload: `ReportBody` (`13-operators.md` §2) | status only |
 
 `flags` for `RegisterTokens`: bit 0 (`0x01`) `CREATE` creates the inbox; bit 1 (`0x02`) `REQUEST_INBOX` makes the new inbox a request inbox. Other ops ignore `flags`.
 

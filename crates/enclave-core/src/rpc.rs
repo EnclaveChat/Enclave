@@ -256,6 +256,34 @@ impl Rpc {
         Err(CoreError::Server(Status::Pow))
     }
 
+    /// Report the account whose request inbox is `inbox` to `server`'s
+    /// operator, escalating proof of work as the server asks.
+    pub async fn report(
+        &mut self,
+        server: &ServerId,
+        inbox: [u8; 32],
+        env: &[u8],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        let ctx = api::pow_context_report(&inbox, &enclave_crypto::hash::sha3_512(env));
+        for effort in EFFORT_LADDER {
+            let proof = enclave_tokens::solve(&ctx, effort, rng)?;
+            let h = RequestHeader {
+                op: Op::Report,
+                flags: 0,
+                mailbox: inbox,
+                token: proof.0,
+            };
+            match self.call(server, h, env, now, rng).await?.status {
+                Status::Ok => return Ok(()),
+                Status::Pow => continue,
+                s => return Err(CoreError::Server(s)),
+            }
+        }
+        Err(CoreError::Server(Status::Pow))
+    }
+
     /// Write to a request inbox with invite capabilities instead of a proof
     /// of work: try `caps[*next..]` in order (other people may have used
     /// some), leaving `*next` after the one that worked.

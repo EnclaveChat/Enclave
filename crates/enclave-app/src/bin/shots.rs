@@ -555,6 +555,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         view::apply(&ui, &blocked);
         shot("39-blocked-phone", phone);
+        view::apply(&ui, &data);
+        ui.set_sheet(Sheet::Report);
+        shot("43-report-phone", phone);
+        ui.set_sheet(Sheet::None);
         let mut notes = data.clone();
         let row = Row {
             id: "notes".into(),

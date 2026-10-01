@@ -342,6 +342,9 @@ pub enum Cmd {
     /// Share a place: conversation, latitude, longitude (degrees, as
     /// typed), label.
     ShareLocation(String, String, String, String),
+    /// Report a contact to their server's operator: id, reason (1 spam,
+    /// 2 abuse, 3 other), quote their latest messages, also block them.
+    Report(String, u8, bool, bool),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -777,6 +780,7 @@ impl Cmd {
             Cmd::ShareContact(c, who) => w.u8(51).str(c).str(who),
             Cmd::AddShared(c, s) => w.u8(52).str(c).u64(*s),
             Cmd::ShareLocation(c, la, lo, l) => w.u8(53).str(c).str(la).str(lo).str(l),
+            Cmd::Report(c, r, q, b) => w.u8(54).str(c).u8(*r).bool(*q).bool(*b),
         };
         w.0
     }
@@ -838,6 +842,7 @@ impl Cmd {
             51 => Cmd::ShareContact(r.str()?, r.str()?),
             52 => Cmd::AddShared(r.str()?, r.u64()?),
             53 => Cmd::ShareLocation(r.str()?, r.str()?, r.str()?, r.str()?),
+            54 => Cmd::Report(r.str()?, r.u8()?, r.bool()?, r.bool()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

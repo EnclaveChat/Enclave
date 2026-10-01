@@ -248,6 +248,96 @@ pub fn pow_context_request(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> 
     [b"request-inbox".as_slice(), mailbox, envelope_hash].concat()
 }
 
+/// Context string for a report's proof of work.
+pub fn pow_context_report(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> {
+    [b"report".as_slice(), mailbox, envelope_hash].concat()
+}
+
+/// Most messages one report may quote.
+pub const MAX_REPORT_MESSAGES: usize = 10;
+/// Longest quoted message in a report, in bytes.
+pub const MAX_REPORT_TEXT: usize = 1024;
+
+/// Why someone reported an account (`docs/13-operators.md` §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReportReason {
+    /// Unwanted bulk messages.
+    Spam = 1,
+    /// Harassment or threats.
+    Abuse = 2,
+    /// Anything else.
+    Other = 3,
+}
+
+/// A user report to the operator of the reported account's server
+/// (`Op::Report`). The header's mailbox is the reported account's request
+/// inbox; nothing in it names the reporter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportBody {
+    /// Why.
+    pub reason: ReportReason,
+    /// The conversation was on the record (quotes carry signatures; not
+    /// built yet, so always false: quotes are an unverifiable claim).
+    pub on_record: bool,
+    /// Messages the reporter chose to quote, oldest first.
+    pub quotes: Vec<String>,
+}
+
+impl ReportBody {
+    /// `u8 version ‖ u8 reason ‖ u8 on_record ‖ u8 n ‖ n × (u16 len ‖ UTF-8)`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = vec![1, self.reason as u8, u8::from(self.on_record)];
+        let quotes: Vec<&String> = self.quotes.iter().take(MAX_REPORT_MESSAGES).collect();
+        b.push(quotes.len() as u8);
+        for q in quotes {
+            let mut end = q.len().min(MAX_REPORT_TEXT);
+            while !q.is_char_boundary(end) {
+                end -= 1;
+            }
+            b.extend_from_slice(&(end as u16).to_be_bytes());
+            b.extend_from_slice(&q.as_bytes()[..end]);
+        }
+        b
+    }
+
+    /// Decode (strict).
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let m = RpcError::Malformed;
+        let (&[1, reason, on_record, n], mut rest) = b.split_first_chunk::<4>().ok_or(m)? else {
+            return Err(m);
+        };
+        let reason = match reason {
+            1 => ReportReason::Spam,
+            2 => ReportReason::Abuse,
+            3 => ReportReason::Other,
+            _ => return Err(m),
+        };
+        if on_record > 1 || usize::from(n) > MAX_REPORT_MESSAGES {
+            return Err(m);
+        }
+        let mut quotes = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            let (len, r) = rest.split_first_chunk::<2>().ok_or(m)?;
+            let len = usize::from(u16::from_be_bytes(*len));
+            if len > MAX_REPORT_TEXT || r.len() < len {
+                return Err(m);
+            }
+            let (q, r) = r.split_at(len);
+            quotes.push(String::from_utf8(q.to_vec()).map_err(|_| m)?);
+            rest = r;
+        }
+        if !rest.is_empty() {
+            return Err(m);
+        }
+        Ok(Self {
+            reason,
+            on_record: on_record == 1,
+            quotes,
+        })
+    }
+}
+
 /// Context string for a bundle-claim proof of work.
 pub fn pow_context_claim(device: &[u8; 32], day: u64) -> Vec<u8> {
     [b"claim-bundle".as_slice(), device, &day.to_be_bytes()].concat()
@@ -310,6 +400,41 @@ pub fn device_key(device: &[u8; 16]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_codec() {
+        let r = ReportBody {
+            reason: ReportReason::Spam,
+            on_record: false,
+            quotes: vec!["buy now".into(), "é".repeat(600)],
+        };
+        let b = r.encode();
+        let d = ReportBody::decode(&b).unwrap();
+        assert_eq!(d.quotes[0], "buy now");
+        assert!(
+            d.quotes[1].len() <= MAX_REPORT_TEXT,
+            "cut on a char boundary"
+        );
+        let mut most = r.clone();
+        most.quotes = vec!["x".repeat(5000); 20];
+        let b = most.encode();
+        assert!(
+            b.len() + 4 <= ENVELOPE_LEN,
+            "the largest report fits one frame"
+        );
+        assert_eq!(
+            ReportBody::decode(&b).unwrap().quotes.len(),
+            MAX_REPORT_MESSAGES
+        );
+        for bad in [
+            vec![2, 1, 0, 0],
+            vec![1, 9, 0, 0],
+            vec![1, 1, 0, 1, 0],
+            vec![1, 1, 0, 0, 7],
+        ] {
+            assert!(ReportBody::decode(&bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn frames_and_dir_codec() {
