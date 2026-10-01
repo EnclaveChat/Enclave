@@ -22,7 +22,7 @@ use crate::{CoreError, Result};
 use enclave_proto::recovery::RecoverySecret;
 use zeroize::Zeroizing;
 
-const NS_HELD_SHARES: &str = "held-shares";
+pub(crate) const NS_HELD_SHARES: &str = "held-shares";
 const GIVEN: &str = "recovery-shares-given";
 /// Most holders.
 pub const MAX_HOLDERS: usize = 16;

@@ -144,6 +144,9 @@ pub enum Content {
         /// Answer with a `PqStep` of our own.
         reply: bool,
     },
+    /// The sender changed their recovery words: a sealed file reference to
+    /// the migration record and their new manifest (`03-identity.md` §8.2).
+    Migration(Vec<u8>),
     /// The sender started (`on`) or stopped typing in this conversation.
     /// Sent only in cover slots, so it may never arrive (`docs/16-features.md`).
     Typing {
@@ -208,6 +211,7 @@ const K_LOCATION: u8 = 20;
 const K_PQ_STEP: u8 = 21;
 const K_STICKER: u8 = 22;
 const K_TYPING: u8 = 23;
+const K_MIGRATION: u8 = 24;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -393,6 +397,12 @@ impl Content {
             Content::Typing { on } => {
                 w.u8(K_TYPING).u8(u8::from(*on));
             }
+            Content::Migration(att) => {
+                if att.len() > MAX_ATTACHMENT_REF {
+                    return too_large;
+                }
+                w.u8(K_MIGRATION).bytes(att);
+            }
             Content::Sticker {
                 id,
                 pack,
@@ -512,6 +522,7 @@ impl Content {
                     _ => return Err(ProtoError::Decode),
                 },
             },
+            K_MIGRATION => Content::Migration(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_TYPING => Content::Typing {
                 on: match r.u8()? {
                     0 => false,
@@ -614,6 +625,7 @@ mod tests {
             Content::PqStep { reply: true },
             Content::Typing { on: true },
             Content::Typing { on: false },
+            Content::Migration(vec![8; 300]),
             Content::Sticker {
                 id: [6; 16],
                 pack: vec![2; 300],

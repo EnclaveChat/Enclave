@@ -210,7 +210,7 @@ fn msg_ns(root: &[u8; 64]) -> String {
     crate::persist::msg_ns(root)
 }
 
-fn id_ns(root: &[u8; 64]) -> String {
+pub(crate) fn id_ns(root: &[u8; 64]) -> String {
     let mut s = String::from("mid/");
     for b in &root[..16] {
         s.push_str(&format!("{b:02x}"));

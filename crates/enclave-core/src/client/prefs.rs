@@ -14,7 +14,7 @@ use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
 
-const NS_PREFS: &str = "conv-prefs";
+pub(crate) const NS_PREFS: &str = "conv-prefs";
 /// Most conversations pinned to the top.
 pub const MAX_PINNED_CONVERSATIONS: usize = 4;
 

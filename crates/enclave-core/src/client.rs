@@ -111,6 +111,7 @@ mod link;
 mod location;
 mod meet;
 mod messages;
+mod migrate;
 mod notes;
 mod pins;
 mod polls;
@@ -134,6 +135,7 @@ pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
 pub use location::{Location, MAX_LOCATION_LABEL};
 pub use meet::{MEET_PREFIX, MeetMatch};
 pub use messages::{EDIT_WINDOW, Message, Reaction};
+pub use migrate::Moved;
 pub use pins::MAX_PINS;
 pub use polls::{MAX_OPTIONS, PollView};
 pub use prefs::{ConvPrefs, MAX_PINNED_CONVERSATIONS};
@@ -180,6 +182,16 @@ pub enum Event {
         root: [u8; 64],
         /// New timer in seconds (0 = off).
         secs: u32,
+    },
+    /// A contact changed their recovery words (`03-identity.md` §8.2):
+    /// they are now `root`, and no longer checked ([`Client::moved`]).
+    ContactMoved {
+        /// The root they had.
+        old: [u8; 64],
+        /// Their root now.
+        root: [u8; 64],
+        /// Their old root signed the change too.
+        cross_signed: bool,
     },
     /// The contact started or stopped typing (only with typing indicators
     /// on, [`Client::typing_enabled`]). Show it for a few seconds at most:
@@ -518,6 +530,8 @@ impl Client {
             opts.keystore,
             opts.passphrase.as_ref().map(|p| p.as_slice()),
         )?;
+        // A change of recovery words interrupted after its commit point.
+        migrate::finish_staged(&store, &mut HedgedRng::new()?)?;
         let get = |ns: &str, k: &[u8]| -> Result<Vec<u8>> {
             store.get(ns, k)?.ok_or(CoreError::NotFound)
         };
@@ -554,7 +568,7 @@ impl Client {
         }
         let token_pool = tokens::load_pool(&store)?;
         let groups = groups::load(&store)?;
-        Ok(Self {
+        let mut client = Self {
             store,
             rng: HedgedRng::new()?,
             rpc: Rpc::new(transport),
@@ -575,7 +589,9 @@ impl Client {
             recovery_alert: None,
             meet: None,
             pending_bond: None,
-        })
+        };
+        client.resume_rename()?;
+        Ok(client)
     }
 
     /// Crypto-erase this profile (emergency PIN, panic wipe, account deletion).
@@ -676,7 +692,11 @@ impl Client {
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         c.verified = verified;
         let c = c.clone();
-        self.save_contact(&c)
+        self.save_contact(&c)?;
+        if verified {
+            self.clear_moved(root)?;
+        }
+        Ok(())
     }
 
     /// Add someone from their card and send a first message. Fetches and
@@ -1073,6 +1093,7 @@ impl Client {
             self.profile.cursor = cursor;
             self.save_profile()?;
         }
+        events.append(&mut self.process_migrations(now).await?);
         Ok(events)
     }
 
@@ -1083,6 +1104,11 @@ impl Client {
         events.append(&mut self.refresh_manifests(now).await?);
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
+        if let Err(e) = self.push_migration(now).await
+            && matches!(e, CoreError::Net(_))
+        {
+            return Err(e);
+        }
         events.append(&mut self.audit_username(now).await?);
         events.extend(self.process_kt(now).await?);
         if self.import_pending_history(now).await? > 0 {
@@ -1466,6 +1492,10 @@ impl Client {
                     self.on_veto(&root, &b)?;
                     Ok(Vec::new())
                 }
+                Content::Migration(b) => {
+                    self.queue_migration(&root, &dev, &b)?;
+                    Ok(Vec::new())
+                }
                 _ => Ok(Vec::new()),
             };
         }
@@ -1526,6 +1556,10 @@ impl Client {
             Content::KtHead(b) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 self.on_kt_head(&root, &b);
+            }
+            Content::Migration(b) => {
+                c.received_since_refill = c.received_since_refill.saturating_add(1);
+                self.queue_migration(&root, &dev, &b)?;
             }
             Content::RecoveryShare(share) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);

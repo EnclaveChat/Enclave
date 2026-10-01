@@ -316,6 +316,37 @@ impl Client {
         Ok(())
     }
 
+    /// A member of `gid` changed their recovery words: their polls and
+    /// votes follow (`03-identity.md` §8.2.6).
+    pub(crate) fn rename_in_polls(
+        &mut self,
+        gid: &[u8; 32],
+        old: &[u8; 64],
+        new: &[u8; 64],
+    ) -> Result<()> {
+        for (k, b) in self.store.scan(NS_POLLS)? {
+            if !k.starts_with(gid) {
+                continue;
+            }
+            let Ok(mut p) = Poll::decode(&b) else {
+                continue;
+            };
+            let mut changed = false;
+            if p.creator == *old {
+                p.creator = *new;
+                changed = true;
+            }
+            if let Some(v) = p.votes.remove(old) {
+                p.votes.insert(*new, v);
+                changed = true;
+            }
+            if changed {
+                self.store.put(NS_POLLS, &k, &p.encode(), &mut self.rng)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Ask the group a question with 2 to 10 options.
     pub async fn create_poll(
         &mut self,

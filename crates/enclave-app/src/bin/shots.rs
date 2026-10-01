@@ -224,6 +224,9 @@ fn fixture() -> Snapshot {
         invites: 1,
         typing_setting: false,
         typing: false,
+        can_change_words: true,
+        words_pending: false,
+        moved: 0,
     }
 }
 
@@ -727,6 +730,19 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Settings);
         shot("48-typing-setting-phone", phone);
         ui.set_sheet(Sheet::None);
+        // Changing the recovery words, and a contact who did.
+        view::apply(&ui, &data);
+        ui.set_sheet(Sheet::ChangeWords);
+        shot("49-change-words-phone", phone);
+        ui.set_sheet(Sheet::None);
+        let mut mv = data.clone();
+        mv.moved = 1;
+        if let Some(c) = mv.current.as_mut() {
+            c.verified = false;
+            c.met = false;
+        }
+        view::apply(&ui, &mv);
+        shot("50-contact-moved-phone", phone);
         view::apply(&ui, &data);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());

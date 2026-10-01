@@ -279,9 +279,40 @@ impl GroupState {
         Ok(next)
     }
 
+    /// If `next` differs from this state only in one member's root (same
+    /// slot, role and join time), that member's index and old and new
+    /// roots: a change of recovery words (`03-identity.md` §8.2.6).
+    pub fn root_change(&self, next: &GroupState) -> Option<(u8, [u8; 64], [u8; 64])> {
+        if next.name != self.name
+            || next.host != self.host
+            || next.admins_only != self.admins_only
+            || next.epoch != self.epoch
+            || next.members.len() != self.members.len()
+        {
+            return None;
+        }
+        let mut changed = None;
+        for (i, (a, b)) in self.members.iter().zip(&next.members).enumerate() {
+            if a == b {
+                continue;
+            }
+            if changed.is_some()
+                || !a.active
+                || a.admin != b.admin
+                || a.joined != b.joined
+                || a.active != b.active
+            {
+                return None;
+            }
+            changed = Some((i as u8, a.root, b.root));
+        }
+        changed
+    }
+
     /// Whether `next` is a valid update posted by member `author`: same group,
-    /// parent is this state, and the author is an admin here (or the update
-    /// only removes the author, i.e. they leave).
+    /// parent is this state, and the author is an admin here, or the update
+    /// only removes the author (they leave) or only changes the author's
+    /// own root (new recovery words; the caller also checks the migration).
     pub fn accepts(&self, next: &GroupState, author: u8) -> bool {
         if next.group_id != self.group_id || next.parent != self.hash() || next.check().is_err() {
             return false;
@@ -292,7 +323,11 @@ impl GroupState {
         if a.admin {
             return true;
         }
-        // A non-admin may only leave (automatic admin promotion aside).
+        if self.root_change(next).is_some_and(|(i, _, _)| i == author) {
+            return true;
+        }
+        // A non-admin may otherwise only leave (automatic admin promotion
+        // aside).
         let mut expected = self.clone();
         expected.remove(author);
         let strip = |s: &GroupState| {
@@ -635,7 +670,12 @@ impl Group {
             .get(self.me as usize)
             .map(|m| m.root)
             .ok_or(ProtoError::Missing)?;
-        let me = next.index_of(&my_root).ok_or(ProtoError::NoSession)?;
+        // Our own change of recovery words keeps our slot (§8.2.6).
+        let me = match self.state.root_change(&next) {
+            Some((i, _, new)) if i == self.me => next.index_of(&new),
+            _ => next.index_of(&my_root),
+        }
+        .ok_or(ProtoError::NoSession)?;
         // Member indices can shift; frontiers and receive chains are per index.
         if me != self.me || next.members.len() != self.state.members.len() {
             self.recv.retain(|_, c| c.epoch >= next.epoch);
@@ -1367,6 +1407,21 @@ mod tests {
         assert!(s1.accepts(&leave.unwrap(), 1));
         let rename = s1.child(|s| s.name = "Mine now".into()).unwrap();
         assert!(!s1.accepts(&rename, 1));
+        // A member may change its own root (new recovery words), and only
+        // its own; nothing else may change with it.
+        let reroot = s1.child(|s| s.members[1].root = [4; 64]).unwrap();
+        assert_eq!(s1.root_change(&reroot), Some((1, [2; 64], [4; 64])));
+        assert!(s1.accepts(&reroot, 1));
+        let theirs = s1.child(|s| s.members[0].root = [4; 64]).unwrap();
+        assert!(!s1.accepts(&theirs, 1), "not someone else's");
+        let more = s1
+            .child(|s| {
+                s.members[1].root = [4; 64];
+                s.members[1].admin = true;
+            })
+            .unwrap();
+        assert_eq!(s1.root_change(&more), None);
+        assert!(!s1.accepts(&more, 1), "no promotion with it");
         // Wrong parent is rejected.
         let mut orphan = rename.clone();
         orphan.parent = [7; 32];

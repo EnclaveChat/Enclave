@@ -18,7 +18,7 @@ use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
 
-const NS_PINS: &str = "pins";
+pub(crate) const NS_PINS: &str = "pins";
 /// Most pinned messages per conversation.
 pub const MAX_PINS: usize = 3;
 

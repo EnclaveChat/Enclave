@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 
 const NS_INVITES: &str = "invites";
 /// Join requests waiting for approval: root → group id.
-const NS_JOIN_REQS: &str = "join-requests";
+pub(crate) const NS_JOIN_REQS: &str = "join-requests";
 /// Groups we asked to join: group id → name.
 const NS_JOINING: &str = "joining";
 /// URI prefix of group invite links.

@@ -19,7 +19,7 @@ use enclave_proto::codec::{Reader, Writer};
 use std::collections::BTreeSet;
 
 const NS_GROUP_PQ: &str = "group-pq";
-const NS_PQ_REPLIES: &str = "pq-replies";
+pub(crate) const NS_PQ_REPLIES: &str = "pq-replies";
 /// No epoch recorded yet.
 const NONE: u32 = u32::MAX;
 
@@ -110,12 +110,13 @@ impl Client {
             if m == me {
                 continue;
             }
-            let Some(c) = self.contacts.get(&member.root) else {
+            let root = super::migrate::resolve(&self.store, &member.root);
+            let Some(c) = self.contacts.get(&root) else {
                 continue;
             };
             for dev in &c.manifest.devices {
-                if let Some(s) = self.sessions.get(&(member.root, dev.id)) {
-                    v.push((member.root, dev.id, s.pq_epochs()));
+                if let Some(s) = self.sessions.get(&(root, dev.id)) {
+                    v.push((root, dev.id, s.pq_epochs()));
                 }
             }
         }

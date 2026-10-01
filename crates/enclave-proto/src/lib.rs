@@ -12,6 +12,7 @@ pub mod group;
 pub mod identity;
 pub mod labels;
 pub mod manifest;
+pub mod migration;
 pub mod ratchet;
 pub mod recovery;
 

@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 /// Prefix of an in-person code.
 pub const MEET_PREFIX: &str = "enclave:meet#";
 /// Bonds: root → PSK.
-const NS_BONDS: &str = "bonds";
+pub(crate) const NS_BONDS: &str = "bonds";
 
 /// What the person compares after scanning.
 #[derive(Clone, Debug, PartialEq, Eq)]

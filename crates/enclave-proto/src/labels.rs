@@ -16,6 +16,8 @@ pub const CTX_EQXDH_TRANSCRIPT: &str = "enclave/v1/ctx/eqxdh-transcript";
 pub const CTX_MANIFEST_COSIGN: &str = "enclave/v1/ctx/manifest-cosign";
 /// Composite-signature context for a device vetoing a manifest change.
 pub const CTX_MANIFEST_VETO: &str = "enclave/v1/ctx/manifest-veto";
+/// Root-signature context for a change of recovery words (old and new root).
+pub const CTX_MIGRATION: &str = "enclave/v1/ctx/migration";
 
 /// EQXDH stage-1 key that seals the initiator's identity.
 pub const EQXDH_IDENTITY: &str = "enclave/v1/eqxdh/identity";

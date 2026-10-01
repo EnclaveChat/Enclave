@@ -253,6 +253,13 @@ pub struct Snapshot {
     pub typing_setting: bool,
     /// The open conversation's contact is typing.
     pub typing: bool,
+    /// This device can change the recovery words (it holds them).
+    pub can_change_words: bool,
+    /// Our change of recovery words is still reaching contacts and groups.
+    pub words_pending: bool,
+    /// The open conversation's contact changed their recovery words:
+    /// 0 no, 1 confirmed by their old key, 2 not confirmed.
+    pub moved: u8,
 }
 
 /// UI → vault.
@@ -384,6 +391,8 @@ pub enum Cmd {
     TypingSetting(bool),
     /// The draft in a conversation changed: non-empty (typing) or not.
     Typing(String, bool),
+    /// Replace the recovery words (a new root; 03 §8.2).
+    ChangeWords,
 }
 
 /// One-off UI resets after a request succeeded.
@@ -616,7 +625,10 @@ impl Snapshot {
             .bool(self.can_lock)
             .u32(self.invites)
             .bool(self.typing_setting)
-            .bool(self.typing);
+            .bool(self.typing)
+            .bool(self.can_change_words)
+            .bool(self.words_pending)
+            .u8(self.moved);
         w.0
     }
 
@@ -791,6 +803,9 @@ impl Snapshot {
             invites: r.u32()?,
             typing_setting: r.bool()?,
             typing: r.bool()?,
+            can_change_words: r.bool()?,
+            words_pending: r.bool()?,
+            moved: r.u8()?,
         };
         r.end()?;
         Ok(s)
@@ -868,6 +883,7 @@ impl Cmd {
             Cmd::LoadStickers => w.u8(58),
             Cmd::TypingSetting(on) => w.u8(59).bool(*on),
             Cmd::Typing(c, on) => w.u8(60).str(c).bool(*on),
+            Cmd::ChangeWords => w.u8(61),
         };
         w.0
     }
@@ -940,6 +956,7 @@ impl Cmd {
             58 => Cmd::LoadStickers,
             59 => Cmd::TypingSetting(r.bool()?),
             60 => Cmd::Typing(r.str()?, r.bool()?),
+            61 => Cmd::ChangeWords,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

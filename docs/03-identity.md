@@ -337,6 +337,18 @@ Changing a member's root is not a membership change: the same person keeps the s
 - **Not hidden from contacts.** Every contact learns the account moved to a new key, which is the point.
 - **Can't recover from a thief who also has a device.** If someone has the old words and a linked device, they can migrate too; that is "Secure my account" plus removing the device (§5), first.
 
+#### 8.2.8 As implemented
+
+`enclave-proto/src/migration.rs` (the record; ctx `enclave/v1/ctx/migration`), `GroupState::root_change` and the self-only rule in `GroupState::accepts` and `Group::apply_state`, `enclave-core/src/client/migrate.rs`, and `DirKind::Migration` in the server (`12-servers.md` §2.2).
+
+- `change_recovery_words` stages the new secret, account keys, manifest and record under temporary keys, writes a `migrating` flag (the commit point), then moves them into place; `Client::open` finishes a staged migration before reading anything. Further steps are tracked as bits in the `migration-step` setting and retried from `sync` until all are done; `migration_pending` reports it. A second change waits for the first to finish.
+- The migration travels as `Content::Migration` (content kind 24): a sealed file reference to `record ‖ new signed manifest`, at most 128 KiB. Receivers queue it and check it in `sync`; two changes in a row are applied in order whatever order they arrive in.
+- The checks are §8.2.3's, plus: the new manifest's identity key and `vault_hash` are the old ones and its version is higher.
+- The rename covers the contact record (and its card), sessions, 1:1 history (re-sealed), blocks, held recovery shares, pending PQ-step replies, join requests, token issuers, pins, conversation settings, group cards and the "keyed" sets; in-person bonds and the manifest-guard state are dropped, so the contact shows as not checked and not met. Group messages, reactions and polls are rewritten when the group update arrives. Until then, group code resolves a member's old root through the migrations table.
+- **The app**: Settings → Recovery words → "Someone may have seen them? Change them" explains what happens and shows the new words. A contact who changed theirs gets a card in the conversation (Saffron rule) with **Check now**; checking clears it. Screenshots 49–50.
+- Test `change_recovery_words` (`enclave-core/tests/client.rs`) changes the words twice in a row and checks: the contact receives both, in order, and knows the account only by the newest root, unchecked, with its history (including a disappearing message), mute setting and pin; the conversation continues both ways; the group (whose admin is someone else) takes the self-only updates, the old group message is attributed to the new root, and a message after a rekey arrives; friends hold shares of the new words; the old card can't be added. `migration.rs` and `group.rs` unit tests cover signatures, tampering, and the self-only rule.
+- Not done: the "root lost, devices kept" case without the old signature (accepted, but nothing creates it); the warning for a contact who never receives the migration but sees the group update (it stays held); publishing the migration to KT.
+
 ### 8.3 Social recovery (M9, optional)
 
 - `rs` is split with SLIP-0039 into 3-of-5 shares, each sent inside an existing session to a chosen contact.

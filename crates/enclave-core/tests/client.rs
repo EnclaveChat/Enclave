@@ -2216,3 +2216,158 @@ async fn typing_indicators() {
     mo.block(&ada.root()).await.unwrap();
     assert!(mo.send_typing(&ada.root(), true).await.unwrap().is_none());
 }
+
+/// Changing the recovery words (03 §8.2): a new root, signed by both; the
+/// contacts rename the old root everywhere, the group takes Ada's own root
+/// update without an admin, history, settings and shares carry over, and
+/// the old root's codes stop working.
+#[tokio::test(flavor = "multi_thread")]
+async fn change_recovery_words() {
+    use enclave_core::{ConvPrefs, Place};
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    connect(&mut mo, &mut jo).await;
+    // Mo's group: Ada is a member, not an admin.
+    let gid = mo
+        .create_group("Trip", &[ada.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    ada.send_group_text(&gid, "before").await.unwrap();
+    ada.send_text(&mo.root(), "kept").await.unwrap();
+    ada.set_timer(&mo.root(), 3600).await.unwrap();
+    ada.send_text(&mo.root(), "fading").await.unwrap();
+    ada.give_recovery_shares(&[mo.root(), jo.root()], 2)
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let old = ada.root();
+    mo.set_verified(&old, true).unwrap();
+    let muted = ConvPrefs {
+        muted: true,
+        ..Default::default()
+    };
+    mo.set_conv_prefs(&Place::Contact(old), muted).unwrap();
+    let kept = mo
+        .messages(&old)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.text == "kept")
+        .unwrap();
+    mo.pin_message(&old, kept.seq, true).await.unwrap();
+    let old_card = ada.card();
+
+    let words = ada.change_recovery_words().await.unwrap();
+    let new = ada.root();
+    assert_ne!(new, old);
+    assert_eq!(ada.recovery_words().unwrap(), words);
+    assert!(
+        !ada.migration_pending(),
+        "directory, file, shares: all done"
+    );
+    assert!(
+        ada.change_recovery_words().await.is_ok(),
+        "and it can be done again"
+    );
+    let words = ada.recovery_words().unwrap();
+    let (old2, new) = (new, ada.root());
+
+    let evs = settle(&mut [&mut mo, &mut jo, &mut ada], 4).await;
+    let moved: Vec<_> = evs[0]
+        .iter()
+        .filter_map(|e| match e {
+            Event::ContactMoved {
+                old,
+                root,
+                cross_signed,
+            } => Some((*old, *root, *cross_signed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moved, vec![(old, old2, true), (old2, new, true)]);
+
+    // Mo knows Ada only by the new root now, unchecked, with everything kept.
+    let roots: Vec<_> = mo.contacts().iter().map(|c| c.root).collect();
+    assert!(roots.contains(&new) && !roots.contains(&old) && !roots.contains(&old2));
+    let c = mo.contacts().into_iter().find(|c| c.root == new).unwrap();
+    assert!(!c.verified, "the security code changed");
+    assert!(mo.moved(&new).unwrap().cross_signed);
+    let texts: Vec<String> = mo
+        .messages(&new)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert!(texts.contains(&"kept".to_string()));
+    assert!(
+        texts.contains(&"fading".to_string()),
+        "disappearing messages are sealed again: {texts:?}"
+    );
+    assert!(mo.conv_prefs(&Place::Contact(new)).muted);
+    assert_eq!(mo.pinned(&Place::Contact(new)).len(), 1);
+    mo.set_verified(&new, true).unwrap();
+    assert!(mo.moved(&new).is_none(), "checking again clears the notice");
+
+    // The conversation carries on both ways.
+    mo.send_text(&new, "still you?").await.unwrap();
+    ada.sync().await.unwrap();
+    assert!(
+        ada.messages(&mo.root())
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "still you?")
+    );
+    ada.send_text(&mo.root(), "still me").await.unwrap();
+    mo.sync().await.unwrap();
+    assert!(
+        mo.messages(&new)
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "still me")
+    );
+
+    // The group took Ada's own update; her old message is hers under the
+    // new root, and new ones arrive, including after a rekey.
+    for c in [&mo, &jo] {
+        let g = c.groups().into_iter().find(|g| g.id == gid).unwrap();
+        let members: Vec<_> = g.members.iter().map(|(r, _)| *r).collect();
+        assert!(members.contains(&new), "{members:?}");
+        assert!(!members.contains(&old));
+        let before = c
+            .group_messages(&gid)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.text == "before")
+            .unwrap();
+        assert_eq!(before.from, Some(new));
+    }
+    net.advance(86_400 + 1);
+    ada.send_group_text(&gid, "after").await.unwrap();
+    let evs = settle(&mut [&mut mo, &mut jo], 2).await;
+    for e in &evs {
+        assert!(group_texts(e).contains(&"after".to_string()), "{e:?}");
+    }
+
+    // Friends hold shares of the new words.
+    let a = mo.recovery_share_for(&new).unwrap();
+    let b = jo.recovery_share_for(&new).unwrap();
+    let rebuilt = enclave_core::words_from_shares(&[a.as_str(), b.as_str()]).unwrap();
+    assert_eq!(rebuilt, words.join(" "));
+
+    // The old root's code leads nowhere.
+    let (mut dee, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Dee")
+        .await
+        .unwrap();
+    assert!(dee.add_contact(&old_card, "hi").await.is_err());
+}

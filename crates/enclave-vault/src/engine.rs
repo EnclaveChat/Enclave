@@ -178,6 +178,9 @@ struct Engine {
     typing_until: HashMap<[u8; 64], std::time::Instant>,
     /// When we last told each contact we were typing.
     typing_sent: HashMap<[u8; 64], std::time::Instant>,
+    /// Conversation ids of contacts who changed their recovery words, old
+    /// to new, so a window still showing the old id keeps working.
+    renamed: HashMap<String, String>,
     /// The contact whose recovery share is on screen (only while shown).
     reveal_share: Option<[u8; 64]>,
     out: mpsc::UnboundedSender<Out>,
@@ -525,6 +528,7 @@ pub async fn run_with(
         restore_error: String::new(),
         typing_until: HashMap::new(),
         typing_sent: HashMap::new(),
+        renamed: HashMap::new(),
         reveal_share: None,
         out,
     };
@@ -616,6 +620,13 @@ impl Engine {
     }
 
     fn root_of(&self, id: &str) -> Option<[u8; 64]> {
+        let mut id = id;
+        for _ in 0..8 {
+            match self.renamed.get(id) {
+                Some(n) => id = n,
+                None => break,
+            }
+        }
         self.client
             .as_ref()?
             .contacts()
@@ -828,6 +839,7 @@ impl Engine {
                 | Cmd::LinkScan(..)
                 | Cmd::LinkPick(..)
                 | Cmd::Add(..)
+                | Cmd::ChangeWords
         );
         if bulk {
             self.bulk(true);
@@ -1867,6 +1879,22 @@ impl Engine {
                     let _ = c.set_verified(&root, true);
                 }
             }
+            Cmd::ChangeWords => {
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    match c.change_recovery_words().await {
+                        Ok(_) => {
+                            self.reveal_words = true;
+                            self.status.clear();
+                        }
+                        Err(_) => {
+                            self.status = "Couldn't change your recovery words. Your old words still work. Check your connection and try again.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
             Cmd::TypingSetting(on) => {
                 if let Some(c) = self.client.as_mut() {
                     let _ = c.set_typing_enabled(on);
@@ -2092,6 +2120,14 @@ impl Engine {
                             Event::Typing { root, on: false } | Event::Message { root, .. } => {
                                 self.typing_until.remove(root);
                             }
+                            Event::ContactMoved { old, root, .. } => {
+                                if self.selected == Some(*old) {
+                                    self.selected = Some(*root);
+                                }
+                                self.typing_until.remove(old);
+                                self.typing_sent.remove(old);
+                                self.renamed.insert(hex_id(old), hex_id(root));
+                            }
                             _ => {}
                         }
                     }
@@ -2204,6 +2240,12 @@ impl Engine {
             .collect();
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.typing_setting = c.typing_enabled();
+        s.can_change_words = c.holds_recovery_words();
+        s.words_pending = c.migration_pending();
+        s.moved = self
+            .selected
+            .and_then(|r| c.moved(&r))
+            .map_or(0, |m| if m.cross_signed { 1 } else { 2 });
         s.typing = self.selected.is_some_and(|r| {
             self.typing_until
                 .get(&r)

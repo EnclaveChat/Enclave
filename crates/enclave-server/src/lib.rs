@@ -134,6 +134,11 @@ pub struct Server {
     devices_seen: HashMap<[u8; 32], Vec<SeenDevice>>,
     /// Device attestations per manifest key, newest last.
     attestations: HashMap<[u8; 32], Vec<Vec<u8>>>,
+    /// Changes of recovery words, keyed by the old root's manifest key: the
+    /// old root may publish no manifest after that.
+    migrations: HashMap<[u8; 32], Vec<u8>>,
+    /// Old root → new root, for handing a username over.
+    moved: HashMap<[u8; 64], [u8; 64]>,
     bundles: HashMap<[u8; 16], DeviceBundles>,
     claims: HashMap<[u8; 32], (Vec<u8>, u64)>,
     vaults: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
@@ -207,6 +212,8 @@ impl Server {
             manifests: HashMap::new(),
             devices_seen: HashMap::new(),
             attestations: HashMap::new(),
+            migrations: HashMap::new(),
+            moved: HashMap::new(),
             bundles: HashMap::new(),
             claims: HashMap::new(),
             vaults: HashMap::new(),
@@ -729,7 +736,14 @@ impl Server {
         match (req.kind, req.action) {
             (_, DirAction::Put) => self.dir_put(req, now),
             (DirKind::Manifest, DirAction::Get) => match self.manifests.get(&req.key) {
+                Some(_) if self.migrations.contains_key(&req.key) => {
+                    (Status::NotFound, Reply::Empty)
+                }
                 Some((_, bytes)) => Self::chunk_reply(bytes, req.index, [0; 32]),
+                None => (Status::NotFound, Reply::Empty),
+            },
+            (DirKind::Migration, DirAction::Get) => match self.migrations.get(&req.key) {
+                Some(bytes) => Self::chunk_reply(bytes, req.index, [0; 32]),
                 None => (Status::NotFound, Reply::Empty),
             },
             (DirKind::Vault, DirAction::Get) => match self.vaults.get(&req.key) {
@@ -836,6 +850,7 @@ impl Server {
             DirKind::Vault => self.accept_vault(&req.key, &req.proof, object),
             DirKind::Username => self.accept_username(&req.key, &req.proof, &object, now),
             DirKind::Attest => self.accept_attestation(&req.key, object),
+            DirKind::Migration => self.accept_migration(&req.key, &object, now),
         };
         (status, Reply::Empty)
     }
@@ -912,10 +927,15 @@ impl Server {
             return Status::Invalid;
         }
         if let Some((owner, last)) = self.usernames.get(&name) {
-            if *owner != root {
+            // The owner changed their recovery words: the name moves along.
+            let moved = self.moved.get(owner) == Some(&root);
+            if *owner != root && !moved {
                 return Status::Denied;
             }
-            if *last >= claim.time {
+            if moved {
+                let owner = *owner;
+                self.names_by_root.remove(&owner);
+            } else if *last >= claim.time {
                 return Status::Invalid;
             }
         }
@@ -956,7 +976,37 @@ impl Server {
         Status::Ok
     }
 
+    /// Keep a change of recovery words: both roots signed it, and the new
+    /// root's manifest (already stored) is the one it names. From then on
+    /// the old root can't publish a manifest here.
+    fn accept_migration(&mut self, key: &[u8; 32], bytes: &[u8], now: u64) -> Status {
+        let Ok(mig) = enclave_proto::migration::Migration::decode(bytes) else {
+            return Status::Malformed;
+        };
+        if &manifest_key(&mig.old.0) != key || !mig.cross_signed() {
+            return Status::Invalid;
+        }
+        let Some((_, mbytes)) = self.manifests.get(&manifest_key(&mig.new.0)) else {
+            return Status::NotFound;
+        };
+        let Ok(sm) = SignedManifest::from_bytes(mbytes) else {
+            return Status::Invalid;
+        };
+        if mig.verify(&sm, now).is_err() {
+            return Status::Invalid;
+        }
+        if self.migrations.contains_key(key) {
+            return Status::Invalid;
+        }
+        self.migrations.insert(*key, bytes.to_vec());
+        self.moved.insert(mig.old.0, mig.new.0);
+        Status::Ok
+    }
+
     fn accept_manifest(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {
+        if self.migrations.contains_key(key) {
+            return Status::Denied;
+        }
         let Ok(sm) = SignedManifest::from_bytes(&bytes) else {
             return Status::Malformed;
         };

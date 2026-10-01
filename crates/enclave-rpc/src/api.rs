@@ -109,6 +109,9 @@ pub enum DirKind {
     /// Device attestations about an account's manifest changes (co-sign or
     /// veto), keyed like the manifest.
     Attest = 5,
+    /// A change of recovery words (`03-identity.md` §8.2), keyed like the
+    /// old root's manifest, which it replaces.
+    Migration = 6,
 }
 
 /// Directory action.
@@ -168,6 +171,7 @@ impl DirRequest {
             3 => DirKind::Vault,
             4 => DirKind::Username,
             5 => DirKind::Attest,
+            6 => DirKind::Migration,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {

@@ -72,6 +72,8 @@ Nothing in this table is an IP address, a Nym identity or an account identifier.
 | 2 `Bundle` | `device_id (16) ‖ 0^16` (`device_key`) | `Publication` on put; `Bundle` on claim | The device | Initiators, through claims |
 | 3 `Vault` | 32 B random locator | Opaque bytes (the client-sealed vault key) | The account | Holders of the locator and its key (contact card) |
 | 4 `Username` | The name's bytes, zero-padded to 32 (`name_key`) on put and on the first get; the reply ID on later gets | `UsernameClaim` on put; `LookupReply` on get (§3.7) | A device of the account | Anyone who knows the name |
+| 5 `Attest` | Like the manifest | Device attestations (co-sign or veto, `03-identity.md` §8.1) | A listed device | Contacts and our own devices |
+| 6 `Migration` | The **old** root's `manifest_key` | `Migration` record (`03-identity.md` §8.2) | The account, after changing its recovery words | Anyone holding an old code |
 
 Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B (`08-envelope.md` §9.3).
 
@@ -82,6 +84,7 @@ Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B
 - **Manifest:** decode the signed manifest and its body (`Malformed`); the key must equal `manifest_key(root)` of the manifest's own root (`Invalid`); the root signature and validity window must verify (`SignedManifest::verify` with the manifest's root, `Invalid`); the version must be higher than the stored one (`Invalid`). Then store it.
 - **Bundle:** decode the publication (`Malformed`); the key must equal `device_key` of the signed prekey's device (`Invalid`); some stored manifest must list that device (`NotFound`), and `Publication::verify` must pass with that device's composite key (`Invalid`). Then store it and reset the one-time-prekey pointer to 0.
 - **Username:** see §3.7.
+- **Migration:** decode the record (`Malformed`); the key must be the old root's `manifest_key` and the old root must have cross-signed it (`Invalid`); the new root's manifest must already be stored (`NotFound`) and the record must verify against it (`Migration::verify`, `Invalid`); only one per key (`Invalid`). From then on a `Manifest` put under the old key is `Denied`, a `Manifest` get under it is `NotFound` (so old codes don't lead to the account), and a username the old root held may be claimed by the new root (§3.5).
 - **Vault:** `DirRequest.proof` is the owner secret. If the locator exists with a different owner hash: `Denied`. Otherwise store the bytes with `credential_hash(owner secret)`. The server does not interpret the bytes.
 
 ### 2.3 Get and claim
@@ -168,6 +171,8 @@ PLAN's quorum values (≥3 independent witnesses, ≥2 during beta) are policy i
 - its skeleton must not equal the skeleton of a reserved name: `admin`, `enclave`, `support`, `security`, `root`, `help`, `official`, `system`.
 
 `username::skeleton(name)` maps look-alikes to one form: first replace `rn` → `m`, `vv` → `w`, `cl` → `d`, and remove `_`; then map characters `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`. `KtLog::publish` refuses a new name whose skeleton equals that of a different registered name (RT-26).
+
+A name held by a root that has a stored migration (§2.2) moves to the new root when the new root claims it; the old root no longer holds any name.
 
 The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons), operator tombstones and account-deletion tombstones are not implemented.
 

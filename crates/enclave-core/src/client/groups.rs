@@ -735,11 +735,12 @@ impl Client {
                 if m == me || Some(member.root) == exclude {
                     continue;
                 }
-                let Some(c) = self.contacts.get(&member.root) else {
+                let root = super::migrate::resolve(&self.store, &member.root);
+                let Some(c) = self.contacts.get(&root) else {
                     continue;
                 };
                 for (di, dev) in c.manifest.devices.iter().enumerate() {
-                    if let Some(s) = self.sessions.get(&(member.root, dev.id)) {
+                    if let Some(s) = self.sessions.get(&(root, dev.id)) {
                         targets.push(RekeyTarget {
                             member: m,
                             device: di as u8,
@@ -922,14 +923,15 @@ impl Client {
             let me = e.group.me;
             !e.left
                 && e.group.state.active().any(|(m, member)| {
-                    m != me
-                        && !e.keyed.contains(&member.root)
-                        && self.contacts.get(&member.root).is_some_and(|c| {
+                    m != me && !e.keyed.contains(&member.root) && {
+                        let root = super::migrate::resolve(&self.store, &member.root);
+                        self.contacts.get(&root).is_some_and(|c| {
                             c.manifest
                                 .devices
                                 .iter()
-                                .any(|d| self.sessions.contains_key(&(member.root, d.id)))
+                                .any(|d| self.sessions.contains_key(&(root, d.id)))
                         })
+                    }
                 })
         };
         if due
@@ -997,6 +999,7 @@ impl Client {
                 .get(sender.member as usize)
                 .map(|m| m.root)
                 .ok_or(ProtoError::Decode)?;
+            let root = super::migrate::resolve(&self.store, &root);
             let dev_id = self
                 .contacts
                 .get(&root)
@@ -1032,12 +1035,19 @@ impl Client {
                 .get(msg.member as usize)
                 .map(|m| m.root)
                 .ok_or(ProtoError::Decode)?;
-            (root, e.group.state.clone())
+            // A member who changed their recovery words, before their group
+            // update arrived, is known here by the new root.
+            (self.current_root(&root), e.group.state.clone())
         };
         if msg.flags & FLAG_STATE_UPDATE != 0 {
             let next = GroupState::decode(&msg.content)?;
             if !prev_state.accepts(&next, msg.member) {
                 return Ok(None);
+            }
+            // Someone's root changes in place: only with their migration.
+            if let Some((_, old, new)) = prev_state.root_change(&next) {
+                let applied = self.on_group_root_change(gid, msg.member, next, &old, &new)?;
+                return Ok(applied.then_some(Event::GroupChanged { group_id: *gid }));
             }
             let e = self.groups.get_mut(gid).ok_or(CoreError::NotFound)?;
             match e.group.apply_state(next) {
@@ -1167,7 +1177,7 @@ impl Client {
     // Storage
     // ------------------------------------------------------------------
 
-    fn save_group(&mut self, gid: &[u8; 32]) -> Result<()> {
+    pub(crate) fn save_group(&mut self, gid: &[u8; 32]) -> Result<()> {
         let Some(e) = self.groups.get(gid) else {
             return Ok(());
         };

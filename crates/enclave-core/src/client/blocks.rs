@@ -13,7 +13,7 @@ use crate::{CoreError, Result};
 use enclave_rpc::api::{self, FLAG_REVOKE};
 use enclave_wire::{Op, RequestHeader};
 
-const NS_BLOCKED: &str = "blocked";
+pub(crate) const NS_BLOCKED: &str = "blocked";
 /// Tokens sent on unblocking.
 const UNBLOCK_TOKENS: usize = 32;
 

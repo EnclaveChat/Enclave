@@ -28,7 +28,7 @@ use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{DirAction, DirKind, manifest_key};
 
 /// root → version ‖ hash ‖ first seen
-const NS_PENDING: &str = "pending-manifests";
+pub(crate) const NS_PENDING: &str = "pending-manifests";
 /// replay id → next try ‖ envelope
 pub(crate) const NS_HELD: &str = "held-requests";
 /// root ‖ version → hash

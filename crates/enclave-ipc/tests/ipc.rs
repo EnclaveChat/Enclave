@@ -124,6 +124,9 @@ fn snapshot() -> Snapshot {
         invites: 2,
         typing_setting: true,
         typing: true,
+        can_change_words: true,
+        words_pending: true,
+        moved: 2,
     }
 }
 
@@ -160,6 +163,7 @@ fn cmds() -> Vec<Cmd> {
         Cmd::LoadStickers,
         Cmd::TypingSetting(true),
         Cmd::Typing("c1".into(), false),
+        Cmd::ChangeWords,
         Cmd::Select(String::new()),
         Cmd::Send("id".into(), "text ✓".into()),
         Cmd::Accept("a".into()),

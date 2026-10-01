@@ -108,7 +108,7 @@ export struct StickerCell {
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report, stickers, new-pack }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report, stickers, new-pack, change-words }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -581,6 +581,10 @@ export component AppWindow inherits Window {
     in property <bool> typing-setting;
     in property <bool> typing;
     callback set-typing-setting(bool);
+    in property <bool> can-change-words;
+    in property <bool> words-pending;
+    in property <int> moved;
+    callback change-words();
     callback draft-changed(string, bool);
     callback create-pack(string, string);
     in property <[StickerPackRow]> sticker-packs;
@@ -1381,6 +1385,23 @@ export component AppWindow inherits Window {
                                     root.selected-seq = "";
                                 }
                             }
+                        }
+                    }
+                }
+                if root.moved != 0 && root.current.kind == 0: HorizontalLayout {
+                    padding-left: Tokens.space-m;
+                    padding-right: Tokens.space-m;
+                    Notice {
+                        title: root.moved == 1
+                            ? root.current.name + " changed their recovery words"
+                            : root.current.name + "'s account moved to a new key";
+                        text: root.moved == 1
+                            ? "Their security code changed too. Check it again before sharing anything private."
+                            : "Enclave can't confirm it was them who did this. Check the security code in person before sharing anything private.";
+                        kind: 1;
+                        HorizontalLayout {
+                            alignment: start;
+                            QuietButton { text: "Check now"; clicked => { root.open-sheet(Sheet.check-code); } }
                         }
                     }
                 }
@@ -2485,12 +2506,53 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        HorizontalLayout {
+        if root.busy: Secondary { text: "Making your new words…"; }
+        if !root.busy: HorizontalLayout {
             alignment: start;
             PrimaryButton {
                 text: root.recovery-saved ? "Done" : "I've written them down";
                 clicked => { root.words-saved(); root.sheet = Sheet.none; }
             }
+        }
+        if root.words-pending && !root.busy: Caption {
+            text: "Telling your contacts and groups about your new words. This finishes on its own.";
+            wrap: word-wrap;
+        }
+        if root.can-change-words && !root.busy && !root.words-pending: Rectangle { height: 1px; background: Tokens.hairline; }
+        if root.can-change-words && !root.busy && !root.words-pending: Secondary {
+            text: "Think someone may have seen them? You can replace them with new words.";
+        }
+        if root.can-change-words && !root.busy && !root.words-pending: HorizontalLayout {
+            alignment: start;
+            QuietButton {
+                text: "Change my words";
+                outlined: true;
+                clicked => { root.open-sheet(Sheet.change-words); }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.change-words: SheetFrame {
+        title: "Change your recovery words";
+        close => { root.sheet = Sheet.none; }
+        Body {
+            text: "Do this if someone may have seen your words. You'll get 24 new words, and the old ones stop working.";
+            wrap: word-wrap;
+        }
+        Secondary {
+            text: "Everyone you talk to will see that your security code changed, and will be asked to check it again. Your conversations, groups and devices stay as they are.";
+        }
+        Secondary {
+            text: "Old invite links and codes stop working, and backups made with the old words won't restore. Save a new backup afterwards.";
+        }
+        HorizontalLayout {
+            spacing: Tokens.space-s;
+            alignment: start;
+            PrimaryButton {
+                text: "Change my words";
+                clicked => { root.change-words(); root.open-sheet(Sheet.recovery); }
+            }
+            QuietButton { text: "Not now"; clicked => { root.sheet = Sheet.recovery; } }
         }
     }
 }

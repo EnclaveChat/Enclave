@@ -329,6 +329,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = t.send(Cmd::LoadStickers);
     });
     let t = tx.clone();
+    ui.on_change_words(move || {
+        let _ = t.send(Cmd::ChangeWords);
+    });
+    let t = tx.clone();
     ui.on_set_typing_setting(move |on| {
         let _ = t.send(Cmd::TypingSetting(on));
     });

@@ -55,6 +55,24 @@ impl AccountKeys {
         })
     }
 
+    /// Replace the root with the one derived from `recovery` (new recovery
+    /// words), keeping every other key. Returns the old root signing key,
+    /// for the cross-signature; fails without one (a linked device).
+    pub fn reroot(&mut self, recovery: &RecoverySecret) -> Result<RootSigningKey> {
+        let old = self.root.take().ok_or(ProtoError::Missing)?;
+        let new = RootSigningKey::from_recovery_secret(recovery.as_bytes());
+        self.root_public = new.public();
+        self.root = Some(new);
+        Ok(old)
+    }
+
+    /// Adopt a new root public key (a linked device, after our primary
+    /// changed the recovery words). Such a device holds no root secret.
+    pub fn adopt_root(&mut self, root: RootPublic) {
+        self.root = None;
+        self.root_public = root;
+    }
+
     /// SHA3-512 of the McEliece vault public key, committed in the manifest.
     pub fn vault_hash(&self) -> [u8; 64] {
         enclave_crypto::hash::sha3_512(&self.vault_public.0[..])
