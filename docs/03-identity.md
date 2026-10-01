@@ -259,14 +259,83 @@ Rules:
 - Our own devices fetch our manifest every 10 minutes. A newer version that no listed device co-signed raises `Event::RecoveryPending { until }` and a persistent card ("Someone is setting up your account on another device… Stop it / It's me"). **Stop it** signs a veto, publishes it, and also sends it as `Content::Veto` (kind 15) to every contact and our devices, so a server that withholds it doesn't win. **It's me** signs a co-signature, and contacts accept the update on their next look.
 - Not implemented: posting pending records and vetoes to KT, the recovering device's own "One of your other devices stopped this change" notice, and refusing to send from a device whose update is still held (its messages are lost until contacts accept it).
 
-### 8.2 Migration (recovery words compromised)
+### 8.2 Changing the recovery words (root migration)
 
-1. The user creates a new recovery secret and new root on a current device.
-2. The new root signs `Migration{old_root_pk, new_root_pk, new_manifest_hash, time}` with ctx `enclave/v1/proto/migration`. If the old root is still available (the old words are known), the old root cross-signs the same payload with the same ctx.
-3. The migration is delivered to every contact inside existing sessions and published to KT.
-4. Contacts with a valid cross-signature see: "Sam reset their account. Check the security code again." Their state becomes `changed`.
-5. Without the old root's cross-signature, the UI says: "Sam's account was replaced. Enclave can't tell whether Sam did this or someone else did. Check the security code in person before sharing anything private."
-6. Migration always changes the security code.
+Someone who thinks their recovery words were seen (a photo, a lost notebook) needs new words. The root key is derived from the words (§2), so new words mean a **new root**: a migration from the old root to the new one. This section is the design; "As implemented" below says what the code does.
+
+#### 8.2.1 What changes and what doesn't
+
+Only the root changes. The account X448 identity key, the McEliece vault key, every device key, the inboxes, tokens, sessions, groups and history are kept: none of them is derived from the words. So the migration is a re-signing of the same account under a new root, not a new account.
+
+| Changes | Stays |
+|---|---|
+| recovery words and root key pair | identity and vault keys (same `vault_hash`) |
+| the manifest (re-signed under the new root, version + 1) | devices and their keys, sessions, inboxes, tokens |
+| the security code (it covers the root, D4) | conversations, groups, history, settings |
+| backups and recovery shares made from the old words (no longer restore anything) | who is in which group, and admin roles |
+
+#### 8.2.2 The migration record
+
+```
+Migration = u8(1) ‖ old_root_pk (64) ‖ new_root_pk (64) ‖ new_manifest_hash (64) ‖ u64(time)
+            ‖ new_sig (29,792) ‖ u8(has_old) ‖ [old_sig (29,792)]
+new_sig = RootSign(new_root_sk, ctx = "enclave/v1/ctx/migration", payload)
+old_sig = RootSign(old_root_sk, ctx = "enclave/v1/ctx/migration", payload)
+payload = old_root_pk ‖ new_root_pk ‖ new_manifest_hash ‖ u64(time)
+```
+
+`new_manifest_hash` is SHA3-512 of the new signed manifest, which lists the same devices and keys as the last one under the old root, with `prev_hash` = the hash of that last manifest and `version` one higher. Both signatures cover the same payload. The device the person migrates from holds the old words (only a device with the recovery secret can do it), so in practice the old signature is always present; the format allows it to be missing for a future "root lost, devices kept" case.
+
+#### 8.2.3 Who accepts it, and why
+
+A contact accepts a migration of `old → new` only if all of these hold:
+
+1. it arrives **inside an existing session** with `old`, from a device listed in the manifest the contact currently accepts for `old`;
+2. `new_sig` verifies under `new`, and `old_sig`, if present, under `old`;
+3. the new manifest verifies under `new`, hashes to `new_manifest_hash`, and lists the sending device.
+
+Rule 1 is what makes this safe against the threat that motivates it. Someone who has the old words but none of the person's devices can sign with the old root, but can't send in a session: to add a device of their own they would need a manifest update, which waits 72 hours and can be vetoed (§8.1). Rule 3 ties the new root to the devices the contact already talks to. Signatures alone are never enough, so a migration found anywhere else (the directory, a shared card) is never followed automatically.
+
+What the contact sees:
+
+- with the old root's signature: "Sam changed their recovery words. Their security code changed too: check it again before sharing anything private." The contact is no longer marked checked;
+- without it: "Sam's account was moved to a new key, but Enclave can't confirm it was Sam who did it. Check the security code in person before sharing anything private."
+
+#### 8.2.4 On the migrating device
+
+`change_recovery_words` runs on a device that holds the recovery secret, in this order (each step is safe to repeat, and a journal record makes a crash resume where it stopped):
+
+1. Generate a new recovery secret and root; build and sign the new manifest; co-sign it with this device's key (§8.1), and sign the migration with both roots.
+2. Publish the co-signature and the new manifest under the new root's directory key, and the migration under the **old** key (`DirKind::Migration`). From then on the server refuses manifests under the old key, so the old words can no longer publish one; a lookup of the old key finds the migration, and the app says "This code is out of date. Ask Sam for a new one." instead of following it.
+3. Store the new secret, root and manifest. The old secret is deleted.
+4. Send the migration (with the new manifest, about 100 KB, so as a sealed file reference) to every contact and every group member we have a session with, and to our own devices.
+5. In every group, post a state update that changes only our own member entry's root (§8.2.6).
+6. Re-claim our username for the new root (the server allows it because it holds the migration).
+7. If friends hold shares of the old words, give them shares of the new words (same friends, same threshold); the new shares replace the old ones.
+8. Show the new words and ask the person to save them again; a new backup is needed (the old one was made from the old words).
+
+Linked devices adopt the new root from the migration their primary sends them; they never had the words.
+
+#### 8.2.5 On a contact's device
+
+Everything the contact stores about us is keyed by our root. Accepting the migration **renames** `old` to `new` everywhere, so that afterwards the contact's state is exactly what it would be had we always had the new root, and every existing code path keeps working unchanged:
+
+- records keyed by root: the contact, its sessions (`root ‖ device`), blocks, conversation settings, pins, in-person bonds, recovery shares we hold for them, pending join requests, token issuers, PQ-step marks, and the manifest guard's state for that account;
+- the 1:1 message namespaces (`msg_ns`, `id_ns`), with disappearing messages re-sealed under the new conversation's shred keys;
+- values that name the root: group member cards, the `from` of their group messages and reactions, and poll votes.
+
+The rename is journaled (`old ‖ new`) before it starts and the journal is removed when it ends; opening the profile finishes an interrupted rename. A verified `old → new` is also kept in a small migrations table, which is how group updates (§8.2.6) are checked and how a late message that still names `old` is understood.
+
+#### 8.2.6 Groups
+
+Changing a member's root is not a membership change: the same person keeps the same slot, admin role and join time. So it doesn't need an admin. `GroupState::accepts` allows an update from any member that changes **only that member's own root**; a member's client additionally applies it only once it holds a verified migration from that member's old root to the new one (§8.2.3), and holds the update until then (the pairwise migration and the group update can arrive in either order). A member who never gets the migration keeps holding the update and sees a notice; a later state update from an admin that includes the new root is accepted as usual.
+
+#### 8.2.7 What this doesn't do
+
+- **History stays.** The contact keeps the conversation and its history: the person is the same, only their key changed.
+- **Old codes and links stop working.** Invite links and QR codes carry the old root; they lead to the migration notice, not to the account.
+- **Not hidden from contacts.** Every contact learns the account moved to a new key, which is the point.
+- **Can't recover from a thief who also has a device.** If someone has the old words and a linked device, they can migrate too; that is "Secure my account" plus removing the device (§5), first.
 
 ### 8.3 Social recovery (M9, optional)
 

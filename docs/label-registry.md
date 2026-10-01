@@ -66,6 +66,7 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/ctx/eqxdh-transcript` | CTX-C | — | `eqxdh.rs` `initiate`, `verify_transcript_sig` | On-the-record initiator transcript signature |
 | `enclave/v1/ctx/manifest-cosign` | CTX-C | — | `attest.rs` `Attestation::sign`, `verify` | A listed device approves a manifest update |
 | `enclave/v1/ctx/manifest-veto` | CTX-C | — | `attest.rs` `Attestation::sign`, `verify` | A listed device vetoes a manifest update |
+| `enclave/v1/ctx/migration` | CTX-R | — | `migration.rs` `Migration::sign`, `verify` | Old and new roots sign a change of recovery words (03 §8.2) |
 | `enclave/v1/eqxdh/identity` | KMAC | 256 | `eqxdh.rs` `stage1_key` (through `seal::derive_key`) | Stage-1 key `k_id` that seals the initiator identity |
 | `enclave/v1/ratchet/init-rk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial root key `RK0` from `SK` |
 | `enclave/v1/ratchet/init-hk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial header keys; two calls with inputs `frame("a")` (HKA) and `frame("b")` (NHKB) |
@@ -137,7 +138,6 @@ These labels belong to features that are specified but not in code. They are res
 | Label | Kind | Output | Purpose | Defined in |
 |---|---|---|---|---|
 | `enclave/v1/proto/root-hash` | HASH | 256 | `root_hash` of a root public key | 02b §2.1 |
-| `enclave/v1/proto/migration` | CTX-R | — | `Migration{old, new}` record | 03 §8.2 |
 | `enclave/v1/proto/pending-root` | CTX-R | — | Pending root action with `not_before` | 03 §8.1 |
 | `enclave/v1/proto/moved` | CTX-R | — | `Moved` record for server migration | 12 §4 |
 | `enclave/v1/proto/tombstone` | CTX-R | — | Account-deletion KT tombstone | 03 §8.5 |
@@ -249,6 +249,7 @@ The M0 draft named these labels. The implementation replaced them, so they are r
 | Retired label | Replaced by |
 |---|---|
 | `enclave/v1/proto/manifest` | `enclave/v1/ctx/manifest` |
+| `enclave/v1/proto/migration` | `enclave/v1/ctx/migration` |
 | `enclave/v1/proto/manifest-hash` | Plain SHA3-512 of the signed manifest encoding (no label; `SignedManifest::hash`) |
 | `enclave/v1/proto/spk` | `enclave/v1/ctx/signed-prekey` and `enclave/v1/ctx/last-resort` (separate signatures) |
 | `enclave/v1/proto/opk-root` | `enclave/v1/ctx/opk-batch` |
