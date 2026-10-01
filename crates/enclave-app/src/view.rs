@@ -209,6 +209,12 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             image: img.unwrap_or_default(),
         })
         .collect();
+    ui.set_gallery_count(
+        s.messages
+            .iter()
+            .filter(|m| !m.file.is_empty() && !m.deleted)
+            .count() as i32,
+    );
     ui.set_messages(ModelRc::from(Rc::new(VecModel::from(msgs))));
     ui.set_code_groups(strings(&s.code_groups));
     ui.set_status_line(s.status.clone().into());

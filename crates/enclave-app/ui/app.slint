@@ -88,7 +88,7 @@ export struct MessageRow {
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -502,6 +502,8 @@ export component AppWindow inherits Window {
     callback add-shared(string, string);
     callback share-location(string, string, string, string);
     in-out property <string> location-lat;
+    // Photos and files in the open conversation.
+    in property <int> gallery-count;
     in-out property <string> location-lon;
     in-out property <string> location-name;
     in property <[MessageRow]> messages;
@@ -1482,6 +1484,14 @@ export component AppWindow inherits Window {
             text: "These choices stay on this device. Nobody in the conversation sees them.";
             wrap: word-wrap;
         }
+        if root.gallery-count > 0: HorizontalLayout {
+            alignment: start;
+            QuietButton {
+                text: "Photos and files (" + root.gallery-count + ")";
+                outlined: true;
+                clicked => { root.sheet = Sheet.gallery; }
+            }
+        }
         if root.current.kind == 0: HorizontalLayout {
             alignment: start;
             spacing: Tokens.space-s;
@@ -1567,6 +1577,61 @@ export component AppWindow inherits Window {
             QuietButton {
                 text: "Share a location";
                 clicked => { root.sheet = Sheet.location; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.gallery: SheetFrame {
+        title: "Photos and files";
+        close => { root.sheet = Sheet.conversation; }
+        Secondary { text: "Everything sent in this conversation, newest last. Files stay sealed on this device until you save them."; }
+        VerticalLayout {
+            spacing: Tokens.space-xs;
+            for m in root.messages: Rectangle {
+                visible: m.file != "" && !m.deleted;
+                height: self.visible ? 64px : 0px;
+                accessible-role: list-item;
+                accessible-label: (m.picture ? "Photo: " : "File: ") + m.file + ", " + m.time;
+                HorizontalLayout {
+                    spacing: Tokens.space-sm;
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        border-radius: Tokens.radius-control;
+                        background: Tokens.bubble-in;
+                        clip: true;
+                        if m.has-image: Image {
+                            source: m.image;
+                            width: parent.width;
+                            height: parent.height;
+                            image-fit: cover;
+                        }
+                        if !m.has-image: Path {
+                            width: 24px;
+                            height: 24px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: Icons.attach;
+                            stroke: Tokens.text-muted;
+                            stroke-width: 1.75px;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        Body { text: m.file; overflow: elide; }
+                        Caption { text: (m.picture ? "Photo" : "File") + " · " + (m.outgoing ? "you sent it" : "received") + " · " + m.time; overflow: elide; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        QuietButton {
+                            text: "Save";
+                            accessible-label: "Save " + m.file;
+                            clicked => { root.save-file(root.current-id, m.seq); }
+                        }
+                    }
+                }
             }
         }
     }

@@ -416,6 +416,18 @@ fn main() -> Result<(), slint::PlatformError> {
             },
         );
         shot("05-picture", desktop);
+        pic.messages.push(Msg {
+            outgoing: true,
+            time: "14:09".into(),
+            status: 1,
+            seq: 901,
+            file: "interview-brief.pdf".into(),
+            ..Default::default()
+        });
+        view::apply(&ui, &pic);
+        ui.set_sheet(Sheet::Gallery);
+        shot("42-gallery-phone", phone);
+        ui.set_sheet(Sheet::None);
         view::apply(&ui, &data);
 
         let mut request = data.clone();
