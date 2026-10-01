@@ -29,6 +29,20 @@ pub fn apply_preview(ui: &AppWindow, p: Preview) {
         c.borrow_mut()
             .insert((p.conversation.clone(), p.seq), img.clone())
     });
+    if p.conversation.starts_with("stickers/") {
+        let model = ui.get_sticker_cells();
+        for i in 0..model.row_count() {
+            if let Some(mut c) = model.row_data(i)
+                && format!("stickers/{}", c.pack) == p.conversation
+                && c.index as u64 == p.seq
+            {
+                c.image = img.clone();
+                c.has_image = true;
+                model.set_row_data(i, c);
+            }
+        }
+        return;
+    }
     if ui.get_current_id().as_str() != p.conversation {
         return;
     }
@@ -194,6 +208,8 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             contact_known: m.contact_known,
             location: m.location.clone().into(),
             location_label: m.location_label.clone().into(),
+            sticker: m.sticker,
+            pack_added: m.pack_added,
             poll_options: ModelRc::from(Rc::new(VecModel::from(
                 m.poll_options
                     .iter()
@@ -264,6 +280,32 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
     ui.set_holds_share(s.holds_share);
     ui.set_shown_share(s.shown_share.clone().into());
     ui.set_pins(strings(&s.pins));
+    ui.set_sticker_packs(ModelRc::from(Rc::new(VecModel::from(
+        s.sticker_packs
+            .iter()
+            .map(|p| crate::StickerPackRow {
+                id: p.id.clone().into(),
+                title: p.title.clone().into(),
+                count: p.count as i32,
+            })
+            .collect::<Vec<_>>(),
+    ))));
+    let cells: Vec<crate::StickerCell> = s
+        .sticker_packs
+        .iter()
+        .flat_map(|p| {
+            (0..p.count).map(move |i| {
+                let img = preview(&format!("stickers/{}", p.id), u64::from(i));
+                crate::StickerCell {
+                    pack: p.id.clone().into(),
+                    index: i as i32,
+                    has_image: img.is_some(),
+                    image: img.unwrap_or_default(),
+                }
+            })
+        })
+        .collect();
+    ui.set_sticker_cells(ModelRc::from(Rc::new(VecModel::from(cells))));
     ui.set_unlock_error(s.unlock_error.clone().into());
     ui.set_can_lock(s.can_lock);
     ui.set_invites(s.invites as i32);

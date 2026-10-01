@@ -221,6 +221,16 @@ fn mime_for(name: &str) -> &'static str {
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
 
+/// Sticker pictures are re-encoded to at most this many pixels a side.
+const STICKER_SIDE: u16 = 512;
+/// Sticker thumbnails in the picker.
+const PICKER_SIDE: u16 = 160;
+
+/// A short opaque id for a 32-byte key (the UI never sees the key).
+fn hex_short(k: &[u8; 32]) -> String {
+    k[..12].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The id the UI uses for the note-to-self conversation.
 const NOTES_ID: &str = "notes";
 
@@ -575,18 +585,29 @@ impl Engine {
         let Ok(msgs) = c.messages(&root) else {
             return;
         };
-        let want: Vec<u64> = msgs
+        let want: Vec<(u64, Option<(enclave_core::files::Attachment, u8)>)> = msgs
             .iter()
             .rev()
-            .filter(|m| !m.deleted && m.attachment.as_ref().is_some_and(is_picture))
-            .map(|m| m.seq)
-            .filter(|s| !self.previews.contains(&(id.clone(), *s)))
+            .filter(|m| {
+                !m.deleted && (m.sticker.is_some() || m.attachment.as_ref().is_some_and(is_picture))
+            })
+            .map(|m| {
+                (
+                    m.seq,
+                    m.sticker.zip(m.attachment.clone()).map(|(i, a)| (a, i)),
+                )
+            })
+            .filter(|(s, _)| !self.previews.contains(&(id.clone(), *s)))
             .take(4)
             .collect();
-        for seq in want {
+        for (seq, sticker) in want {
             // A download that fails is tried again next time; a picture
             // that doesn't decode is not.
-            let Ok(bytes) = c.fetch_attachment(&root, seq).await else {
+            let fetched = match sticker {
+                Some((att, i)) => c.sticker_picture(&att, i).await,
+                None => c.fetch_attachment(&root, seq).await,
+            };
+            let Ok(bytes) = fetched else {
                 continue;
             };
             self.previews.insert((id.clone(), seq));
@@ -615,16 +636,27 @@ impl Engine {
         let Ok(msgs) = c.group_messages(&gid) else {
             return;
         };
-        let want: Vec<u64> = msgs
+        let want: Vec<(u64, Option<(enclave_core::files::Attachment, u8)>)> = msgs
             .iter()
             .rev()
-            .filter(|m| !m.deleted && m.attachment.as_ref().is_some_and(is_picture))
-            .map(|m| m.seq)
-            .filter(|s| !self.previews.contains(&(id.clone(), *s)))
+            .filter(|m| {
+                !m.deleted && (m.sticker.is_some() || m.attachment.as_ref().is_some_and(is_picture))
+            })
+            .map(|m| {
+                (
+                    m.seq,
+                    m.sticker.zip(m.attachment.clone()).map(|(i, a)| (a, i)),
+                )
+            })
+            .filter(|(s, _)| !self.previews.contains(&(id.clone(), *s)))
             .take(4)
             .collect();
-        for seq in want {
-            let Ok(bytes) = c.fetch_group_attachment(&gid, seq).await else {
+        for (seq, sticker) in want {
+            let fetched = match sticker {
+                Some((att, i)) => c.sticker_picture(&att, i).await,
+                None => c.fetch_group_attachment(&gid, seq).await,
+            };
+            let Ok(bytes) = fetched else {
                 continue;
             };
             self.previews.insert((id.clone(), seq));
@@ -967,6 +999,109 @@ impl Engine {
                     && c.share_contact(&to, &who).await.is_err()
                 {
                     self.status = "Couldn't share that contact. They need to have shared their code with you first.".into();
+                }
+            }
+            Cmd::CreatePack(title, pictures) => {
+                self.busy = true;
+                self.push();
+                let mut stickers = Vec::new();
+                for p in pictures
+                    .into_iter()
+                    .take(enclave_core::client::MAX_STICKERS)
+                {
+                    // Re-encoded like any picture, and small.
+                    match self.media.shrink(p, STICKER_SIDE).await {
+                        Ok(s) => stickers.push(s.bytes),
+                        Err(_) => {
+                            self.status = "One of those files isn't a picture Enclave can read, so no pack was made.".into();
+                            self.busy = false;
+                            return;
+                        }
+                    }
+                }
+                if let Some(c) = self.client.as_mut() {
+                    self.status = match c.create_sticker_pack(&title, stickers).await {
+                        Ok(p) => format!("Made the pack {} with {} stickers.", p.title, p.count),
+                        Err(CoreError::TooLong) => {
+                            "A pack needs 1 to 40 pictures and a short name.".into()
+                        }
+                        Err(_) => "Couldn't upload the pack. Check your connection.".into(),
+                    };
+                }
+                self.busy = false;
+            }
+            Cmd::SendSticker(id, pack, index) => {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let Some(key) = c
+                    .sticker_packs()
+                    .into_iter()
+                    .find(|p| hex_short(&p.key) == pack)
+                    .map(|p| p.key)
+                else {
+                    return;
+                };
+                let index = u8::try_from(index).unwrap_or(u8::MAX);
+                let r = match (root, gid) {
+                    (Some(root), _) => c.send_sticker(&root, &key, index).await.map(|_| ()),
+                    (None, Some(gid)) => c.send_group_sticker(&gid, &key, index).await.map(|_| ()),
+                    (None, None) => Ok(()),
+                };
+                if r.is_err() {
+                    self.status = "Couldn't send the sticker. Check your connection.".into();
+                }
+            }
+            Cmd::AddPack(id, seq) => {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let att = match (root, gid) {
+                    (Some(root), _) => c
+                        .messages(&root)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.attachment),
+                    (None, Some(gid)) => c
+                        .group_messages(&gid)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.attachment),
+                    (None, None) => None,
+                };
+                if let Some(att) = att {
+                    self.status = match c.add_sticker_pack(&att).await {
+                        Ok(p) => format!("Added the pack {}.", p.title),
+                        Err(_) => "Couldn't add that pack. Check your connection.".into(),
+                    };
+                }
+            }
+            Cmd::LoadStickers => {
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                for p in c.sticker_packs() {
+                    let conv = format!("stickers/{}", hex_short(&p.key));
+                    for i in 0..p.count {
+                        if self.previews.contains(&(conv.clone(), u64::from(i))) {
+                            continue;
+                        }
+                        let Ok(bytes) = c.sticker_picture(&p.file, i).await else {
+                            continue;
+                        };
+                        self.previews.insert((conv.clone(), u64::from(i)));
+                        if let Ok(t) = self.media.thumbnail(bytes, PICKER_SIDE).await {
+                            let _ = self.out.send(Out::Preview(enclave_ipc::Preview {
+                                conversation: conv.clone(),
+                                seq: u64::from(i),
+                                width: t.width,
+                                height: t.height,
+                                pixels: t.pixels,
+                            }));
+                        }
+                    }
                 }
             }
             Cmd::Report(id, reason, quote, block) => {
@@ -1797,6 +1932,15 @@ impl Engine {
                 .collect();
         }
         s.my_link = c.card().to_link();
+        s.sticker_packs = c
+            .sticker_packs()
+            .into_iter()
+            .map(|p| enclave_ipc::StickerPackRow {
+                id: hex_short(&p.key),
+                title: p.title,
+                count: u32::from(p.count),
+            })
+            .collect();
         s.invites = c.invites().map(|v| v.len() as u32).unwrap_or(0);
         s.my_username = c.username().map(|u| format!("@{u}")).unwrap_or_default();
         s.joining = c.joining().into_iter().map(|(_, n)| n).collect();
@@ -1907,6 +2051,20 @@ impl Engine {
                     .iter()
                     .map(|m| {
                         let card = shared.get(&m.id).filter(|_| !m.deleted);
+                        if let (Some(_), Some(att)) = (m.sticker, &m.attachment)
+                            && !m.deleted
+                        {
+                            return Msg {
+                                text: String::new(),
+                                file: String::new(),
+                                image: false,
+                                can_edit: false,
+                                sticker: true,
+                                pack_added: c.has_sticker_pack(att),
+                                pinned: pinned.contains(&m.id),
+                                ..display(m, now)
+                            };
+                        }
                         Msg {
                             pinned: !m.deleted && pinned.contains(&m.id),
                             contact_name: card.map(|k| k.name.clone()).unwrap_or_default(),
@@ -2043,6 +2201,16 @@ impl Engine {
                                 .is_some_and(|a| !m.deleted && is_picture(a)),
                             ..Default::default()
                         };
+                        if let (Some(_), Some(att)) = (m.sticker, &m.attachment)
+                            && !m.deleted
+                        {
+                            msg.text.clear();
+                            msg.file.clear();
+                            msg.image = false;
+                            msg.can_edit = false;
+                            msg.sticker = true;
+                            msg.pack_added = c.has_sticker_pack(att);
+                        }
                         if let Some(p) = m.poll.and_then(|id| c.poll(&g.id, &id)) {
                             msg.poll_options = p.options.iter().map(|o| o.0.clone()).collect();
                             msg.poll_counts = p.options.iter().map(|o| o.1).collect();

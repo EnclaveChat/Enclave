@@ -46,6 +46,17 @@ pub struct Row {
     pub blocked: bool,
 }
 
+/// A sticker pack added on this device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StickerPackRow {
+    /// Opaque id.
+    pub id: String,
+    /// Its name.
+    pub title: String,
+    /// How many stickers.
+    pub count: u32,
+}
+
 /// A contact that can be picked for a new group.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pick {
@@ -118,6 +129,10 @@ pub struct Msg {
     pub location: String,
     /// The place's label.
     pub location_label: String,
+    /// A sticker (its picture comes as a preview).
+    pub sticker: bool,
+    /// The sticker's pack is added here.
+    pub pack_added: bool,
 }
 
 /// Everything the window shows.
@@ -212,6 +227,8 @@ pub struct Snapshot {
     /// The open conversation's pinned messages (text, most recently
     /// pinned first).
     pub pins: Vec<String>,
+    /// Sticker packs added here.
+    pub sticker_packs: Vec<StickerPackRow>,
     /// Members of the open group (other than us).
     pub members: Vec<Row>,
     /// We are an admin of the open group.
@@ -345,6 +362,14 @@ pub enum Cmd {
     /// Report a contact to their server's operator: id, reason (1 spam,
     /// 2 abuse, 3 other), quote their latest messages, also block them.
     Report(String, u8, bool, bool),
+    /// Make a sticker pack: title, pictures (as read from files).
+    CreatePack(String, Vec<Vec<u8>>),
+    /// Send a sticker: conversation, pack id, index.
+    SendSticker(String, String, u32),
+    /// Add the pack of the sticker at a message: conversation, position.
+    AddPack(String, u64),
+    /// Send the UI previews of every added pack's stickers.
+    LoadStickers,
 }
 
 /// One-off UI resets after a request succeeded.
@@ -498,7 +523,9 @@ impl Snapshot {
                 .str(&m.contact_name)
                 .bool(m.contact_known)
                 .str(&m.location)
-                .str(&m.location_label);
+                .str(&m.location_label)
+                .bool(m.sticker)
+                .bool(m.pack_added);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -553,7 +580,11 @@ impl Snapshot {
             .u32(self.share_threshold)
             .bool(self.holds_share)
             .str(&self.shown_share)
-            .strs(&self.pins);
+            .strs(&self.pins)
+            .len(self.sticker_packs.len());
+        for p in &self.sticker_packs {
+            w.str(&p.id).str(&p.title).u32(p.count);
+        }
         put_rows(&mut w, &self.members);
         w.bool(self.group_admin);
         w.len(self.addable.len());
@@ -610,6 +641,8 @@ impl Snapshot {
                     contact_known: r.bool()?,
                     location: r.str()?,
                     location_label: r.str()?,
+                    sticker: r.bool()?,
+                    pack_added: r.bool()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -697,6 +730,18 @@ impl Snapshot {
             holds_share: r.bool()?,
             shown_share: r.str()?,
             pins: r.strs()?,
+            sticker_packs: {
+                let n = r.len()?;
+                (0..n)
+                    .map(|_| {
+                        Ok(StickerPackRow {
+                            id: r.str()?,
+                            title: r.str()?,
+                            count: r.u32()?,
+                        })
+                    })
+                    .collect::<Result<_>>()?
+            },
             members: get_rows(&mut r)?,
             group_admin: r.bool()?,
             addable: {
@@ -781,6 +826,16 @@ impl Cmd {
             Cmd::AddShared(c, s) => w.u8(52).str(c).u64(*s),
             Cmd::ShareLocation(c, la, lo, l) => w.u8(53).str(c).str(la).str(lo).str(l),
             Cmd::Report(c, r, q, b) => w.u8(54).str(c).u8(*r).bool(*q).bool(*b),
+            Cmd::CreatePack(t, pics) => {
+                w.u8(55).str(t).len(pics.len());
+                for p in pics {
+                    w.bytes(p);
+                }
+                &mut w
+            }
+            Cmd::SendSticker(c, p, i) => w.u8(56).str(c).str(p).u32(*i),
+            Cmd::AddPack(c, s) => w.u8(57).str(c).u64(*s),
+            Cmd::LoadStickers => w.u8(58),
         };
         w.0
     }
@@ -843,6 +898,14 @@ impl Cmd {
             52 => Cmd::AddShared(r.str()?, r.u64()?),
             53 => Cmd::ShareLocation(r.str()?, r.str()?, r.str()?, r.str()?),
             54 => Cmd::Report(r.str()?, r.u8()?, r.bool()?, r.bool()?),
+            55 => {
+                let t = r.str()?;
+                let n = r.len()?;
+                Cmd::CreatePack(t, (0..n).map(|_| r.bytes()).collect::<Result<_>>()?)
+            }
+            56 => Cmd::SendSticker(r.str()?, r.str()?, r.u32()?),
+            57 => Cmd::AddPack(r.str()?, r.u64()?),
+            58 => Cmd::LoadStickers,
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

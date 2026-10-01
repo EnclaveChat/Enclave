@@ -160,3 +160,51 @@ async fn a_dead_mediad_is_replaced_by_a_spare() {
     assert!(t.width <= 32 && t.height <= 32);
     assert_eq!(media.alive(), 1, "the first is gone, the spare runs");
 }
+
+/// Stickers through the engine: a pack made from a phone photo (redrawn
+/// small, without its metadata), shown in the picker, sent, and previewed
+/// in the conversation.
+#[tokio::test(flavor = "multi_thread")]
+async fn sticker_pack_through_the_engine() {
+    let (tx, mut rx) = enclave_vault::spawn(enclave_vault::Mode::Demo);
+    tx.send(Cmd::Create("Robin".into(), String::new())).unwrap();
+    let s = next(&mut rx, snapshot(|s| !s.requests.is_empty())).await;
+    let sam = s.requests[0].id.clone();
+    tx.send(Cmd::Accept(sam.clone())).unwrap();
+    next(
+        &mut rx,
+        snapshot(|s| s.contacts.iter().any(|c| c.id == sam && c.state == 2)),
+    )
+    .await;
+    tx.send(Cmd::Select(sam.clone())).unwrap();
+
+    tx.send(Cmd::CreatePack("Robin's".into(), vec![photo(), photo()]))
+        .unwrap();
+    let s = next(&mut rx, snapshot(|s| !s.sticker_packs.is_empty())).await;
+    let pack = s.sticker_packs[0].clone();
+    assert_eq!((pack.title.as_str(), pack.count), ("Robin's", 2));
+
+    tx.send(Cmd::LoadStickers).unwrap();
+    let p = next(&mut rx, |o| match o {
+        Out::Preview(p) if p.conversation.starts_with("stickers/") => Some(p),
+        _ => None,
+    })
+    .await;
+    assert_eq!(p.conversation, format!("stickers/{}", pack.id));
+
+    tx.send(Cmd::SendSticker(sam.clone(), pack.id.clone(), 1))
+        .unwrap();
+    let s = next(&mut rx, snapshot(|s| s.messages.iter().any(|m| m.sticker))).await;
+    let m = s.messages.iter().find(|m| m.sticker).unwrap().clone();
+    assert!(
+        m.text.is_empty() && m.file.is_empty(),
+        "no file line for a sticker"
+    );
+    let p = next(&mut rx, |o| match o {
+        Out::Preview(p) if p.conversation == sam => Some(p),
+        _ => None,
+    })
+    .await;
+    assert_eq!(p.seq, m.seq);
+    assert_eq!((p.width, p.height), (40, 60), "upright, small");
+}

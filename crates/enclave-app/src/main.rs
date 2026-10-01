@@ -17,6 +17,10 @@ use std::time::Duration;
 
 /// Largest file sent from here (it crosses to the vault in one message).
 const MAX_FILE: u64 = 15 * 1024 * 1024;
+/// Largest picture file read for a sticker pack (it is redrawn small).
+const MAX_STICKER_FILE: u64 = 4 * 1024 * 1024;
+/// Most bytes read for one pack (one IPC message).
+const MAX_PACK_FILES: u64 = 14 * 1024 * 1024;
 
 /// Write a downloaded attachment into the Downloads folder without
 /// overwriting anything. The name is the sender's, so only its last
@@ -308,6 +312,55 @@ fn main() -> Result<(), slint::PlatformError> {
     let t = tx.clone();
     ui.on_search(move |q| {
         let _ = t.send(Cmd::Search(q.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_add_pack(move |id, seq| {
+        if let Ok(seq) = seq.parse() {
+            let _ = t.send(Cmd::AddPack(id.to_string(), seq));
+        }
+    });
+    let t = tx.clone();
+    ui.on_send_sticker(move |id, pack, index| {
+        let index = u32::try_from(index).unwrap_or(0);
+        let _ = t.send(Cmd::SendSticker(id.to_string(), pack.to_string(), index));
+    });
+    let t = tx.clone();
+    ui.on_load_stickers(move || {
+        let _ = t.send(Cmd::LoadStickers);
+    });
+    let t = tx.clone();
+    let w = ui.as_weak();
+    ui.on_create_pack(move |title, paths| {
+        let Some(ui) = w.upgrade() else {
+            return;
+        };
+        let mut pictures = Vec::new();
+        let mut total = 0u64;
+        for p in paths.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let read = std::fs::metadata(p).and_then(|m| {
+                total += m.len();
+                if m.len() > MAX_STICKER_FILE || total > MAX_PACK_FILES {
+                    Err(std::io::Error::other("too large for a sticker pack"))
+                } else {
+                    std::fs::read(p)
+                }
+            });
+            match read {
+                Ok(b) => pictures.push(b),
+                Err(e) => {
+                    ui.set_pack_error(format!("Couldn't read {p}: {e}.").into());
+                    return;
+                }
+            }
+        }
+        if pictures.is_empty() || pictures.len() > 40 {
+            ui.set_pack_error("A pack needs 1 to 40 pictures.".into());
+            return;
+        }
+        let _ = t.send(Cmd::CreatePack(title.trim().to_string(), pictures));
+        ui.set_pack_title("".into());
+        ui.set_pack_paths("".into());
+        ui.set_sheet(Sheet::Stickers);
     });
     let t = tx.clone();
     ui.on_report(move |id, reason, quote, block| {

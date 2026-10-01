@@ -85,10 +85,26 @@ export struct MessageRow {
     // A shared place: coordinates (empty when the message isn't one).
     location: string,
     location-label: string,
+    sticker: bool,
+    pack-added: bool,
+}
+
+export struct StickerPackRow {
+    id: string,
+    title: string,
+    count: int,
+}
+
+// One sticker in the picker; its picture comes as a preview.
+export struct StickerCell {
+    pack: string,
+    index: int,
+    has-image: bool,
+    image: image,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location, gallery, report, stickers, new-pack }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -118,10 +134,12 @@ component Bubble inherits HorizontalLayout {
     callback close-poll();
     callback add-contact();
     callback copy(string);
+    callback add-pack();
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
-        background: root.msg.outgoing ? Tokens.bubble-out : Tokens.bubble-in;
+        // A sticker stands on its own, without a bubble.
+        background: root.msg.sticker ? transparent : root.msg.outgoing ? Tokens.bubble-out : Tokens.bubble-in;
         border-width: root.selected ? 2px : 0px;
         border-color: Tokens.focus-ring;
         TouchArea { clicked => { root.tapped(); } }
@@ -130,7 +148,7 @@ component Bubble inherits HorizontalLayout {
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
-        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + (root.msg.location != "" ? "Location: " + root.msg.location-label + " " + root.msg.location + ". " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.sticker ? "Sticker. " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + (root.msg.location != "" ? "Location: " + root.msg.location-label + " " + root.msg.location + ". " : "") + root.msg.text + ", " + root.msg.time;
         accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
@@ -144,9 +162,17 @@ component Bubble inherits HorizontalLayout {
                 font-weight: 600;
                 color: Tokens.pine;
             }
+            if root.msg.sticker && !root.msg.has-image: Rectangle {
+                width: 120px;
+                height: 120px;
+                border-radius: Tokens.radius-control;
+                background: Tokens.bubble-in;
+                Caption { text: "Sticker"; }
+            }
             if root.msg.has-image: Rectangle {
-                // Natural size, narrowed to the bubble, aspect kept.
-                width: min(root.bubble-max - 2 * Tokens.space-sm, root.msg.image.width * 1px);
+                // Natural size, narrowed to the bubble, aspect kept; stickers
+                // at most 160 px.
+                width: min(root.msg.sticker ? 160px : root.bubble-max - 2 * Tokens.space-sm, root.msg.image.width * 1px);
                 height: self.width * root.msg.image.height / max(1, root.msg.image.width);
                 border-radius: Tokens.radius-control;
                 clip: true;
@@ -214,6 +240,14 @@ component Bubble inherits HorizontalLayout {
                 font-size: Tokens.type-body;
                 color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
                 wrap: word-wrap;
+            }
+            if root.msg.sticker && !root.msg.outgoing && !root.msg.pack-added && !root.msg.deleted: HorizontalLayout {
+                alignment: start;
+                QuietButton {
+                    text: "Add pack";
+                    accessible-label: "Add this sticker pack";
+                    clicked => { root.add-pack(); }
+                }
             }
             if root.msg.text != "": Text {
                 text: root.msg.text;
@@ -502,6 +536,15 @@ export component AppWindow inherits Window {
     callback add-shared(string, string);
     callback share-location(string, string, string, string);
     callback report(string, int, bool, bool);
+    callback add-pack(string, string);
+    callback send-sticker(string, string, int);
+    callback load-stickers();
+    callback create-pack(string, string);
+    in property <[StickerPackRow]> sticker-packs;
+    in property <[StickerCell]> sticker-cells;
+    in-out property <string> pack-title;
+    in-out property <string> pack-paths;
+    in-out property <string> pack-error;
     in-out property <int> report-reason: 1;
     in-out property <bool> report-quote: true;
     in-out property <bool> report-block: true;
@@ -1175,6 +1218,7 @@ export component AppWindow inherits Window {
                             close-poll => { root.close-poll(root.current-id, m.seq); }
                             add-contact => { root.add-shared(root.current-id, m.seq); }
                             copy(t) => { root.copy-text(t); }
+                            add-pack => { root.add-pack(root.current-id, m.seq); }
                         }
                     }
                 }
@@ -1334,6 +1378,11 @@ export component AppWindow inherits Window {
                             icon: Icons.poll;
                             label: "Ask a question";
                             clicked => { root.open-sheet(Sheet.poll); }
+                        }
+                        if root.current.kind != 2 && root.editing-seq == "": IconButton {
+                            icon: Icons.sticker;
+                            label: "Stickers";
+                            clicked => { root.load-stickers(); root.open-sheet(Sheet.stickers); }
                         }
                         composer := Field {
                             placeholder: root.editing-seq != "" ? "Edit your message" : "Message";
@@ -1593,6 +1642,70 @@ export component AppWindow inherits Window {
             if root.current.kind == 0: QuietButton {
                 text: "Share a location";
                 clicked => { root.sheet = Sheet.location; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.stickers: SheetFrame {
+        title: "Stickers";
+        close => { root.sheet = Sheet.none; }
+        if root.sticker-packs.length == 0: Secondary { text: "No sticker packs yet. Make one from your own pictures, or add one from a sticker someone sends you."; }
+        for p in root.sticker-packs: VerticalLayout {
+            spacing: Tokens.space-xs;
+            Caption { text: p.title; font-weight: 600; }
+            Flickable {
+                height: 72px;
+                viewport-width: p.count * 76px;
+                HorizontalLayout {
+                    spacing: 4px;
+                    for c in root.sticker-cells: Rectangle {
+                        visible: c.pack == p.id;
+                        width: self.visible ? 72px : 0px;
+                        height: 72px;
+                        border-radius: Tokens.radius-control;
+                        background: cell-touch.has-hover ? Tokens.bubble-in : transparent;
+                        accessible-role: button;
+                        accessible-label: "Send sticker " + (c.index + 1) + " from " + p.title;
+                        accessible-action-default => { root.send-sticker(root.current-id, c.pack, c.index); root.sheet = Sheet.none; }
+                        cell-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.send-sticker(root.current-id, c.pack, c.index); root.sheet = Sheet.none; }
+                        }
+                        if c.has-image: Image {
+                            source: c.image;
+                            width: 64px;
+                            height: 64px;
+                            image-fit: contain;
+                        }
+                        if !c.has-image: Caption { text: c.index + 1; }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            QuietButton { text: "Make a pack"; outlined: true; clicked => { root.pack-error = ""; root.sheet = Sheet.new-pack; } }
+        }
+    }
+
+    if root.sheet == Sheet.new-pack: SheetFrame {
+        title: "Make a sticker pack";
+        close => { root.sheet = Sheet.stickers; }
+        Secondary { text: "Pictures are redrawn small, without their metadata, and sealed into one pack. People you send a sticker to can add the whole pack."; }
+        Field { placeholder: "Pack name"; text <=> root.pack-title; }
+        Field { placeholder: "Paths to pictures, separated by ;"; mono: true; text <=> root.pack-paths; }
+        if root.pack-error != "": Text {
+            text: root.pack-error;
+            color: Tokens.danger;
+            font-size: Tokens.type-secondary;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: root.busy ? "Making…" : "Make pack";
+                enabled: root.pack-title != "" && root.pack-paths != "" && !root.busy;
+                clicked => { root.create-pack(root.pack-title, root.pack-paths); }
             }
         }
     }

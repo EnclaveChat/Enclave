@@ -214,6 +214,7 @@ fn fixture() -> Snapshot {
         holds_share: false,
         shown_share: String::new(),
         pins: Vec::new(),
+        sticker_packs: Vec::new(),
         members: Vec::new(),
         group_admin: false,
         addable: Vec::new(),
@@ -285,6 +286,36 @@ fn render(window: &MinimalSoftwareWindow, ui: &AppWindow, size: (u32, u32), out:
             }
         }
     }
+}
+
+/// A simple round sticker: a coloured disc with a white seal-like ring, on
+/// transparency.
+fn sticker_pixels(hue: u8) -> Vec<u8> {
+    let colours = [
+        (0x1D, 0x56, 0x46),
+        (0xF2, 0xB2, 0x30),
+        (0x6B, 0x4E, 0x2E),
+        (0x3F, 0x5A, 0x7A),
+        (0xA8, 0x32, 0x1E),
+    ];
+    let (r, g, b) = colours[usize::from(hue) % colours.len()];
+    let mut px = Vec::with_capacity(96 * 96 * 4);
+    for y in 0..96i32 {
+        for x in 0..96i32 {
+            let d = ((x - 48).pow(2) + (y - 48).pow(2)) as f32;
+            let p = if d < 40.0f32.powi(2) {
+                if d > 30.0f32.powi(2) && d < 34.0f32.powi(2) {
+                    [0xF6, 0xF3, 0xEC, 255]
+                } else {
+                    [r, g, b, 255]
+                }
+            } else {
+                [0, 0, 0, 0]
+            };
+            px.extend_from_slice(&p);
+        }
+    }
+    px
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -599,6 +630,58 @@ fn main() -> Result<(), slint::PlatformError> {
         });
         view::apply(&ui, &shared);
         shot("41-shared-contact-phone", phone);
+
+        // Stickers: one in the conversation, and the picker.
+        let mut st = data.clone();
+        st.sticker_packs = vec![enclave_ipc::StickerPackRow {
+            id: "p1".into(),
+            title: "Paper animals".into(),
+            count: 5,
+        }];
+        st.messages.push(Msg {
+            outgoing: false,
+            time: "14:07".into(),
+            status: 2,
+            seq: 98,
+            sticker: true,
+            pack_added: false,
+            ..Default::default()
+        });
+        let conv = st
+            .current
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        view::apply(&ui, &st);
+        for (i, hue) in [(0u64, 0u8), (1, 1), (2, 2), (3, 3), (4, 4)] {
+            let px = sticker_pixels(hue);
+            view::apply_preview(
+                &ui,
+                view::Preview {
+                    conversation: "stickers/p1".into(),
+                    seq: i,
+                    width: 96,
+                    height: 96,
+                    pixels: px.clone(),
+                },
+            );
+            if i == 2 {
+                view::apply_preview(
+                    &ui,
+                    view::Preview {
+                        conversation: conv.clone(),
+                        seq: 98,
+                        width: 96,
+                        height: 96,
+                        pixels: px,
+                    },
+                );
+            }
+        }
+        shot("44-sticker-phone", phone);
+        ui.set_sheet(Sheet::Stickers);
+        shot("45-sticker-picker-phone", phone);
+        ui.set_sheet(Sheet::None);
         ui.set_sheet(Sheet::Poll);
         ui.set_poll_question("Where should we meet?".into());
         ui.set_poll_a("Café on Main St".into());

@@ -73,6 +73,10 @@ Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes whic
 
 Local only, in the app (`enclave-app/ui/app.slint`, sheet `gallery`): the conversation sheet offers **Photos and files (n)**, a list of every attachment in the open conversation that hasn't been deleted, with the decoded preview for pictures (from `mediad`, as in the conversation) and **Save**. It is built from the messages the vault already sends the UI, so it adds no protocol, storage or IPC. Groups have the same list (07 §7.6). Not done: a grid across all conversations.
 
+## 5. As implemented: stickers
+
+`enclave-core/src/client/stickers.rs`. A pack is a title (at most 64 B) and 1 to 40 pictures, encoded `"ESP1" ‖ bytes(title) ‖ u8 n ‖ n × bytes(picture)` (at most 512 KiB each, 8 MiB in all), and sealed like any file (`08-envelope.md` §9): chunks padded to a size bucket at random IDs on its creator's server, under a key only holders of the reference have. That reference is the "pack secret". The app redraws each picture in `mediad` first (`MediaOp::Shrink`: at most 512 px a side, metadata gone). Sending a sticker sends the reference and an index: `Content::Sticker` (content kind 22, with the conversation's timer) or, in a group, `FLAG_RICH` kind 9. The server sees an ordinary unit. A recipient downloads the whole pack once (every chunk of its bucket, hash-checked), decodes the one picture in `mediad`, and can **Add pack**; added packs are listed per device. The app's sticker button opens a picker of added packs (thumbnails decoded in `mediad`) and **Make a pack** from picture files. Tests `sticker_packs` and `sticker_pack_through_the_engine`. Not done: animated stickers (they would be short AV1 clips), removing a pack from the app, and a pack's own preview before adding it.
+
 ## Open questions
 
 1. Stories (M11) need an audience model (all contacts, a list, or a group). The delivery design is not in PLAN.md.
