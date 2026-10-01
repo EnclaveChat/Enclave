@@ -192,6 +192,8 @@ pub fn apply(ui: &AppWindow, s: &Snapshot) {
             contact_name: m.contact_name.clone().into(),
             contact_initials: initials(&m.contact_name).into(),
             contact_known: m.contact_known,
+            location: m.location.clone().into(),
+            location_label: m.location_label.clone().into(),
             poll_options: ModelRc::from(Rc::new(VecModel::from(
                 m.poll_options
                     .iter()

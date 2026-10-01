@@ -114,6 +114,10 @@ pub struct Msg {
     pub contact_name: String,
     /// The shared contact is already someone we talk to (or us).
     pub contact_known: bool,
+    /// A shared place: its coordinates (empty when the message isn't one).
+    pub location: String,
+    /// The place's label.
+    pub location_label: String,
 }
 
 /// Everything the window shows.
@@ -335,6 +339,9 @@ pub enum Cmd {
     ShareContact(String, String),
     /// Add the contact shared at a message: conversation, position.
     AddShared(String, u64),
+    /// Share a place: conversation, latitude, longitude (degrees, as
+    /// typed), label.
+    ShareLocation(String, String, String, String),
 }
 
 /// One-off UI resets after a request succeeded.
@@ -486,7 +493,9 @@ impl Snapshot {
                 .bool(m.poll_ours)
                 .bool(m.pinned)
                 .str(&m.contact_name)
-                .bool(m.contact_known);
+                .bool(m.contact_known)
+                .str(&m.location)
+                .str(&m.location_label);
         }
         w.strs(&self.code_groups)
             .str(&self.status)
@@ -596,6 +605,8 @@ impl Snapshot {
                     pinned: r.bool()?,
                     contact_name: r.str()?,
                     contact_known: r.bool()?,
+                    location: r.str()?,
+                    location_label: r.str()?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -765,6 +776,7 @@ impl Cmd {
             Cmd::Block(c, on) => w.u8(50).str(c).bool(*on),
             Cmd::ShareContact(c, who) => w.u8(51).str(c).str(who),
             Cmd::AddShared(c, s) => w.u8(52).str(c).u64(*s),
+            Cmd::ShareLocation(c, la, lo, l) => w.u8(53).str(c).str(la).str(lo).str(l),
         };
         w.0
     }
@@ -825,6 +837,7 @@ impl Cmd {
             50 => Cmd::Block(r.str()?, r.bool()?),
             51 => Cmd::ShareContact(r.str()?, r.str()?),
             52 => Cmd::AddShared(r.str()?, r.u64()?),
+            53 => Cmd::ShareLocation(r.str()?, r.str()?, r.str()?, r.str()?),
             _ => return Err(IpcError::Malformed),
         };
         r.end()?;

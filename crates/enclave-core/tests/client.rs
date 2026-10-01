@@ -1502,6 +1502,54 @@ async fn group_reactions_edits_deletes() {
     }
 }
 
+/// Locations: coordinates and a label, nothing looked up; with a timer
+/// they disappear with the message.
+#[tokio::test(flavor = "multi_thread")]
+async fn share_a_location() {
+    use enclave_core::Location;
+    let net = network();
+    let (mut ada, _) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut mo, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Mo")
+        .await
+        .unwrap();
+    connect(&mut ada, &mut mo).await;
+    let here = Location::from_degrees(52.520008, 13.404954, "Meet here").unwrap();
+    ada.share_location(&mo.root(), &here).await.unwrap();
+    mo.sync().await.unwrap();
+    let got = mo
+        .messages(&ada.root())
+        .unwrap()
+        .into_iter()
+        .find_map(|m| m.location)
+        .expect("location arrived");
+    assert_eq!(got, here);
+    assert_eq!(got.coordinates(), "52.520008, 13.404954");
+
+    // With a one-minute timer, it's gone a minute after Mo reads it.
+    ada.set_timer(&mo.root(), 60).await.unwrap();
+    mo.sync().await.unwrap();
+    let there = Location::from_degrees(48.8584, 2.2945, "").unwrap();
+    ada.share_location(&mo.root(), &there).await.unwrap();
+    mo.sync().await.unwrap();
+    mo.mark_read(&ada.root()).await.unwrap();
+    assert!(
+        mo.messages(&ada.root())
+            .unwrap()
+            .iter()
+            .any(|m| m.location.as_ref() == Some(&there))
+    );
+    net.advance(61);
+    mo.sync().await.unwrap();
+    assert!(
+        mo.messages(&ada.root())
+            .unwrap()
+            .iter()
+            .all(|m| m.location.as_ref() != Some(&there))
+    );
+}
+
 /// Sharing a contact: Ada shares Jo's card with Mo, who adds Jo from it.
 /// The card carries no invite secret, and Jo sees an ordinary request.
 #[tokio::test(flavor = "multi_thread")]

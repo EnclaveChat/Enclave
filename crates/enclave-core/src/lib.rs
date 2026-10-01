@@ -31,7 +31,7 @@ pub use client::{
     LinkCode, LinkOffer, LinkProgress, LinkingDevice, Message, Options, Reaction,
 };
 pub use client::{
-    ConvPrefs, Hit, MAX_PINNED_CONVERSATIONS, MAX_PINS, MeetMatch, Place, RecoveryAlert,
+    ConvPrefs, Hit, Location, MAX_PINNED_CONVERSATIONS, MAX_PINS, MeetMatch, Place, RecoveryAlert,
     words_from_shares,
 };
 pub use enclave_kt::KtPolicy;

@@ -10,6 +10,7 @@
 //! * Edits and deletes for everyone are advisory: they apply only to the
 //!   author's own messages, edits only within 24 hours.
 
+use super::location::Location;
 use super::search::Place;
 use super::{Client, ContactState, Event};
 use crate::content::{Content, MAX_TEXT, MsgId};
@@ -67,6 +68,9 @@ pub struct Message {
     pub expires_secs: u32,
     /// When it disappears, once the timer has started.
     pub expires_at: Option<u64>,
+    /// A shared place. Kept in the message record itself, so it is
+    /// sealed and shredded with it.
+    pub location: Option<Location>,
 }
 
 impl Message {
@@ -85,12 +89,13 @@ impl Message {
             deleted: false,
             expires_secs: 0,
             expires_at: None,
+            location: None,
         }
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(2).u64(self.seq).fixed(&self.id);
+        w.u8(3).u64(self.seq).fixed(&self.id);
         w.u8(u8::from(self.outgoing))
             .u8(u8::from(self.delivered))
             .u8(u8::from(self.read))
@@ -111,12 +116,20 @@ impl Message {
             .u8(u8::from(self.deleted))
             .u32(self.expires_secs)
             .u64(self.expires_at.unwrap_or(0));
+        w.bytes(
+            &self
+                .location
+                .as_ref()
+                .map(Location::encode)
+                .unwrap_or_default(),
+        );
         w.finish()
     }
 
     pub(crate) fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
-        if r.u8()? != 2 {
+        let version = r.u8()?;
+        if version != 2 && version != 3 {
             return Err(ProtoError::Decode);
         }
         let s = |r: &mut Reader<'_>, n| {
@@ -142,6 +155,16 @@ impl Message {
         }
         let (edited, deleted, expires_secs) = (r.u8()? == 1, r.u8()? == 1, r.u32()?);
         let expires_at = Some(r.u64()?).filter(|t| *t != 0);
+        let location = if version >= 3 {
+            let l = r.bytes(512)?;
+            if l.is_empty() {
+                None
+            } else {
+                Some(Location::decode(l)?)
+            }
+        } else {
+            None
+        };
         r.end()?;
         Ok(Self {
             seq,
@@ -157,6 +180,7 @@ impl Message {
             deleted,
             expires_secs,
             expires_at,
+            location,
         })
     }
 
@@ -617,6 +641,16 @@ impl Client {
                     events.push(ev);
                 }
             }
+            Content::Location {
+                id,
+                location,
+                expires,
+            } => {
+                if let Some(ev) = self.on_location(root, id, &location, expires, false, now)? {
+                    self.bump_unread(root)?;
+                    events.push(ev);
+                }
+            }
             Content::Pin { target, on } => {
                 let place = Place::Contact(*root);
                 if self.find(root, &target).is_ok() && self.apply_pin(&place, &target, on)? {
@@ -729,6 +763,13 @@ impl Client {
             Content::ContactShare { id, card } => {
                 events.extend(self.on_contact_share(to, id, &card, true, now)?);
             }
+            Content::Location {
+                id,
+                location,
+                expires,
+            } => {
+                events.extend(self.on_location(to, id, &location, expires, true, now)?);
+            }
             Content::Pin { target, on } => {
                 let place = Place::Contact(*to);
                 if self.find(to, &target).is_ok() && self.apply_pin(&place, &target, on)? {
@@ -751,6 +792,7 @@ impl Client {
 
 pub(crate) fn wipe(m: &mut Message) {
     m.deleted = true;
+    m.location = None;
     m.text.clear();
     m.attachment = None;
     m.reactions.clear();

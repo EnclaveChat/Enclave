@@ -82,10 +82,13 @@ export struct MessageRow {
     contact-name: string,
     contact-initials: string,
     contact-known: bool,
+    // A shared place: coordinates (empty when the message isn't one).
+    location: string,
+    location-label: string,
 }
 
 export enum Screen { welcome, name, setting-up, join, locked, main, restore }
-export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact }
+export enum Sheet { none, my-code, add, check-code, settings, recovery, new-group, devices, meet, timer, attach, members, poll, friends, share, conversation, share-contact, location }
 
 component DeliveryMark inherits Rectangle {
     in property <int> status;
@@ -114,6 +117,7 @@ component Bubble inherits HorizontalLayout {
     callback vote(int);
     callback close-poll();
     callback add-contact();
+    callback copy(string);
     alignment: root.msg.outgoing ? end : start;
     Rectangle {
         max-width: root.bubble-max;
@@ -126,7 +130,7 @@ component Bubble inherits HorizontalLayout {
         border-bottom-left-radius: root.msg.outgoing ? Tokens.radius-bubble : Tokens.radius-bubble-tail;
         border-bottom-right-radius: root.msg.outgoing ? Tokens.radius-bubble-tail : Tokens.radius-bubble;
         accessible-role: text;
-        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + root.msg.text + ", " + root.msg.time;
+        accessible-label: (root.msg.outgoing ? "You: " : "") + (root.msg.picture ? "Photo: " + root.msg.file + ". " : "") + (root.msg.contact-name != "" ? "Contact: " + root.msg.contact-name + ". " : "") + (root.msg.location != "" ? "Location: " + root.msg.location-label + " " + root.msg.location + ". " : "") + root.msg.text + ", " + root.msg.time;
         accessible-action-default => { root.tapped(); }
         VerticalLayout {
             padding-left: Tokens.space-sm;
@@ -180,6 +184,29 @@ component Bubble inherits HorizontalLayout {
                 if !root.msg.outgoing && !root.msg.contact-known: VerticalLayout {
                     alignment: center;
                     QuietButton { text: "Add"; outlined: true; clicked => { root.add-contact(); } }
+                }
+            }
+            if root.msg.location != "": VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: root.msg.location-label != "" ? root.msg.location-label : "Location";
+                    font-size: Tokens.type-body;
+                    font-weight: 600;
+                    color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                }
+                Text {
+                    text: root.msg.location;
+                    font-family: "Atkinson Hyperlegible Mono";
+                    font-size: Tokens.type-secondary;
+                    color: root.msg.outgoing ? Tokens.on-bubble-out : Tokens.text;
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    QuietButton {
+                        text: "Copy coordinates";
+                        accessible-label: "Copy coordinates " + root.msg.location;
+                        clicked => { root.copy(root.msg.location); }
+                    }
                 }
             }
             if root.msg.picture && !root.msg.has-image: Text {
@@ -473,6 +500,10 @@ export component AppWindow inherits Window {
     callback block(string, bool);
     callback share-contact(string, string);
     callback add-shared(string, string);
+    callback share-location(string, string, string, string);
+    in-out property <string> location-lat;
+    in-out property <string> location-lon;
+    in-out property <string> location-name;
     in property <[MessageRow]> messages;
     in-out property <string> current-id;
     in property <ContactRow> current;
@@ -1137,6 +1168,7 @@ export component AppWindow inherits Window {
                             vote(i) => { root.vote(root.current-id, m.seq, i); }
                             close-poll => { root.close-poll(root.current-id, m.seq); }
                             add-contact => { root.add-shared(root.current-id, m.seq); }
+                            copy(t) => { root.copy-text(t); }
                         }
                     }
                 }
@@ -1531,6 +1563,33 @@ export component AppWindow inherits Window {
             QuietButton {
                 text: "Share a contact instead";
                 clicked => { root.sheet = Sheet.share-contact; }
+            }
+            QuietButton {
+                text: "Share a location";
+                clicked => { root.sheet = Sheet.location; }
+            }
+        }
+    }
+
+    if root.sheet == Sheet.location: SheetFrame {
+        title: "Share a location";
+        close => { root.sheet = Sheet.none; }
+        Secondary { text: "Type or paste the coordinates. Enclave doesn't look anything up and shows no map, so nobody else learns the place."; }
+        Field { placeholder: "Latitude, like 52.5200"; mono: true; text <=> root.location-lat; }
+        Field { placeholder: "Longitude, like 13.4050"; mono: true; text <=> root.location-lon; }
+        Field { placeholder: "Name it (optional)"; text <=> root.location-name; }
+        HorizontalLayout {
+            alignment: start;
+            PrimaryButton {
+                text: "Send";
+                enabled: root.location-lat != "" && root.location-lon != "";
+                clicked => {
+                    root.share-location(root.current-id, root.location-lat, root.location-lon, root.location-name);
+                    root.location-lat = "";
+                    root.location-lon = "";
+                    root.location-name = "";
+                    root.sheet = Sheet.none;
+                }
             }
         }
     }

@@ -129,6 +129,15 @@ pub enum Content {
     /// Our signed key-transparency head for an epoch where the sender's
     /// gossip disagreed, as a sealed file reference (RT-04).
     KtHead(Vec<u8>),
+    /// A place: coordinates and an optional label (encoded `Location`).
+    Location {
+        /// Message id.
+        id: MsgId,
+        /// The encoded location.
+        location: Vec<u8>,
+        /// Disappearing timer (seconds, 0 = off).
+        expires: u32,
+    },
     /// A contact card, shared so the recipient can add that person.
     ContactShare {
         /// Message id.
@@ -171,6 +180,9 @@ const K_KT_HEAD: u8 = 16;
 const K_RECOVERY_SHARE: u8 = 17;
 const K_PIN: u8 = 18;
 const K_CONTACT_SHARE: u8 = 19;
+const K_LOCATION: u8 = 20;
+/// Largest encoded location.
+const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
 pub const MAX_RECOVERY_SHARE: usize = 512;
 /// Largest content a self-copy can wrap.
@@ -354,6 +366,16 @@ impl Content {
                 }
                 w.u8(K_CONTACT_SHARE).fixed(id).bytes(card);
             }
+            Content::Location {
+                id,
+                location,
+                expires,
+            } => {
+                if location.len() > MAX_LOCATION || *expires > MAX_TIMER {
+                    return too_large;
+                }
+                w.u8(K_LOCATION).fixed(id).bytes(location).u32(*expires);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -429,6 +451,11 @@ impl Content {
             K_VETO => Content::Veto(r.bytes(enclave_proto::attest::MAX_ATTESTATION)?.to_vec()),
             K_KT_HEAD => Content::KtHead(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
             K_RECOVERY_SHARE => Content::RecoveryShare(get_str(&mut r, MAX_RECOVERY_SHARE)?),
+            K_LOCATION => Content::Location {
+                id: r.array()?,
+                location: r.bytes(MAX_LOCATION)?.to_vec(),
+                expires: timer(r.u32()?)?,
+            },
             K_CONTACT_SHARE => Content::ContactShare {
                 id: r.array()?,
                 card: r.bytes(MAX_CARD)?.to_vec(),
@@ -510,6 +537,11 @@ mod tests {
             Content::ContactShare {
                 id: [3; 16],
                 card: vec![7; 200],
+            },
+            Content::Location {
+                id: [5; 16],
+                location: vec![1; 40],
+                expires: 3600,
             },
             Content::SelfCopy {
                 to: [9; 64],

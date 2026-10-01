@@ -922,6 +922,24 @@ impl Engine {
                     self.status = "Couldn't share that contact. They need to have shared their code with you first.".into();
                 }
             }
+            Cmd::ShareLocation(id, lat, lon, label) => {
+                let Some(root) = self.root_of(&id) else {
+                    return;
+                };
+                let parse = |s: &str| s.trim().replace(',', ".").parse::<f64>().ok();
+                let Some(loc) = parse(&lat)
+                    .zip(parse(&lon))
+                    .and_then(|(la, lo)| enclave_core::Location::from_degrees(la, lo, &label))
+                else {
+                    self.status = "Check the coordinates: latitude from -90 to 90, longitude from -180 to 180.".into();
+                    return;
+                };
+                if let Some(c) = self.client.as_mut()
+                    && c.share_location(&root, &loc).await.is_err()
+                {
+                    self.status = "Couldn't send the location. Check your connection.".into();
+                }
+            }
             Cmd::AddShared(id, seq) => {
                 let Some(root) = self.root_of(&id) else {
                     return;
@@ -1730,7 +1748,11 @@ impl Engine {
                     last.map(|m| {
                         let mut t = display(m, now).text;
                         if t.is_empty() {
-                            t = "Shared a contact".into();
+                            t = if m.location.is_some() {
+                                "Location".into()
+                            } else {
+                                "Shared a contact".into()
+                            };
                         }
                         if m.outgoing { format!("You: {t}") } else { t }
                     })
@@ -1766,6 +1788,16 @@ impl Engine {
                             contact_name: card.map(|k| k.name.clone()).unwrap_or_default(),
                             contact_known: card
                                 .is_some_and(|k| k.root == me || c.contact(&k.root).is_some()),
+                            location: m
+                                .location
+                                .as_ref()
+                                .map(|l| l.coordinates())
+                                .unwrap_or_default(),
+                            location_label: m
+                                .location
+                                .as_ref()
+                                .map(|l| l.label.clone())
+                                .unwrap_or_default(),
                             ..display(m, now)
                         }
                     })

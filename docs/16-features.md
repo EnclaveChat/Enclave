@@ -65,6 +65,10 @@ Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes whic
 | Automatic contact import | Would require identifiers |
 | Analytics or telemetry | `19-ops.md` §3 |
 
+## 3. As implemented: locations
+
+`enclave-core/src/client/location.rs`. A location is `i32 lat ‖ i32 lon` in millionths of a degree (about 11 cm) and a label of at most 200 B, sent as `Content::Location { id, location, expires }` (content kind 20) with the conversation's disappearing timer. Receivers reject coordinates off the Earth. The place is stored inside the message record (`Message::location`), so it is sealed with the message and crypto-shredded with it when the timer runs out; deleting for everyone removes it too. Nothing is looked up on either side: no map tiles, geocoding or place names, and no network request at all. The app takes typed or pasted coordinates (desktop has no location sensor here) from the attach sheet and shows the label, the coordinates in the monospace face, and **Copy coordinates**. Test `share_a_location`. Not done: reading the platform location on phones, and handing the coordinates to a maps app the person chooses.
+
 ## Open questions
 
 1. Stories (M11) need an audience model (all contacts, a list, or a group). The delivery design is not in PLAN.md.
