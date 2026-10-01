@@ -37,6 +37,8 @@ use zeroize::Zeroizing;
 const HELLO_TOKENS: usize = 16;
 /// Refill once the contact has used this many tokens.
 const REFILL_AFTER: u32 = 8;
+/// Rounds of [`Client::sync_round`] between housekeeping passes.
+pub const UPKEEP_EVERY: u64 = 10;
 /// Most tokens kept for one contact's inbox.
 const MAX_HELD_TOKENS: usize = 64;
 /// Keep expired prekeys this long for late initial messages.
@@ -971,8 +973,48 @@ impl Client {
     /// maintain prekeys. Returns what the UI should show.
     pub async fn sync(&mut self) -> Result<Vec<Event>> {
         let now = self.now();
-        let mut events = Vec::new();
+        let mut events = self.sync_inboxes(now).await?;
+        events.append(&mut self.sync_upkeep(now).await?);
+        let mut group_events = self.sync_groups(now).await?;
+        events.append(&mut group_events);
+        self.finish_pre_steps(now).await?;
 
+        self.maintain_prekeys(now).await?;
+        Ok(events)
+    }
+
+    /// One round of syncing, for a client whose traffic is shaped
+    /// (`docs/09-transport.md` §9.4): even rounds read the account's
+    /// inboxes, odd rounds one group's mailboxes in turn, and every
+    /// [`UPKEEP_EVERY`] rounds the housekeeping that [`Client::sync`] does
+    /// each time (manifests, token refills, expiry, prekeys…). Each round
+    /// makes only a few requests, so at one poll per tick the app stays
+    /// responsive between rounds.
+    pub async fn sync_round(&mut self, round: u64) -> Result<Vec<Event>> {
+        let now = self.now();
+        let groups: Vec<[u8; 32]> = self
+            .groups
+            .iter()
+            .filter(|(_, e)| !e.left)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut events = if round.is_multiple_of(2) || groups.is_empty() {
+            self.sync_inboxes(now).await?
+        } else {
+            let gid = groups[((round / 2) % groups.len() as u64) as usize];
+            self.sync_group(&gid, now).await?
+        };
+        if round % UPKEEP_EVERY == 1 {
+            events.append(&mut self.sync_upkeep(now).await?);
+            self.finish_pre_steps(now).await?;
+            self.maintain_prekeys(now).await?;
+        }
+        Ok(events)
+    }
+
+    /// Read the request inbox and the account inbox.
+    async fn sync_inboxes(&mut self, now: u64) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
         let server = self.profile.server;
         let reqs = self
             .rpc
@@ -1019,6 +1061,13 @@ impl Client {
             self.profile.cursor = cursor;
             self.save_profile()?;
         }
+        Ok(events)
+    }
+
+    /// Everything but reading mailboxes: manifests, history, refills,
+    /// expiry, invites.
+    async fn sync_upkeep(&mut self, now: u64) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
         events.append(&mut self.refresh_manifests(now).await?);
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
@@ -1063,11 +1112,6 @@ impl Client {
 
         self.purge_expired(now)?;
         self.expire_invites(now).await?;
-        let mut group_events = self.sync_groups(now).await?;
-        events.append(&mut group_events);
-        self.finish_pre_steps(now).await?;
-
-        self.maintain_prekeys(now).await?;
         Ok(events)
     }
 

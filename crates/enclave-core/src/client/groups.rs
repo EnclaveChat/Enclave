@@ -815,109 +815,130 @@ impl Client {
             .map(|(k, _)| *k)
             .collect();
         for gid in ids {
-            self.connect_members(&gid).await;
+            events.append(&mut self.sync_group(&gid, now).await?);
+        }
+        Ok(events)
+    }
 
-            // Collect units from every held epoch, today and yesterday.
-            let (host, polls) = {
-                let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
-                let mut polls = Vec::new();
-                for epoch in e.group.epochs() {
-                    for d in [day(now).saturating_sub(1), day(now)] {
-                        for b in 0..BUCKETS as u8 {
-                            let addr = e.group.rekey_mailbox(epoch, d, b)?;
-                            polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
-                        }
-                        let addr = e
-                            .group
+    /// Read one group's mailboxes (every held epoch, today and yesterday),
+    /// apply what arrived, and key members who became reachable.
+    pub(crate) async fn sync_group(&mut self, gid: &[u8; 32], now: u64) -> Result<Vec<Event>> {
+        let gid = *gid;
+        let mut events = Vec::new();
+        self.connect_members(&gid).await;
+
+        // Collect units from every held epoch, today and yesterday.
+        let (host, polls) = {
+            let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
+            let mut polls = Vec::new();
+            for epoch in e.group.epochs() {
+                for d in [day(now).saturating_sub(1), day(now)] {
+                    for b in 0..BUCKETS as u8 {
+                        let addr = e.group.rekey_mailbox(epoch, d, b)?;
+                        polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
+                    }
+                    let addr = e
+                        .group
+                        .mailboxes(d)
+                        .into_iter()
+                        .find(|(x, _)| *x == epoch)
+                        .map(|(_, a)| a);
+                    if let Some(addr) = addr {
+                        polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
+                    }
+                }
+            }
+            (e.group.state.host, polls)
+        };
+        // A group's mailboxes are read together, as one bulk transfer:
+        // their number depends on the epochs held, not on traffic.
+        let mut units = Vec::new();
+        self.rpc.bulk(true);
+        let mut polled = Ok(());
+        for (addr, secret) in polls {
+            match self.poll_group(&gid, host, addr, secret, now).await {
+                Ok(u) => units.extend(u),
+                Err(e) => {
+                    polled = Err(e);
+                    break;
+                }
+            }
+        }
+        self.rpc.bulk(false);
+        polled?;
+        // Forget cursors of mailboxes we no longer poll.
+        if let Some(e) = self.groups.get_mut(&gid) {
+            let live: BTreeSet<[u8; 32]> = e
+                .group
+                .epochs()
+                .into_iter()
+                .flat_map(|ep| {
+                    [day(now).saturating_sub(1), day(now)]
+                        .into_iter()
+                        .flat_map(move |d| (0..=BUCKETS as u8).map(move |b| (ep, d, b)))
+                })
+                .filter_map(|(ep, d, b)| {
+                    if (b as usize) < BUCKETS {
+                        e.group.rekey_mailbox(ep, d, b).ok()
+                    } else {
+                        e.group
                             .mailboxes(d)
                             .into_iter()
-                            .find(|(x, _)| *x == epoch)
-                            .map(|(_, a)| a);
-                        if let Some(addr) = addr {
-                            polls.push((addr, e.group.mailbox_secret(epoch, &addr)?));
-                        }
+                            .find(|(x, _)| *x == ep)
+                            .map(|(_, a)| a)
                     }
+                })
+                .collect();
+            e.cursors.retain(|a, _| live.contains(a));
+        }
+        if let Some(e) = self.groups.get_mut(&gid) {
+            units.append(&mut e.pending);
+        }
+        // Rekeys first (they may unlock messages in the same batch), and
+        // a second pass for anything a rekey unlocked.
+        let mut rest = units;
+        for _ in 0..2 {
+            let mut held = Vec::new();
+            rest.sort_by_key(|u| u[2] == 0); // subkind 1 (rekey) before 0 (message)
+            for u in rest {
+                match self.process_group_unit(&gid, &u, now) {
+                    Ok(Some(ev)) => events.push(ev),
+                    Ok(None) => {}
+                    Err(CoreError::Proto(ProtoError::Missing)) => held.push(u),
+                    Err(_) => {}
                 }
-                (e.group.state.host, polls)
-            };
-            let mut units = Vec::new();
-            for (addr, secret) in polls {
-                units.extend(self.poll_group(&gid, host, addr, secret, now).await?);
             }
-            // Forget cursors of mailboxes we no longer poll.
-            if let Some(e) = self.groups.get_mut(&gid) {
-                let live: BTreeSet<[u8; 32]> = e
-                    .group
-                    .epochs()
-                    .into_iter()
-                    .flat_map(|ep| {
-                        [day(now).saturating_sub(1), day(now)]
-                            .into_iter()
-                            .flat_map(move |d| (0..=BUCKETS as u8).map(move |b| (ep, d, b)))
-                    })
-                    .filter_map(|(ep, d, b)| {
-                        if (b as usize) < BUCKETS {
-                            e.group.rekey_mailbox(ep, d, b).ok()
-                        } else {
-                            e.group
-                                .mailboxes(d)
-                                .into_iter()
-                                .find(|(x, _)| *x == ep)
-                                .map(|(_, a)| a)
-                        }
-                    })
-                    .collect();
-                e.cursors.retain(|a, _| live.contains(a));
-            }
-            if let Some(e) = self.groups.get_mut(&gid) {
-                units.append(&mut e.pending);
-            }
-            // Rekeys first (they may unlock messages in the same batch), and
-            // a second pass for anything a rekey unlocked.
-            let mut rest = units;
-            for _ in 0..2 {
-                let mut held = Vec::new();
-                rest.sort_by_key(|u| u[2] == 0); // subkind 1 (rekey) before 0 (message)
-                for u in rest {
-                    match self.process_group_unit(&gid, &u, now) {
-                        Ok(Some(ev)) => events.push(ev),
-                        Ok(None) => {}
-                        Err(CoreError::Proto(ProtoError::Missing)) => held.push(u),
-                        Err(_) => {}
-                    }
-                }
-                rest = held;
-            }
-            if let Some(e) = self.groups.get_mut(&gid) {
-                rest.truncate(MAX_PENDING);
-                e.pending = rest;
-            }
-            self.save_group(&gid)?;
+            rest = held;
+        }
+        if let Some(e) = self.groups.get_mut(&gid) {
+            rest.truncate(MAX_PENDING);
+            e.pending = rest;
+        }
+        self.save_group(&gid)?;
 
-            // Key members that became reachable since our last rotation.
-            let due = {
-                let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
-                let me = e.group.me;
-                !e.left
-                    && e.group.state.active().any(|(m, member)| {
-                        m != me
-                            && !e.keyed.contains(&member.root)
-                            && self.contacts.get(&member.root).is_some_and(|c| {
-                                c.manifest
-                                    .devices
-                                    .iter()
-                                    .any(|d| self.sessions.contains_key(&(member.root, d.id)))
-                            })
-                    })
-            };
-            if due
-                && !self
-                    .groups
-                    .get(&gid)
-                    .is_some_and(|e| e.group.needs_rotation(now))
-            {
-                self.rotate_group(&gid, None, None, now).await?;
-            }
+        // Key members that became reachable since our last rotation.
+        let due = {
+            let e = self.groups.get(&gid).ok_or(CoreError::NotFound)?;
+            let me = e.group.me;
+            !e.left
+                && e.group.state.active().any(|(m, member)| {
+                    m != me
+                        && !e.keyed.contains(&member.root)
+                        && self.contacts.get(&member.root).is_some_and(|c| {
+                            c.manifest
+                                .devices
+                                .iter()
+                                .any(|d| self.sessions.contains_key(&(member.root, d.id)))
+                        })
+                })
+        };
+        if due
+            && !self
+                .groups
+                .get(&gid)
+                .is_some_and(|e| e.group.needs_rotation(now))
+        {
+            self.rotate_group(&gid, None, None, now).await?;
         }
         Ok(events)
     }

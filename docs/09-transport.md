@@ -195,6 +195,20 @@ Not implemented in the scheduler yet: releasing the Sphinx packets of a tick at 
 - No bulk bursts: a 1 MiB-bucket photo (74 chunks) takes about 3.7 minutes and a 4 MiB-bucket photo (295 chunks) about 15 minutes. The UI states the time for the actual bucket before sending.
 - Not implemented yet: disabling push, forbidding the fallback transport, and waiting for all three KEMs before the first send.
 
+### 6.7 As implemented in the client
+
+`enclave-net/src/shaped.rs`. `ShapedTransport` wraps whatever transport the app uses (TCP in development; Nym or Tor later) and only ever sends on the scheduler's clock. It runs in the vault process whenever the vault talks to a server; `--no-shaping` turns it off for development, and the offline demo has no network at all.
+
+- **Every tick sends exactly one 16,384 B unit and one 2,048 B poll.** A queued request takes the slot of its size. An empty slot carries cover that the wrapper seals itself: an `Op::Cover` unit, or a poll of a random mailbox (which the server refuses). Cover is sealed to the same server key as real requests, so the two are the same size and look the same on the wire. Requests are sent concurrently, so a slow reply never holds up the next tick.
+- **The client's requests are still issued one after another**, so the client is reorganized to need few requests per tick. `Client::sync_round(round)` replaces a full sync. Even rounds read the inboxes; odd rounds poll one group, in turn; every `UPKEEP_EVERY` (10) rounds it also does upkeep (manifest checks, token refills, expiry, pending PQ steps, prekeys). The vault runs one round per sync tick.
+- **Bulk** (§6.4) is a burst of up to `BULK_PER_TICK` (12) extra requests of one size in a tick, once more than `BULK_AFTER` (4) are waiting. Some work is bulk by nature, so it is declared rather than inferred from the queue: `Transport::set_bulk` opens a bulk window in which requests skip the clock. The vault opens one for account creation and restore, sending and saving files, sticker packs, history transfer, joining a group, linking, adding a contact, and loading media; the client opens one for catch-up polls (a reply flagged "more pending") and for a group's polls, whose number depends on how many epochs the device holds, not on traffic. **Maximum privacy never bursts and ignores bulk windows**: everything waits for its slot.
+- **Droppable requests** (`Transport::exchange_droppable`, used by typing indicators) only take a slot that would otherwise carry cover, never trigger a burst, and are dropped after `DROP_AFTER` (2) ticks without a free slot. They never add traffic.
+- **Profiles:** the vault uses Foreground, or Maximum when the Maximum privacy setting is on (Settings → Privacy). The Background profile needs the platform's background service, which the desktop app doesn't run yet.
+
+Tests (`crates/enclave-net/tests/shaped.rs`, paused tokio clock): every tick is one unit and one poll whatever the load; Foreground bursts and Maximum never does; droppable requests never change the sizes sent; `Off` sends at once; bulk windows skip the clock except in Maximum. `crates/enclave-core/tests/client.rs::sync_in_rounds` checks that round-based sync delivers 1:1 and group messages, and the vault process tests run with shaping on.
+
+Residuals: the sequence of real requests in a bulk window is visible as a burst (the app discloses that); the per-tick timing of the underlying TCP connections is not packet-paced (§6.3).
+
 ## 7. Nym access, fallback, censorship (not yet implemented)
 
 - zk-nym credentials through a credential proxy gated by Equi-X plus Privacy Pass.

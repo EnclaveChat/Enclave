@@ -1900,6 +1900,52 @@ async fn files_in_groups() {
     assert!(jo.fetch_group_attachment(&gid, m.seq).await.is_err());
 }
 
+/// Shaped syncing in rounds (09 §9.4): even rounds read the inboxes, odd
+/// rounds one group at a time; a client that only ever syncs in rounds
+/// still gets everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_in_rounds() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let g1 = ada
+        .create_group("One", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    let g2 = ada.create_group("Two", &[mo.root()]).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+
+    mo.send_text(&ada.root(), "direct").await.unwrap();
+    mo.send_group_text(&g1, "in one").await.unwrap();
+    mo.send_group_text(&g2, "in two").await.unwrap();
+    // An odd round reads one group only; the inbox waits for an even one.
+    let ev = ada.sync_round(1).await.unwrap();
+    assert!(ev.iter().all(|e| !matches!(e, Event::Message { .. })));
+    let mut all = ev;
+    for r in 2..6 {
+        all.extend(ada.sync_round(r).await.unwrap());
+    }
+    assert!(
+        all.iter()
+            .any(|e| matches!(e, Event::Message { message, .. } if message.text == "direct"))
+    );
+    let texts = group_texts(&all);
+    assert!(
+        texts.contains(&"in one".to_string()) && texts.contains(&"in two".to_string()),
+        "{texts:?}"
+    );
+}
+
 /// Archive, pin to the top and mute: local to this device. A new message
 /// brings an archived conversation back unless it is muted; at most four
 /// conversations are pinned.

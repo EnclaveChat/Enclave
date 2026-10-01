@@ -53,6 +53,7 @@ Today the desktop app runs as **four** processes: the Slint UI (`enclave`), the 
 
 - `netd` MUST NOT link `enclave-store` or hold any key other than transport session keys (test `rt14_netd_has_no_key_material`).
 - `mediad` receives only encrypted-then-decrypted media bytes from `vault`, never keys; it returns only raw RGBA, PCM, or re-encoded outbound media.
+- **Traffic shaping** runs in the vault, not netd: the vault wraps its transport (netd's pipe, or the in-process fallback) in `ShapedTransport`, so netd only ever sees one unit and one poll per tick, real or cover (`09-transport.md` §6.7). The vault picks the profile from the Maximum privacy setting and opens bulk windows around the commands that need them. `enclave-vault --no-shaping` turns shaping off for development.
 - A crash in `netd` or `mediad` is recovered by restarting that process; `vault` state is unaffected.
 
 ## 2. UI

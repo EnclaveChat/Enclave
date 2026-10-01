@@ -31,3 +31,4 @@ tor-rtcompat = { version = "0.46.0", default-features = false, features = ["toki
 
 [dev-dependencies]
 enclave-server = { path = "../enclave-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

@@ -7,6 +7,8 @@ use enclave_core::{
 };
 use enclave_crypto::pwhash::PwParams;
 use enclave_ipc::{Cmd, Device, Effect, Msg, Out, Pick, Row, Snapshot, tint_for};
+use enclave_net::schedule::Profile;
+use enclave_net::shaped::{ShapedTransport, Shaping};
 use enclave_net::transport::{ServerId, TcpTransport, Transport};
 use enclave_sim::LocalTransport;
 use enclave_store::{FileKeystore, MemoryKeystore};
@@ -33,6 +35,9 @@ pub enum Mode {
         addr: SocketAddr,
         /// Key-transparency pins for usernames (written by the dev server).
         kt_pins: Option<PathBuf>,
+        /// Shape traffic on the scheduler's clock (`--no-shaping` turns it
+        /// off, for development).
+        shaping: bool,
     },
 }
 
@@ -54,6 +59,7 @@ impl Mode {
                 profile: p.into(),
                 addr,
                 kt_pins: arg("--kt-pins").map(Into::into),
+                shaping: !args.iter().any(|a| a == "--no-shaping"),
             },
             _ => Mode::Demo,
         }
@@ -67,6 +73,7 @@ impl Mode {
                 profile,
                 addr,
                 kt_pins,
+                shaping,
             } => {
                 let mut v = vec![
                     "--server".into(),
@@ -77,6 +84,9 @@ impl Mode {
                 if let Some(k) = kt_pins {
                     v.push("--kt-pins".into());
                     v.push(k.display().to_string());
+                }
+                if !shaping {
+                    v.push("--no-shaping".into());
                 }
                 v
             }
@@ -125,6 +135,10 @@ struct Engine {
     /// read by mediad.
     voice: HashMap<(String, u64), (u32, Vec<u8>)>,
     transport: Arc<dyn Transport>,
+    /// The traffic shaper, in server mode (`enclave_net::shaped`).
+    shaper: Option<Arc<ShapedTransport>>,
+    /// Rounds of shaped syncing so far.
+    round: u64,
     server: ServerId,
     client: Option<Client>,
     demo: Option<Demo>,
@@ -423,6 +437,7 @@ pub async fn run_with(
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     out: mpsc::UnboundedSender<Out>,
 ) {
+    let mut shaper: Option<Arc<ShapedTransport>> = None;
     let (transport, server, kt): (Arc<dyn Transport>, ServerId, _) = match &mode {
         Mode::Demo => {
             let t = LocalTransport::new();
@@ -437,7 +452,12 @@ pub async fn run_with(
             let kt = t.enable_usernames(&DEMO_SERVER, DEMO_DOMAIN);
             (Arc::new(t), DEMO_SERVER, kt)
         }
-        Mode::Server { addr, kt_pins, .. } => {
+        Mode::Server {
+            addr,
+            kt_pins,
+            shaping,
+            ..
+        } => {
             let id = enclave_server::Config::default().id;
             let kt = kt_pins
                 .as_ref()
@@ -446,6 +466,15 @@ pub async fn run_with(
             let t: Arc<dyn Transport> = match helpers.net {
                 Some(t) => t,
                 None => Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
+            };
+            // Shaped on the scheduler's clock: the Standard profile until
+            // the profile's own setting is read.
+            let t: Arc<dyn Transport> = if *shaping {
+                let s = ShapedTransport::start(t, Shaping::On(Profile::Foreground), vec![id]);
+                shaper = Some(Arc::clone(&s));
+                s
+            } else {
+                t
             };
             (t, id, kt)
         }
@@ -457,6 +486,8 @@ pub async fn run_with(
             .unwrap_or_else(crate::media::Media::in_process),
         previews: std::collections::HashSet::new(),
         voice: HashMap::new(),
+        shaper,
+        round: 0,
         transport,
         server,
         client: None,
@@ -505,6 +536,7 @@ pub async fn run_with(
             Err(CoreError::Store(enclave_store::StoreError::Crypto)) => e.locked = true,
             Err(err) => e.status = format!("Couldn't open your profile: {err}"),
         }
+        e.apply_privacy();
         e.push();
     }
     let mut tick = tokio::time::interval(TICK);
@@ -514,19 +546,13 @@ pub async fn run_with(
                 let Some(cmd) = cmd else { return };
                 e.handle(cmd).await;
                 e.push();
-                e.load_previews().await;
-                if e.load_voice().await {
-                    e.push();
-                }
+                e.load_media().await;
             }
             _ = tick.tick() => {
                 if e.client.is_some() {
                     e.sync().await;
                     e.push();
-                    e.load_previews().await;
-                    if e.load_voice().await {
-                        e.push();
-                    }
+                    e.load_media().await;
                 } else if e.joining.is_some() {
                     e.poll_join().await;
                     e.push();
@@ -647,6 +673,18 @@ impl Engine {
         changed
     }
 
+    /// Previews and voice-note details for the open conversation: their
+    /// downloads are a bulk transfer.
+    async fn load_media(&mut self) {
+        self.bulk(true);
+        self.load_previews().await;
+        let voice = self.load_voice().await;
+        self.bulk(false);
+        if voice {
+            self.push();
+        }
+    }
+
     /// What saving a file writes: a voice note becomes a WAV file anyone
     /// can play (decoded by mediad); anything else is saved as it is.
     async fn exportable(&self, name: String, bytes: Vec<u8>) -> (String, Vec<u8>) {
@@ -763,6 +801,34 @@ impl Engine {
     }
 
     async fn handle(&mut self, cmd: Cmd) {
+        // Transfers the spec counts as bulk (account setup, files, history,
+        // joins, restore): disclosed bursts, except in Maximum.
+        let bulk = matches!(
+            cmd,
+            Cmd::Create(..)
+                | Cmd::Restore(..)
+                | Cmd::SendFile(..)
+                | Cmd::SaveFile(..)
+                | Cmd::CreatePack(..)
+                | Cmd::AddPack(..)
+                | Cmd::LoadStickers
+                | Cmd::SendHistory(..)
+                | Cmd::StartJoin
+                | Cmd::LinkScan(..)
+                | Cmd::LinkPick(..)
+                | Cmd::Add(..)
+        );
+        if bulk {
+            self.bulk(true);
+        }
+        self.handle_cmd(cmd).await;
+        if bulk {
+            self.bulk(false);
+        }
+        self.apply_privacy();
+    }
+
+    async fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Create(name, passphrase) => {
                 let name = name.trim().to_string();
@@ -1792,6 +1858,7 @@ impl Engine {
                 if let Some(c) = self.client.as_mut() {
                     let _ = c.set_setting("privacy", &[p as u8]);
                 }
+                self.apply_privacy();
             }
             Cmd::WordsSaved => {
                 if let Some(c) = self.client.as_mut() {
@@ -1921,9 +1988,37 @@ impl Engine {
         }
     }
 
+    /// Match the shaper to the profile's privacy setting: Standard is the
+    /// Foreground profile, Maximum the Maximum profile.
+    fn apply_privacy(&self) {
+        let (Some(s), Some(c)) = (&self.shaper, &self.client) else {
+            return;
+        };
+        let maximum = matches!(c.setting("privacy"), Ok(Some(v)) if v == [1]);
+        s.set_shaping(Shaping::On(if maximum {
+            Profile::Maximum
+        } else {
+            Profile::Foreground
+        }));
+    }
+
+    /// Start or end a bulk transfer (files, account setup, previews): the
+    /// shaper may then skip its clock, except in Maximum.
+    fn bulk(&self, on: bool) {
+        self.transport.set_bulk(on);
+    }
+
     async fn sync(&mut self) {
+        let shaped = self.shaper.is_some();
+        let round = self.round;
+        self.round = self.round.wrapping_add(1);
         if let Some(c) = self.client.as_mut() {
-            match c.sync().await {
+            let result = if shaped {
+                c.sync_round(round).await
+            } else {
+                c.sync().await
+            };
+            match result {
                 Ok(events) => {
                     if !events.is_empty() {
                         self.status.clear();

@@ -23,6 +23,16 @@ pub type ServerId = [u8; 16];
 pub trait Transport: Send + Sync {
     /// Send one sealed request and wait for the sealed reply.
     async fn exchange(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>>;
+    /// Like [`Transport::exchange`] for something that may be dropped
+    /// rather than ever add traffic (a typing indicator): a shaping
+    /// transport sends it only in a slot that would otherwise carry cover.
+    async fn exchange_droppable(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
+        self.exchange(server, request).await
+    }
+    /// Start (`true`) or end a bulk transfer: a shaping transport may then
+    /// send without waiting for the clock (a large file, catch-up, account
+    /// setup), where its profile allows. Calls nest.
+    fn set_bulk(&self, _on: bool) {}
     /// Fetch the server's current request key (from its descriptor).
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey>;
     /// Current time, Unix seconds. The system clock, except in simulations

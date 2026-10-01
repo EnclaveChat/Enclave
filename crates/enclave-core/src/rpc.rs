@@ -38,6 +38,11 @@ impl Rpc {
         self.transport.now()
     }
 
+    /// Start or end a bulk transfer ([`Transport::set_bulk`]).
+    pub fn bulk(&self, on: bool) {
+        self.transport.set_bulk(on);
+    }
+
     async fn key(&mut self, server: &ServerId, now: u64) -> Result<ServerKey> {
         let today = (now / 86_400) as u32;
         if let Some(k) = self.keys.get(server)
@@ -321,12 +326,36 @@ impl Rpc {
         server: &ServerId,
         mailbox: [u8; 32],
         owner: &[u8; 32],
-        mut cursor: u64,
+        cursor: u64,
         now: u64,
         rng: &mut HedgedRng,
     ) -> Result<Vec<(Vec<u8>, u64)>> {
         let cred = api::read_credential(owner);
         let mut out = Vec::new();
+        // Catching up on a backlog is a bulk transfer (a shaping transport
+        // may then skip its clock, where the profile allows).
+        let mut bulk = false;
+        let r = self
+            .poll_loop(server, mailbox, cred, cursor, now, rng, &mut out, &mut bulk)
+            .await;
+        if bulk {
+            self.bulk(false);
+        }
+        r.map(|()| out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn poll_loop(
+        &mut self,
+        server: &ServerId,
+        mailbox: [u8; 32],
+        cred: [u8; 24],
+        mut cursor: u64,
+        now: u64,
+        rng: &mut HedgedRng,
+        out: &mut Vec<(Vec<u8>, u64)>,
+        bulk: &mut bool,
+    ) -> Result<()> {
         // Bounded so a hostile server cannot keep us polling forever.
         for _ in 0..1024 {
             let mut token = [0u8; 32];
@@ -350,7 +379,11 @@ impl Rpc {
             }
             cursor = next;
             out.push((r.envelope, cursor));
+            if r.flags & api::FLAG_MORE != 0 && !*bulk {
+                *bulk = true;
+                self.bulk(true);
+            }
         }
-        Ok(out)
+        Ok(())
     }
 }

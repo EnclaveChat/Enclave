@@ -11,6 +11,7 @@
 #![deny(missing_docs)]
 
 pub mod schedule;
+pub mod shaped;
 pub mod transport;
 
 /// Errors from the network layer.
@@ -28,6 +29,9 @@ pub enum NetError {
     /// The requested transport is not compiled in or not available.
     #[error("transport unavailable: {0}")]
     Unavailable(&'static str),
+    /// A droppable request found no free slot in time (`shaped`).
+    #[error("dropped: no free slot")]
+    Dropped,
 }
 
 /// Result alias.
