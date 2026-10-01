@@ -12,7 +12,8 @@
 use super::search::Place;
 use super::{Client, ContactState, Event, sanitize_name};
 use crate::card::ContactCard;
-use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_REACTION, MAX_TEXT};
+use crate::content::{Content, MAX_ATTACHMENT_REF, MAX_CARDS_PER_MESSAGE, MAX_REACTION, MAX_TEXT};
+use crate::files::Attachment;
 use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
@@ -91,6 +92,8 @@ pub struct GroupMessage {
     pub edited: bool,
     /// Deleted by its author.
     pub deleted: bool,
+    /// Attached file.
+    pub attachment: Option<Attachment>,
 }
 
 fn put_who(w: &mut Writer, who: &Option<[u8; 64]>) {
@@ -111,7 +114,7 @@ fn get_who(r: &mut Reader<'_>) -> enclave_proto::Result<Option<[u8; 64]>> {
 impl GroupMessage {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(4).u64(self.seq);
+        w.u8(5).u64(self.seq);
         put_who(&mut w, &self.from);
         w.bytes(self.from_name.as_bytes())
             .bytes(self.text.as_bytes())
@@ -128,13 +131,20 @@ impl GroupMessage {
             w.bytes(x.emoji.as_bytes());
         }
         w.u8(u8::from(self.edited)).u8(u8::from(self.deleted));
+        w.bytes(
+            &self
+                .attachment
+                .as_ref()
+                .map(Attachment::encode)
+                .unwrap_or_default(),
+        );
         w.finish()
     }
 
     fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if !(1..=4).contains(&version) {
+        if !(1..=5).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let seq = r.u64()?;
@@ -164,6 +174,16 @@ impl GroupMessage {
             edited = r.u8()? == 1;
             deleted = r.u8()? == 1;
         }
+        let attachment = if version >= 5 {
+            let a = r.bytes(MAX_ATTACHMENT_REF)?;
+            if a.is_empty() {
+                None
+            } else {
+                Some(Attachment::decode(a)?)
+            }
+        } else {
+            None
+        };
         r.end()?;
         Ok(Self {
             seq,
@@ -177,6 +197,7 @@ impl GroupMessage {
             reactions,
             edited,
             deleted,
+            attachment,
         })
     }
 }
@@ -1138,6 +1159,7 @@ impl Client {
             reactions: Vec::new(),
             edited: false,
             deleted: false,
+            attachment: None,
         };
         self.store
             .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;

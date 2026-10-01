@@ -71,7 +71,7 @@ Source: PLAN.md §14 (feature parity), §20 (milestones). This matrix fixes whic
 
 ## 4. As implemented: media gallery
 
-Local only, in the app (`enclave-app/ui/app.slint`, sheet `gallery`): the conversation sheet offers **Photos and files (n)**, a list of every attachment in the open 1:1 conversation that hasn't been deleted, with the decoded preview for pictures (from `mediad`, as in the conversation) and **Save**. It is built from the messages the vault already sends the UI, so it adds no protocol, storage or IPC. Not done: a grid across all conversations, and groups (they don't carry attachments yet).
+Local only, in the app (`enclave-app/ui/app.slint`, sheet `gallery`): the conversation sheet offers **Photos and files (n)**, a list of every attachment in the open conversation that hasn't been deleted, with the decoded preview for pictures (from `mediad`, as in the conversation) and **Save**. It is built from the messages the vault already sends the UI, so it adds no protocol, storage or IPC. Groups have the same list (07 §7.6). Not done: a grid across all conversations.
 
 ## Open questions
 

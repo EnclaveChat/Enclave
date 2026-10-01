@@ -229,7 +229,13 @@ fn group_text(m: &enclave_core::GroupMessage) -> String {
     if m.deleted {
         return "This message was deleted.".into();
     }
-    let mut text = m.text.clone();
+    let mut text = match &m.attachment {
+        // The UI shows the picture (or its name until it arrives).
+        Some(a) if is_picture(a) => m.text.clone(),
+        Some(a) if m.text.is_empty() => format!("File: {}", a.name),
+        Some(a) => format!("File: {}\n{}", a.name, m.text),
+        None => m.text.clone(),
+    };
     if m.edited {
         text.push_str(" (edited)");
     }
@@ -556,6 +562,9 @@ impl Engine {
     /// (people we accepted only, never message requests), decoded by
     /// mediad, a few per pass.
     async fn load_previews(&mut self) {
+        if let Some(gid) = self.selected_group {
+            return self.load_group_previews(gid).await;
+        }
         let (Some(root), Some(c)) = (self.selected, self.client.as_mut()) else {
             return;
         };
@@ -578,6 +587,44 @@ impl Engine {
             // A download that fails is tried again next time; a picture
             // that doesn't decode is not.
             let Ok(bytes) = c.fetch_attachment(&root, seq).await else {
+                continue;
+            };
+            self.previews.insert((id.clone(), seq));
+            if enclave_media::detect(&bytes).is_none() {
+                continue;
+            }
+            if let Ok(t) = self.media.thumbnail(bytes, PREVIEW_SIDE).await {
+                let _ = self.out.send(Out::Preview(enclave_ipc::Preview {
+                    conversation: id.clone(),
+                    seq,
+                    width: t.width,
+                    height: t.height,
+                    pixels: t.pixels,
+                }));
+            }
+        }
+    }
+
+    /// Previews in the open group: its members' pictures (a group we are
+    /// in, so never strangers' requests), the same way as for a contact.
+    async fn load_group_previews(&mut self, gid: [u8; 32]) {
+        let Some(c) = self.client.as_mut() else {
+            return;
+        };
+        let id = group_id_str(&gid);
+        let Ok(msgs) = c.group_messages(&gid) else {
+            return;
+        };
+        let want: Vec<u64> = msgs
+            .iter()
+            .rev()
+            .filter(|m| !m.deleted && m.attachment.as_ref().is_some_and(is_picture))
+            .map(|m| m.seq)
+            .filter(|s| !self.previews.contains(&(id.clone(), *s)))
+            .take(4)
+            .collect();
+        for seq in want {
+            let Ok(bytes) = c.fetch_group_attachment(&gid, seq).await else {
                 continue;
             };
             self.previews.insert((id.clone(), seq));
@@ -1159,17 +1206,55 @@ impl Engine {
                     };
                     (name, mime, bytes)
                 };
-                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut()) {
-                    match c
-                        .send_attachment(&root, &name, mime, &bytes, caption.trim())
-                        .await
-                    {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                if let Some(c) = self.client.as_mut() {
+                    let r = match (root, gid) {
+                        (Some(root), _) => c
+                            .send_attachment(&root, &name, mime, &bytes, caption.trim())
+                            .await
+                            .map(|_| ()),
+                        (None, Some(gid)) => c
+                            .send_group_file(&gid, &name, mime, &bytes, caption.trim())
+                            .await
+                            .map(|_| ()),
+                        (None, None) => Err(CoreError::NotFound),
+                    };
+                    match r {
                         Ok(_) => self.effect(Effect::FileSent),
                         Err(CoreError::TooLong) => {
                             self.status = "That file is too large to send.".into();
                         }
                         Err(_) => {
                             self.status = "Couldn't send the file. Check your connection.".into();
+                        }
+                    }
+                }
+                self.busy = false;
+            }
+            Cmd::SaveFile(id, seq) if id.starts_with('g') => {
+                let Some(gid) = self.group_of(&id) else {
+                    return;
+                };
+                self.busy = true;
+                self.push();
+                if let Some(c) = self.client.as_mut() {
+                    let name = c
+                        .group_messages(&gid)
+                        .ok()
+                        .and_then(|ms| ms.into_iter().find(|m| m.seq == seq))
+                        .and_then(|m| m.attachment)
+                        .map(|a| a.name)
+                        .unwrap_or_else(|| "file".into());
+                    match c.fetch_group_attachment(&gid, seq).await {
+                        Ok(bytes) if bytes.len() <= 15 * 1024 * 1024 => {
+                            let _ = self.out.send(Out::File(name, bytes));
+                        }
+                        Ok(_) => {
+                            self.status = "That file is too large to save from here yet.".into()
+                        }
+                        Err(_) => {
+                            self.status =
+                                "Couldn't download the file. Check your connection.".into();
                         }
                     }
                 }
@@ -1944,7 +2029,18 @@ impl Engine {
                             can_edit: m.from.is_none()
                                 && !m.deleted
                                 && m.poll.is_none()
+                                && m.attachment.is_none()
                                 && now.saturating_sub(m.at) <= EDIT_WINDOW,
+                            file: m
+                                .attachment
+                                .as_ref()
+                                .filter(|_| !m.deleted)
+                                .map(|a| a.name.clone())
+                                .unwrap_or_default(),
+                            image: m
+                                .attachment
+                                .as_ref()
+                                .is_some_and(|a| !m.deleted && is_picture(a)),
                             ..Default::default()
                         };
                         if let Some(p) = m.poll.and_then(|id| c.poll(&g.id, &id)) {

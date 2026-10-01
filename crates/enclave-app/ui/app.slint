@@ -1325,7 +1325,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding: Tokens.space-m;
                         spacing: Tokens.space-s;
-                        if root.current.kind == 0 && root.editing-seq == "": IconButton {
+                        if root.current.kind != 2 && root.editing-seq == "": IconButton {
                             icon: Icons.attach;
                             label: "Send a file";
                             clicked => { root.attach-error = ""; root.open-sheet(Sheet.attach); }
@@ -1570,7 +1570,7 @@ export component AppWindow inherits Window {
     if root.sheet == Sheet.attach: SheetFrame {
         title: "Send a file";
         close => { root.sheet = Sheet.none; }
-        Secondary { text: "Files are sealed before they leave this device and padded so their size doesn't give them away. " + root.current.name + " downloads them only when they choose to."; }
+        Secondary { text: "Files are sealed before they leave this device and padded so their size doesn't give them away. " + (root.current.kind == 1 ? "Each member downloads them" : root.current.name + " downloads them") + " only when they choose to."; }
         Field { placeholder: "Path to the file"; mono: true; text <=> root.attach-path; }
         Field { placeholder: "Add a caption (optional)"; text <=> root.attach-caption; }
         if root.attach-error != "": Text {
@@ -1586,11 +1586,11 @@ export component AppWindow inherits Window {
                 enabled: root.attach-path != "" && !root.busy;
                 clicked => { root.send-file(root.current-id, root.attach-path, root.attach-caption); }
             }
-            QuietButton {
+            if root.current.kind == 0: QuietButton {
                 text: "Share a contact instead";
                 clicked => { root.sheet = Sheet.share-contact; }
             }
-            QuietButton {
+            if root.current.kind == 0: QuietButton {
                 text: "Share a location";
                 clicked => { root.sheet = Sheet.location; }
             }

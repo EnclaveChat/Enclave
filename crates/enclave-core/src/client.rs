@@ -100,6 +100,7 @@ mod blocks;
 mod devices;
 mod gossip;
 mod group_edits;
+mod group_files;
 mod groups;
 mod guard;
 mod history;

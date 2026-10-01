@@ -13,7 +13,7 @@
 
 use super::search::Place;
 use super::{Client, Event};
-use crate::content::{MAX_REACTION, MAX_TEXT};
+use crate::content::{MAX_ATTACHMENT_REF, MAX_REACTION, MAX_TEXT};
 use crate::{CoreError, Result};
 use enclave_crypto::hash::sha3_512_parts;
 use enclave_proto::ProtoError;
@@ -35,6 +35,7 @@ const K_PIN: u8 = 4;
 const K_REACT: u8 = 5;
 const K_EDIT: u8 = 6;
 const K_DELETE: u8 = 7;
+const K_ATTACHMENT: u8 = 8;
 
 pub(crate) enum Rich {
     Poll {
@@ -68,6 +69,12 @@ pub(crate) enum Rich {
     /// Delete one of our messages for everyone (advisory).
     Delete {
         id: [u8; 16],
+    },
+    /// A file (`group_files.rs`): its sealed reference and a caption.
+    Attachment {
+        id: [u8; 16],
+        attachment: Vec<u8>,
+        caption: String,
     },
 }
 
@@ -110,6 +117,16 @@ impl Rich {
             Rich::Delete { id } => {
                 w.u8(K_DELETE).fixed(id);
             }
+            Rich::Attachment {
+                id,
+                attachment,
+                caption,
+            } => {
+                w.u8(K_ATTACHMENT)
+                    .fixed(id)
+                    .bytes(attachment)
+                    .bytes(caption.as_bytes());
+            }
         }
         w.finish()
     }
@@ -150,6 +167,11 @@ impl Rich {
                 text: get_str(&mut r, MAX_TEXT)?,
             },
             K_DELETE => Rich::Delete { id: r.array()? },
+            K_ATTACHMENT => Rich::Attachment {
+                id: r.array()?,
+                attachment: r.bytes(MAX_ATTACHMENT_REF)?.to_vec(),
+                caption: get_str(&mut r, MAX_TEXT)?,
+            },
             K_PIN => Rich::Pin {
                 id: r.array()?,
                 on: match r.u8()? {
@@ -459,6 +481,11 @@ impl Client {
             Rich::React { id, emoji } => self.on_group_react(gid, from, &id, emoji),
             Rich::Edit { id, text } => self.on_group_edit(gid, from, &id, text, now),
             Rich::Delete { id } => self.on_group_delete(gid, from, &id),
+            Rich::Attachment {
+                id,
+                attachment,
+                caption,
+            } => self.on_group_attachment(gid, from, name, id, &attachment, &caption, now),
             Rich::Pin { id, on } => {
                 let place = Place::Group(*gid);
                 let known = self.group_messages(gid)?.iter().any(|m| m.id == id);

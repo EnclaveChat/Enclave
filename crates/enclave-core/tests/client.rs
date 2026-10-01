@@ -1687,6 +1687,61 @@ async fn block_and_unblock() {
     );
 }
 
+/// Files in groups: sealed chunks on the sender's server, a reference in
+/// the group message; every member downloads and verifies the same bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_in_groups() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    let data: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+    let sent = mo
+        .send_group_file(&gid, "route.gpx", "application/gpx+xml", &data, "The route")
+        .await
+        .unwrap();
+    assert_eq!(
+        mo.fetch_group_attachment(&gid, sent.seq).await.unwrap(),
+        data
+    );
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    for c in [&mut ada, &mut jo] {
+        let m = c
+            .group_messages(&gid)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == sent.id)
+            .expect("arrived");
+        assert_eq!(m.text, "The route");
+        assert_eq!(m.attachment.as_ref().unwrap().name, "route.gpx");
+        assert_eq!(c.fetch_group_attachment(&gid, m.seq).await.unwrap(), data);
+    }
+    mo.delete_group_message(&gid, sent.seq).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let m = jo
+        .group_messages(&gid)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == sent.id)
+        .unwrap();
+    assert!(m.deleted && m.attachment.is_none());
+    assert!(jo.fetch_group_attachment(&gid, m.seq).await.is_err());
+}
+
 /// Archive, pin to the top and mute: local to this device. A new message
 /// brings an archived conversation back unless it is muted; at most four
 /// conversations are pinned.

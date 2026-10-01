@@ -28,7 +28,7 @@ pub const EDIT_WINDOW: u64 = 24 * 3600;
 /// Unread disappearing messages are kept at most this long.
 const UNREAD_HOLD_DAYS: u64 = 30;
 const SEALED: u8 = 0xDE;
-const NS_FILES: &str = "files";
+pub(crate) const NS_FILES: &str = "files";
 
 /// A reaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,6 +506,12 @@ impl Client {
     pub async fn fetch_attachment(&mut self, root: &[u8; 64], seq: u64) -> Result<Vec<u8>> {
         let m = self.get_message(root, seq)?;
         let att = m.attachment.ok_or(CoreError::NotFound)?;
+        self.fetch_file(&att).await
+    }
+
+    /// A file's bytes: from the local cache, or downloaded (every chunk of
+    /// its bucket), verified against its hash and cached.
+    pub(crate) async fn fetch_file(&mut self, att: &Attachment) -> Result<Vec<u8>> {
         if let Some(b) = self.store.get(NS_FILES, &att.hash[..32])? {
             return Ok(b);
         }
@@ -516,9 +522,9 @@ impl Client {
                 .rpc
                 .blob_get(&att.host, att.chunk_id(i), now, &mut self.rng)
                 .await?;
-            parts.push(files::open_chunk(&att, i, &chunk)?);
+            parts.push(files::open_chunk(att, i, &chunk)?);
         }
-        let data = files::finish(&att, &parts)?;
+        let data = files::finish(att, &parts)?;
         self.store
             .put(NS_FILES, &att.hash[..32], &data, &mut self.rng)?;
         Ok(data)
