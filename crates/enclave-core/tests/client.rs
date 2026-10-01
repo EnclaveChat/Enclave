@@ -1623,7 +1623,7 @@ async fn report_to_the_operator() {
         "the latest two"
     );
     assert_eq!(
-        net.with_server(&S1, |s| s.reports().count()).unwrap(),
+        net.with_server(&S1, |s| s.reports().len()).unwrap(),
         0,
         "not to Ada's own server"
     );

@@ -1,0 +1,294 @@
+//! Operator configuration (`server.toml`, `docs/12-servers.md` §1.1).
+//!
+//! Every key can be overridden from the environment as
+//! `ENCLAVE_<SECTION>__<KEY>` (for example `ENCLAVE_SERVER__DOMAIN`), which
+//! is how the compose file sets per-deployment values. Unknown keys are
+//! refused, so a typo doesn't silently fall back to a default.
+
+use serde::Deserialize;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+/// The whole file.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FileConfig {
+    /// Where the server lives and what it is called.
+    pub server: ServerSection,
+    /// Abuse-control policy.
+    pub policy: PolicySection,
+    /// Key transparency.
+    pub kt: KtSection,
+    /// Push wakes.
+    pub push: PushSection,
+    /// Backups.
+    pub backup: BackupSection,
+}
+
+/// `[server]`
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ServerSection {
+    /// The server's public domain (descriptor, usernames).
+    pub domain: String,
+    /// Operator name shown to users.
+    pub operator: String,
+    /// Operator family: servers and relays of one family never count as
+    /// independent of each other.
+    pub family: String,
+    /// Database directory.
+    pub data_dir: PathBuf,
+    /// Key directory (mode 0700; `enclave-server init` fills it).
+    pub keys_dir: PathBuf,
+    /// Where the ingress (or, in development, clients) reach the server.
+    pub listen: SocketAddr,
+    /// Where public files (descriptor, KT pins) are written for the front.
+    pub public_dir: PathBuf,
+}
+
+impl Default for ServerSection {
+    fn default() -> Self {
+        Self {
+            domain: "localhost".into(),
+            operator: String::new(),
+            family: String::new(),
+            data_dir: PathBuf::from("/var/lib/enclave/server"),
+            keys_dir: PathBuf::from("/var/lib/enclave/keys"),
+            listen: SocketAddr::from(([127, 0, 0, 1], 7443)),
+            public_dir: PathBuf::from("/var/lib/enclave/public"),
+        }
+    }
+}
+
+/// `[policy]`: the abuse controls of `crate::Config`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PolicySection {
+    /// Proof-of-work effort for request-inbox writes.
+    pub effort_request: u32,
+    /// Proof-of-work effort for claiming a bundle.
+    pub effort_claim: u32,
+    /// Proof-of-work effort for blob uploads.
+    pub effort_blob: u32,
+    /// Proof-of-work effort for claiming a username.
+    pub effort_username: u32,
+    /// Maximum stored envelopes per inbox.
+    pub inbox_quota: usize,
+    /// Maximum pending requests per request inbox.
+    pub request_quota: usize,
+    /// Maximum registered unspent tokens per inbox.
+    pub token_quota: usize,
+    /// Days envelopes and blobs are kept.
+    pub ttl_days: u64,
+}
+
+impl Default for PolicySection {
+    fn default() -> Self {
+        let c = crate::Config::default();
+        Self {
+            effort_request: c.effort_request,
+            effort_claim: c.effort_claim,
+            effort_blob: c.effort_blob,
+            effort_username: c.effort_username,
+            inbox_quota: c.inbox_quota,
+            request_quota: c.request_quota,
+            token_quota: c.token_quota,
+            ttl_days: c.ttl_secs / 86_400,
+        }
+    }
+}
+
+/// `[kt]`
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KtSection {
+    /// Run a key-transparency log (usernames).
+    pub enabled: bool,
+    /// Seconds between epochs.
+    pub epoch_secs: u64,
+}
+
+impl Default for KtSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            epoch_secs: 600,
+        }
+    }
+}
+
+/// `[push]`
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PushSection {
+    /// Where due wakes are forwarded (the push egress, which carries them
+    /// to the push relay over the mixnet). Empty: no push.
+    pub forward: Option<SocketAddr>,
+}
+
+/// `[backup]`
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BackupSection {
+    /// Directory for snapshots; empty disables them.
+    pub dir: Option<PathBuf>,
+    /// Hours between snapshots.
+    pub interval_hours: u64,
+    /// Snapshots kept.
+    pub keep: usize,
+}
+
+impl Default for BackupSection {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            interval_hours: 24,
+            keep: 7,
+        }
+    }
+}
+
+/// A configuration problem, with where it was found.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ConfigError(String);
+
+impl FileConfig {
+    /// Read `path` (if given) and apply `ENCLAVE_*` overrides from `env`.
+    pub fn load(
+        path: Option<&Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, ConfigError> {
+        let mut table: toml::Table = match path {
+            Some(p) => {
+                let text = std::fs::read_to_string(p)
+                    .map_err(|e| ConfigError(format!("{}: {e}", p.display())))?;
+                text.parse()
+                    .map_err(|e| ConfigError(format!("{}: {e}", p.display())))?
+            }
+            None => toml::Table::new(),
+        };
+        for (k, v) in env {
+            let Some(rest) = k.strip_prefix("ENCLAVE_") else {
+                continue;
+            };
+            let Some((section, key)) = rest.split_once("__") else {
+                continue;
+            };
+            let (section, key) = (section.to_lowercase(), key.to_lowercase());
+            let value = env_value(&v);
+            let entry = table
+                .entry(section.clone())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let toml::Value::Table(t) = entry else {
+                return Err(ConfigError(format!("[{section}] is not a section")));
+            };
+            t.insert(key, value);
+        }
+        let cfg: FileConfig = toml::Value::Table(table)
+            .try_into()
+            .map_err(|e| ConfigError(format!("configuration: {e}")))?;
+        cfg.check()?;
+        Ok(cfg)
+    }
+
+    fn check(&self) -> Result<(), ConfigError> {
+        let d = &self.server.domain;
+        if d.is_empty()
+            || d.len() > 253
+            || !d
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(ConfigError(format!(
+                "server.domain {d:?} is not a domain name"
+            )));
+        }
+        if self.policy.ttl_days == 0 || self.policy.inbox_quota == 0 {
+            return Err(ConfigError(
+                "policy.ttl_days and inbox_quota must be positive".into(),
+            ));
+        }
+        if self.kt.epoch_secs < 10 {
+            return Err(ConfigError("kt.epoch_secs must be at least 10".into()));
+        }
+        Ok(())
+    }
+
+    /// The server policy.
+    pub fn policy(&self, id: [u8; 16]) -> crate::Config {
+        let p = &self.policy;
+        crate::Config {
+            id,
+            effort_request: p.effort_request,
+            effort_claim: p.effort_claim,
+            effort_blob: p.effort_blob,
+            effort_username: p.effort_username,
+            inbox_quota: p.inbox_quota,
+            request_quota: p.request_quota,
+            token_quota: p.token_quota,
+            ttl_secs: p.ttl_days * 86_400,
+        }
+    }
+}
+
+/// An environment value as TOML: integers and booleans keep their type,
+/// everything else is a string.
+fn env_value(v: &str) -> toml::Value {
+    if let Ok(i) = v.parse::<i64>() {
+        return toml::Value::Integer(i);
+    }
+    match v {
+        "true" => toml::Value::Boolean(true),
+        "false" => toml::Value::Boolean(false),
+        _ => toml::Value::String(v.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn defaults_file_and_env() {
+        let c = FileConfig::load(None, []).unwrap();
+        assert_eq!(c.server.domain, "localhost");
+        let dir = std::env::temp_dir().join(format!("enclave-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("server.toml");
+        std::fs::write(
+            &p,
+            "[server]\ndomain = \"a.example\"\n[policy]\ninbox_quota = 10\n",
+        )
+        .unwrap();
+        let c = FileConfig::load(
+            Some(&p),
+            [
+                ("ENCLAVE_SERVER__OPERATOR".into(), "Ada's Servers".into()),
+                ("ENCLAVE_POLICY__TOKEN_QUOTA".into(), "77".into()),
+                ("ENCLAVE_KT__ENABLED".into(), "false".into()),
+                ("UNRELATED".into(), "x".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.server.domain, "a.example");
+        assert_eq!(c.server.operator, "Ada's Servers");
+        assert_eq!(c.policy.inbox_quota, 10);
+        assert_eq!(c.policy.token_quota, 77);
+        assert!(!c.kt.enabled);
+        std::fs::write(&p, "[server]\ndomian = \"typo\"\n").unwrap();
+        assert!(
+            FileConfig::load(Some(&p), []).is_err(),
+            "unknown keys refused"
+        );
+        assert!(
+            FileConfig::load(
+                None,
+                [("ENCLAVE_SERVER__DOMAIN".into(), "bad domain!".into())]
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

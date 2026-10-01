@@ -19,6 +19,11 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod config;
+pub mod db;
+pub mod keys;
+
+use db::{Db, Tx};
 use enclave_crypto::hash::sha3_512;
 use enclave_crypto::rng::HedgedRng;
 use enclave_kt::{KtInfo, KtService, UsernameClaim};
@@ -32,6 +37,17 @@ use enclave_rpc::{ServerKey, ServerSecret};
 use enclave_tokens::{PowProof, token_hash};
 use enclave_wire::{ENVELOPE_LEN, Op, RequestHeader};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+/// Why a server could not start.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// Key generation failed.
+    #[error("crypto: {0}")]
+    Crypto(#[from] enclave_crypto::Error),
+    /// The database failed.
+    #[error(transparent)]
+    Db(#[from] db::DbError),
+}
 
 /// Width of a push window.
 pub const PUSH_WINDOW_SECS: u64 = 60;
@@ -87,26 +103,133 @@ impl Default for Config {
     }
 }
 
+/// An inbox's metadata (`db::INBOXES`); its tokens and envelopes are in
+/// their own tables, keyed by the mailbox.
+#[derive(Clone, Copy)]
 struct Inbox {
     owner: [u8; 32],
     read: [u8; 32],
     request: bool,
     group: bool,
-    tokens: HashSet<[u8; 32]>,
-    messages: BTreeMap<u64, (Vec<u8>, u64)>,
     next_seq: u64,
 }
 
-struct DeviceBundles {
-    publication: Publication,
-    next_opk: usize,
+impl Inbox {
+    fn encode(&self) -> [u8; 73] {
+        let mut b = [0u8; 73];
+        b[..32].copy_from_slice(&self.owner);
+        b[32..64].copy_from_slice(&self.read);
+        b[64] = u8::from(self.request) | u8::from(self.group) << 1;
+        b[65..].copy_from_slice(&self.next_seq.to_be_bytes());
+        b
+    }
+
+    fn decode(b: &[u8]) -> Option<Self> {
+        if b.len() != 73 {
+            return None;
+        }
+        Some(Self {
+            owner: b[..32].try_into().ok()?,
+            read: b[32..64].try_into().ok()?,
+            request: b[64] & 1 != 0,
+            group: b[64] & 2 != 0,
+            next_seq: u64::from_be_bytes(b[65..].try_into().ok()?),
+        })
+    }
+}
+
+fn cat(a: &[u8], b: &[u8]) -> Vec<u8> {
+    [a, b].concat()
+}
+
+fn be(t: u64) -> [u8; 8] {
+    t.to_be_bytes()
+}
+
+/// `u64` at the start of a stored value.
+fn head_u64(v: &[u8]) -> u64 {
+    v.get(..8)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_be_bytes)
+        .unwrap_or(0)
+}
+
+/// The stored value without its leading `u64`.
+fn tail(v: &[u8]) -> &[u8] {
+    v.get(8..).unwrap_or_default()
+}
+
+fn get_inbox(tx: &Tx<'_>, mailbox: &[u8; 32]) -> db::Result<Option<Inbox>> {
+    Ok(tx
+        .get(db::INBOXES, mailbox)?
+        .and_then(|b| Inbox::decode(&b)))
+}
+
+fn put_inbox(tx: &mut Tx<'_>, mailbox: &[u8; 32], ib: &Inbox) -> db::Result<()> {
+    tx.put(db::INBOXES, mailbox, &ib.encode())
+}
+
+/// Devices an account's manifests have listed: `n × (root ‖ id ‖ u16 len ‖ key)`.
+fn encode_seen(list: &[SeenDevice]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for s in list {
+        let k = s.key.to_bytes();
+        out.extend_from_slice(&s.root);
+        out.extend_from_slice(&s.id);
+        out.extend_from_slice(&(k.len() as u16).to_be_bytes());
+        out.extend_from_slice(&k);
+    }
+    out
+}
+
+fn decode_seen(mut b: &[u8]) -> Vec<SeenDevice> {
+    let mut out = Vec::new();
+    while b.len() >= 82 {
+        let n = usize::from(u16::from_be_bytes([b[80], b[81]]));
+        let Some(k) = b.get(82..82 + n) else { break };
+        let (Ok(root), Ok(id), Ok(key)) = (
+            b[..64].try_into(),
+            b[64..80].try_into(),
+            enclave_crypto::sig::CompositePublic::from_slice(k),
+        ) else {
+            break;
+        };
+        out.push(SeenDevice { root, id, key });
+        b = &b[82 + n..];
+    }
+    out
+}
+
+/// A list of byte strings: `n × (u32 len ‖ bytes)`.
+fn encode_blobs(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in items {
+        out.extend_from_slice(&(i.len() as u32).to_be_bytes());
+        out.extend_from_slice(i);
+    }
+    out
+}
+
+fn decode_blobs(mut b: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    while b.len() >= 4 {
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let Some(item) = b.get(4..4 + n) else { break };
+        out.push(item.to_vec());
+        b = &b[4 + n..];
+    }
+    out
 }
 
 #[derive(Default)]
 struct Upload {
     total: u32,
+    started: u64,
     chunks: BTreeMap<u32, Vec<u8>>,
 }
+
+/// How long a directory upload may take before its chunks are dropped.
+const UPLOAD_TTL_SECS: u64 = 600;
 
 /// Aggregate counters (no per-user data), for operators and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -127,26 +250,14 @@ pub struct Stats {
 pub struct Server {
     cfg: Config,
     keys: VecDeque<ServerSecret>,
-    inboxes: HashMap<[u8; 32], Inbox>,
-    manifests: HashMap<[u8; 32], (u64, Vec<u8>)>,
-    /// Every device an account's manifests have listed. Attestations must
-    /// come from one of them.
-    devices_seen: HashMap<[u8; 32], Vec<SeenDevice>>,
-    /// Device attestations per manifest key, newest last.
-    attestations: HashMap<[u8; 32], Vec<Vec<u8>>>,
-    /// Changes of recovery words, keyed by the old root's manifest key: the
-    /// old root may publish no manifest after that.
-    migrations: HashMap<[u8; 32], Vec<u8>>,
-    /// Old root → new root, for handing a username over.
-    moved: HashMap<[u8; 64], [u8; 64]>,
-    bundles: HashMap<[u8; 16], DeviceBundles>,
+    /// Everything that must survive a restart (`db.rs`): inboxes, tokens,
+    /// envelopes, the directory, blobs, push tokens, usernames, reports.
+    db: Db,
+    /// Claimed bundles, kept for their follow-up chunk requests (600 s).
     claims: HashMap<[u8; 32], (Vec<u8>, u64)>,
-    vaults: HashMap<[u8; 32], ([u8; 32], Vec<u8>)>,
-    blobs: HashMap<[u8; 32], (Vec<u8>, u64)>,
+    /// Directory uploads in progress, with when they started.
     uploads: HashMap<(u8, [u8; 32]), Upload>,
     kt: Option<KtService>,
-    /// Sealed push tokens by inbox (`docs/10-push.md`).
-    push: HashMap<[u8; 32], Vec<u8>>,
     /// Scheduled wakes by sealed-token hash.
     wakes: HashMap<[u8; 32], Wake>,
     /// A second log shown instead of `kt` (test hook, RT-04).
@@ -158,15 +269,9 @@ pub struct Server {
     /// registration batch, and each burned hash in order.
     #[cfg(feature = "test-hooks")]
     token_log: (Vec<Vec<[u8; 32]>>, Vec<[u8; 32]>),
-    /// name → (owning root, time of the last accepted claim)
-    usernames: HashMap<String, ([u8; 64], u64)>,
-    /// root → its current name
-    names_by_root: HashMap<[u8; 64], String>,
     /// Chunked lookup replies by reply id.
     kt_replies: HashMap<[u8; 32], (Vec<u8>, u64)>,
     stats: Stats,
-    /// User reports for the operator, oldest first (`docs/13-operators.md`).
-    reports: VecDeque<Report>,
     /// Every object ever stored, by length, for invariant checks in tests.
     stored_lengths: HashSet<usize>,
     rng: HedgedRng,
@@ -198,29 +303,33 @@ struct SeenDevice {
 }
 
 impl Server {
-    /// Create a server with today's request key.
-    pub fn new(cfg: Config, day: u32) -> enclave_crypto::Result<Self> {
+    /// A server that keeps everything in memory, with a random request
+    /// key for `day` (tests, the simulator, the offline demo).
+    pub fn new(cfg: Config, day: u32) -> Result<Self, ServerError> {
         let mut rng = HedgedRng::new()?;
-        let mut keys = VecDeque::new();
-        keys.push_front(
-            ServerSecret::generate(day, &mut rng).map_err(|_| enclave_crypto::Error::Rng)?,
-        );
+        let key = ServerSecret::generate(day, &mut rng).map_err(|_| enclave_crypto::Error::Rng)?;
+        Self::with(cfg, Db::memory()?, vec![key], rng)
+    }
+
+    /// A server over a database file, with request keys from the persisted
+    /// chain (`keys::RequestChain`): newest first, today's and yesterday's.
+    pub fn open(cfg: Config, db: Db, keys: Vec<ServerSecret>) -> Result<Self, ServerError> {
+        Self::with(cfg, db, keys, HedgedRng::new()?)
+    }
+
+    fn with(
+        cfg: Config,
+        db: Db,
+        keys: Vec<ServerSecret>,
+        rng: HedgedRng,
+    ) -> Result<Self, ServerError> {
         Ok(Self {
             cfg,
-            keys,
-            inboxes: HashMap::new(),
-            manifests: HashMap::new(),
-            devices_seen: HashMap::new(),
-            attestations: HashMap::new(),
-            migrations: HashMap::new(),
-            moved: HashMap::new(),
-            bundles: HashMap::new(),
+            keys: keys.into_iter().collect(),
+            db,
             claims: HashMap::new(),
-            vaults: HashMap::new(),
-            blobs: HashMap::new(),
             uploads: HashMap::new(),
             kt: None,
-            push: HashMap::new(),
             wakes: HashMap::new(),
             #[cfg(feature = "test-hooks")]
             kt_fork: None,
@@ -228,13 +337,24 @@ impl Server {
             kt_serve_fork: false,
             #[cfg(feature = "test-hooks")]
             token_log: (Vec::new(), Vec::new()),
-            usernames: HashMap::new(),
-            names_by_root: HashMap::new(),
             kt_replies: HashMap::new(),
             stats: Stats::default(),
-            reports: VecDeque::new(),
             stored_lengths: HashSet::new(),
             rng,
+        })
+    }
+
+    /// The database (backups, operator tools).
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// Run `f` in a write transaction; a storage failure answers
+    /// `Unavailable` (the client tries again later) and nothing is applied.
+    fn tx<R>(&self, f: impl FnOnce(&mut Tx<'_>) -> db::Result<R>) -> Result<R, Status> {
+        self.db.write(f).map_err(|e| {
+            log_db_error(&e);
+            Status::Unavailable
         })
     }
 
@@ -243,16 +363,25 @@ impl Server {
         self.keys.front().map(|k| k.public().clone())
     }
 
-    /// Rotate to a new daily key; keep yesterday's for late requests and delete
-    /// anything older (forward secrecy for request metadata).
+    /// Rotate to a new random daily key (in-memory servers); keep
+    /// yesterday's for late requests and delete anything older (forward
+    /// secrecy for request metadata).
     pub fn rotate(&mut self, day: u32) -> enclave_crypto::Result<()> {
         let k =
             ServerSecret::generate(day, &mut self.rng).map_err(|_| enclave_crypto::Error::Rng)?;
-        self.keys.push_front(k);
+        self.install_key(k);
+        Ok(())
+    }
+
+    /// Make `key` current (from the persisted chain); keep one previous.
+    pub fn install_key(&mut self, key: ServerSecret) {
+        if self.keys.front().is_some_and(|k| k.key_id == key.key_id) {
+            return;
+        }
+        self.keys.push_front(key);
         while self.keys.len() > 2 {
             self.keys.pop_back();
         }
-        Ok(())
     }
 
     /// Counters.
@@ -272,15 +401,18 @@ impl Server {
         &self.stored_lengths
     }
 
-    /// Delete expired envelopes, blobs and claims.
+    /// Delete expired envelopes, blobs, claims, lookup replies and stalled
+    /// uploads.
     pub fn expire(&mut self, now: u64) {
         let ttl = self.cfg.ttl_secs;
-        for ib in self.inboxes.values_mut() {
-            ib.messages.retain(|_, (_, t)| now <= *t + ttl);
-        }
-        self.blobs.retain(|_, (_, t)| now <= *t + ttl);
+        let _ = self.tx(|t| {
+            t.remove_where(db::ENVELOPES, b"", |_, v| now > head_u64(v) + ttl)?;
+            t.remove_where(db::BLOBS, b"", |_, v| now > head_u64(v) + ttl)
+        });
         self.claims.retain(|_, (_, t)| now <= *t + 600);
         self.kt_replies.retain(|_, (_, t)| now <= *t + 600);
+        self.uploads
+            .retain(|_, u| now <= u.started + UPLOAD_TTL_SECS);
     }
 
     /// Attach a key-transparency log, enabling usernames.
@@ -393,9 +525,13 @@ impl Server {
             Op::Poll => self.poll(h),
             Op::Ack => (self.ack(h), 0, none, Reply::Empty),
             Op::BlobPut => (self.blob_put(h, env, now), 0, none, Reply::Empty),
-            Op::BlobGet => match self.blobs.get(&h.mailbox) {
-                Some((b, _)) => (Status::Ok, 0, none, Reply::Envelope(b.clone())),
-                None => (Status::NotFound, 0, none, Reply::Empty),
+            Op::BlobGet => match self.db.read(|r| r.get(db::BLOBS, &h.mailbox)) {
+                Ok(Some(v)) => (Status::Ok, 0, none, Reply::Envelope(tail(&v).to_vec())),
+                Ok(None) => (Status::NotFound, 0, none, Reply::Empty),
+                Err(e) => {
+                    log_db_error(&e);
+                    (Status::Unavailable, 0, none, Reply::Empty)
+                }
             },
             Op::Directory => match api::unframe(env).and_then(DirRequest::decode) {
                 Ok(req) => {
@@ -412,32 +548,26 @@ impl Server {
 
     fn register_tokens(&mut self, h: &RequestHeader, env: &[u8]) -> Status {
         let owner_hash = api::credential_hash(&h.token);
+        let mb = h.mailbox;
         if h.flags & FLAG_CREATE != 0 {
-            if self.inboxes.contains_key(&h.mailbox) {
-                return Status::Denied;
-            }
             let mut owner = [0u8; 32];
             owner.copy_from_slice(&h.token);
-            let read = api::credential_hash(&api::read_credential(&owner));
-            self.inboxes.insert(
-                h.mailbox,
-                Inbox {
-                    owner: owner_hash,
-                    read,
-                    request: h.flags & FLAG_REQUEST_INBOX != 0,
-                    group: false,
-                    tokens: HashSet::new(),
-                    messages: BTreeMap::new(),
-                    next_seq: 1,
-                },
-            );
-            return Status::Ok;
-        }
-        let Some(ib) = self.inboxes.get_mut(&h.mailbox) else {
-            return Status::NotFound;
-        };
-        if ib.owner != owner_hash {
-            return Status::Denied;
+            let ib = Inbox {
+                owner: owner_hash,
+                read: api::credential_hash(&api::read_credential(&owner)),
+                request: h.flags & FLAG_REQUEST_INBOX != 0,
+                group: false,
+                next_seq: 1,
+            };
+            return self
+                .tx(|t| {
+                    if t.has(db::INBOXES, &mb)? {
+                        return Ok(Status::Denied);
+                    }
+                    put_inbox(t, &mb, &ib)?;
+                    Ok(Status::Ok)
+                })
+                .unwrap_or_else(|s| s);
         }
         let Ok(p) = api::unframe(env) else {
             return Status::Malformed;
@@ -445,61 +575,78 @@ impl Server {
         if p.len() % 32 != 0 {
             return Status::Malformed;
         }
-        if h.flags & FLAG_REVOKE != 0 {
-            for c in p.chunks_exact(32) {
-                let mut t = [0u8; 32];
-                t.copy_from_slice(c);
-                ib.tokens.remove(&t);
-            }
-            return Status::Ok;
-        }
-        if ib.tokens.len() + p.len() / 32 > self.cfg.token_quota {
-            return Status::Quota;
-        }
+        let quota = self.cfg.token_quota;
+        let revoke = h.flags & FLAG_REVOKE != 0;
+        let status = self
+            .tx(|t| {
+                let Some(ib) = get_inbox(t, &mb)? else {
+                    return Ok(Status::NotFound);
+                };
+                if ib.owner != owner_hash {
+                    return Ok(Status::Denied);
+                }
+                if revoke {
+                    for c in p.chunks_exact(32) {
+                        t.del(db::TOKENS, &cat(&mb, c))?;
+                    }
+                    return Ok(Status::Ok);
+                }
+                if t.count(db::TOKENS, &mb)? + p.len() / 32 > quota {
+                    return Ok(Status::Quota);
+                }
+                for c in p.chunks_exact(32) {
+                    t.put(db::TOKENS, &cat(&mb, c), &[])?;
+                }
+                Ok(Status::Ok)
+            })
+            .unwrap_or_else(|s| s);
         #[cfg(feature = "test-hooks")]
-        self.token_log.0.push(
-            p.chunks_exact(32)
-                .filter_map(|c| c.try_into().ok())
-                .collect(),
-        );
-        for c in p.chunks_exact(32) {
-            let mut t = [0u8; 32];
-            t.copy_from_slice(c);
-            ib.tokens.insert(t);
+        if status == Status::Ok && !revoke {
+            self.token_log.0.push(
+                p.chunks_exact(32)
+                    .filter_map(|c| c.try_into().ok())
+                    .collect(),
+            );
         }
-        Status::Ok
+        status
     }
 
     /// Set or clear the sealed push token of an inbox (its owner only).
     /// The server can't open it: only the push relay can.
     fn push_register(&mut self, h: &RequestHeader, env: &[u8]) -> Status {
-        let Some(ib) = self.inboxes.get(&h.mailbox) else {
-            return Status::NotFound;
-        };
-        if ib.owner != api::credential_hash(&h.token) || ib.group {
-            return Status::Denied;
-        }
         let Ok(sealed) = api::unframe(env) else {
             return Status::Malformed;
         };
-        if sealed.is_empty() {
-            self.push.remove(&h.mailbox);
-        } else if sealed.len() > MAX_PUSH_TOKEN {
+        if sealed.len() > MAX_PUSH_TOKEN {
             return Status::Malformed;
-        } else {
-            self.push.insert(h.mailbox, sealed.to_vec());
         }
-        Status::Ok
+        let owner = api::credential_hash(&h.token);
+        let mb = h.mailbox;
+        self.tx(|t| {
+            let Some(ib) = get_inbox(t, &mb)? else {
+                return Ok(Status::NotFound);
+            };
+            if ib.owner != owner || ib.group {
+                return Ok(Status::Denied);
+            }
+            if sealed.is_empty() {
+                t.del(db::PUSH, &mb)?;
+            } else {
+                t.put(db::PUSH, &mb, sealed)?;
+            }
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     /// A write reached `mailbox`: schedule its wake, at most one per sealed
     /// token per window. The wake goes out in the *next* 60 s window at a
     /// random 0–30 s offset, so its time says little about the write's.
     fn schedule_wake(&mut self, mailbox: &[u8; 32], now: u64) {
-        let Some(sealed) = self.push.get(mailbox) else {
+        let Ok(Some(sealed)) = self.db.read(|r| r.get(db::PUSH, mailbox)) else {
             return;
         };
-        let id = sha3_512(sealed);
+        let id = sha3_512(&sealed);
         let mut key = [0u8; 32];
         key.copy_from_slice(&id[..32]);
         let window = now / PUSH_WINDOW_SECS + 1;
@@ -516,7 +663,7 @@ impl Server {
             Wake {
                 window,
                 release: window * PUSH_WINDOW_SECS + jitter,
-                sealed: sealed.clone(),
+                sealed,
                 sent: false,
             },
         );
@@ -537,108 +684,143 @@ impl Server {
         out
     }
 
-    fn store(&mut self, mailbox: &[u8; 32], env: &[u8], now: u64) -> Status {
-        let quota = self.cfg.inbox_quota;
-        let Some(ib) = self.inboxes.get_mut(mailbox) else {
-            return Status::NotFound;
+    /// Append an envelope to `mailbox` inside the caller's transaction.
+    fn store_in(
+        t: &mut Tx<'_>,
+        mailbox: &[u8; 32],
+        env: &[u8],
+        now: u64,
+        quota: usize,
+    ) -> db::Result<Status> {
+        let Some(mut ib) = get_inbox(t, mailbox)? else {
+            return Ok(Status::NotFound);
         };
-        if ib.messages.len() >= quota {
+        if t.count(db::ENVELOPES, mailbox)? >= quota {
             if ib.request {
                 // Request inboxes drop their oldest pending request.
-                if let Some(k) = ib.messages.keys().next().copied() {
-                    ib.messages.remove(&k);
+                if let Some((k, _)) = t.first_from(db::ENVELOPES, mailbox, mailbox)? {
+                    t.del(db::ENVELOPES, &k)?;
                 }
             } else {
-                return Status::Quota;
+                return Ok(Status::Quota);
             }
         }
         let seq = ib.next_seq;
         ib.next_seq += 1;
-        ib.messages.insert(seq, (env.to_vec(), now));
+        put_inbox(t, mailbox, &ib)?;
+        t.put(db::ENVELOPES, &cat(mailbox, &be(seq)), &cat(&be(now), env))?;
+        Ok(Status::Ok)
+    }
+
+    /// After a stored envelope: counters and the owner's wake.
+    fn stored(&mut self, mailbox: &[u8; 32], env: &[u8], now: u64) {
         self.stats.stored += 1;
         self.stored_lengths.insert(env.len());
         self.schedule_wake(mailbox, now);
-        Status::Ok
     }
 
     fn write(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
         if h.flags & FLAG_GROUP != 0 {
             return self.write_group(h, env, now);
         }
-        let Some(ib) = self.inboxes.get_mut(&h.mailbox) else {
-            return Status::NotFound;
-        };
-        if ib.request || ib.group {
-            return Status::Denied;
-        }
+        let mb = h.mailbox;
         let th = token_hash(&h.token);
-        if !ib.tokens.remove(&th) {
-            return Status::Denied;
+        let quota = self.cfg.inbox_quota;
+        // The token burn and the stored envelope commit together: a crash
+        // leaves both or neither, and a replay after a restart is refused.
+        let status = self
+            .tx(|t| {
+                let Some(ib) = get_inbox(t, &mb)? else {
+                    return Ok(Status::NotFound);
+                };
+                if ib.request || ib.group {
+                    return Ok(Status::Denied);
+                }
+                if !t.del(db::TOKENS, &cat(&mb, &th))? {
+                    return Ok(Status::Denied);
+                }
+                Self::store_in(t, &mb, env, now, quota)
+            })
+            .unwrap_or_else(|s| s);
+        if status == Status::Ok {
+            #[cfg(feature = "test-hooks")]
+            self.token_log.1.push(th);
+            self.stats.tokens_burned += 1;
+            self.stored(&mb, env, now);
         }
-        #[cfg(feature = "test-hooks")]
-        self.token_log.1.push(th);
-        self.stats.tokens_burned += 1;
-        self.store(&h.mailbox, env, now)
+        status
     }
 
     fn write_group(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
         let owner_hash = api::credential_hash(&h.token);
-        match self.inboxes.get(&h.mailbox) {
-            None => {
-                let read = api::credential_hash(&api::read_credential(&h.token));
-                self.inboxes.insert(
-                    h.mailbox,
-                    Inbox {
-                        owner: owner_hash,
-                        read,
-                        request: false,
-                        group: true,
-                        tokens: HashSet::new(),
-                        messages: BTreeMap::new(),
-                        next_seq: 1,
-                    },
-                );
-            }
-            Some(ib) if ib.group && ib.owner == owner_hash => {}
-            Some(_) => return Status::Denied,
+        let read = api::credential_hash(&api::read_credential(&h.token));
+        let mb = h.mailbox;
+        let quota = self.cfg.inbox_quota;
+        let status = self
+            .tx(|t| {
+                match get_inbox(t, &mb)? {
+                    None => put_inbox(
+                        t,
+                        &mb,
+                        &Inbox {
+                            owner: owner_hash,
+                            read,
+                            request: false,
+                            group: true,
+                            next_seq: 1,
+                        },
+                    )?,
+                    Some(ib) if ib.group && ib.owner == owner_hash => {}
+                    Some(_) => return Ok(Status::Denied),
+                }
+                Self::store_in(t, &mb, env, now, quota)
+            })
+            .unwrap_or_else(|s| s);
+        if status == Status::Ok {
+            self.stored(&mb, env, now);
         }
-        self.store(&h.mailbox, env, now)
+        status
     }
 
     fn write_request(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
-        let Some(ib) = self.inboxes.get_mut(&h.mailbox) else {
-            return Status::NotFound;
-        };
-        if !ib.request {
-            return Status::Denied;
-        }
-        if h.flags & FLAG_INVITE != 0 {
-            // An invite capability stands in for the proof of work.
-            if !ib.tokens.remove(&token_hash(&h.token)) {
-                return Status::Denied;
-            }
-            self.stats.tokens_burned += 1;
-        } else {
+        let invite = h.flags & FLAG_INVITE != 0;
+        if !invite {
             let ctx = api::pow_context_request(&h.mailbox, &sha3_512(env));
             if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
                 return Status::Pow;
             }
         }
-        let q = self.cfg.request_quota;
-        let saved = self.cfg.inbox_quota;
-        self.cfg.inbox_quota = q;
-        let s = self.store(&h.mailbox, env, now);
-        self.cfg.inbox_quota = saved;
-        s
+        let mb = h.mailbox;
+        let th = token_hash(&h.token);
+        let quota = self.cfg.request_quota;
+        let status = self
+            .tx(|t| {
+                let Some(ib) = get_inbox(t, &mb)? else {
+                    return Ok(Status::NotFound);
+                };
+                if !ib.request {
+                    return Ok(Status::Denied);
+                }
+                // An invite capability stands in for the proof of work.
+                if invite && !t.del(db::TOKENS, &cat(&mb, &th))? {
+                    return Ok(Status::Denied);
+                }
+                Self::store_in(t, &mb, env, now, quota)
+            })
+            .unwrap_or_else(|s| s);
+        if status == Status::Ok {
+            if invite {
+                self.stats.tokens_burned += 1;
+            }
+            self.stored(&mb, env, now);
+        }
+        status
     }
 
     /// A user report about the account whose request inbox is `h.mailbox`
     /// (it must be one of ours). Costs a proof of work; the queue keeps the
     /// newest [`MAX_REPORTS`].
     fn report(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
-        if !self.inboxes.get(&h.mailbox).is_some_and(|ib| ib.request) {
-            return Status::NotFound;
-        }
         let ctx = api::pow_context_report(&h.mailbox, &sha3_512(env));
         if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
             return Status::Pow;
@@ -646,60 +828,108 @@ impl Server {
         let Ok(body) = api::unframe(env).and_then(api::ReportBody::decode) else {
             return Status::Malformed;
         };
-        if self.reports.len() >= MAX_REPORTS {
-            self.reports.pop_front();
-        }
-        self.reports.push_back(Report {
-            request_inbox: h.mailbox,
-            day: now / 86_400,
-            body,
-        });
-        Status::Ok
+        let mb = h.mailbox;
+        self.tx(|t| {
+            if !get_inbox(t, &mb)?.is_some_and(|ib| ib.request) {
+                return Ok(Status::NotFound);
+            }
+            let all = t.scan(db::REPORTS, b"")?;
+            let next = all.last().map_or(0, |(k, _)| head_u64(k) + 1);
+            if all.len() >= MAX_REPORTS
+                && let Some((k, _)) = all.first()
+            {
+                t.del(db::REPORTS, k)?;
+            }
+            let rec = [&be(now / 86_400)[..], &mb, &body.encode()].concat();
+            t.put(db::REPORTS, &be(next), &rec)?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     /// Reports waiting for the operator, oldest first.
-    pub fn reports(&self) -> impl Iterator<Item = &Report> {
-        self.reports.iter()
+    pub fn reports(&self) -> Vec<Report> {
+        self.db
+            .read(|r| r.scan(db::REPORTS, b""))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, v)| {
+                Some(Report {
+                    day: head_u64(&v),
+                    request_inbox: v.get(8..40)?.try_into().ok()?,
+                    body: api::ReportBody::decode(v.get(40..)?).ok()?,
+                })
+            })
+            .collect()
     }
 
     /// Hand the waiting reports to the operator and forget them here.
     pub fn take_reports(&mut self) -> Vec<Report> {
-        self.reports.drain(..).collect()
+        let out = self.reports();
+        let _ = self.tx(|t| t.remove_where(db::REPORTS, b"", |_, _| true));
+        out
     }
 
     /// Operator action on a report: close the account's request inbox, so
     /// nobody can send it new requests and it can't receive replies to them.
     /// Returns whether it existed.
     pub fn disable_request_inbox(&mut self, request_inbox: &[u8; 32]) -> bool {
-        self.inboxes
-            .remove(request_inbox)
-            .is_some_and(|ib| ib.request)
+        let mb = *request_inbox;
+        self.tx(|t| {
+            if !get_inbox(t, &mb)?.is_some_and(|ib| ib.request) {
+                return Ok(false);
+            }
+            t.del(db::INBOXES, &mb)?;
+            t.remove_where(db::ENVELOPES, &mb, |_, _| true)?;
+            t.remove_where(db::TOKENS, &mb, |_, _| true)?;
+            Ok(true)
+        })
+        .unwrap_or(false)
     }
 
-    fn check_read(&self, h: &RequestHeader) -> Option<&Inbox> {
-        let ib = self.inboxes.get(&h.mailbox)?;
+    /// The inbox, if `h` carries its read credential.
+    fn check_read(&self, h: &RequestHeader) -> Option<Inbox> {
+        let ib = self
+            .db
+            .read(|r| {
+                Ok(r.get(db::INBOXES, &h.mailbox)?
+                    .and_then(|b| Inbox::decode(&b)))
+            })
+            .ok()??;
         (api::credential_hash(&h.token[..24]) == ib.read).then_some(ib)
     }
 
     fn poll(&mut self, h: &RequestHeader) -> (Status, u8, [u8; 32], Reply) {
         let none = [0u8; 32];
-        let Some(ib) = self.check_read(h) else {
+        if self.check_read(h).is_none() {
             return (Status::Denied, 0, none, Reply::Empty);
-        };
+        }
         let mut cursor = [0u8; 8];
         cursor.copy_from_slice(&h.token[24..]);
-        let cursor = u64::from_be_bytes(cursor);
-        let mut it = ib.messages.range(cursor + 1..);
-        match it.next() {
-            Some((seq, (env, _))) => {
-                let more = if it.next().is_some() { FLAG_MORE } else { 0 };
+        let from = cat(
+            &h.mailbox,
+            &be(u64::from_be_bytes(cursor).saturating_add(1)),
+        );
+        let next = match self
+            .db
+            .read(|r| r.next_two(db::ENVELOPES, &h.mailbox, &from))
+        {
+            Ok(n) => n,
+            Err(e) => {
+                log_db_error(&e);
+                return (Status::Unavailable, 0, none, Reply::Empty);
+            }
+        };
+        match next.first() {
+            Some((k, v)) => {
+                let more = if next.len() > 1 { FLAG_MORE } else { 0 };
                 let mut tok = [0u8; 32];
-                tok[24..].copy_from_slice(&seq.to_be_bytes());
+                tok[24..].copy_from_slice(&k[32..40]);
                 (
                     Status::Ok,
                     FLAG_FOUND | more,
                     tok,
-                    Reply::Envelope(env.clone()),
+                    Reply::Envelope(tail(v).to_vec()),
                 )
             }
             None => (Status::Ok, 0, none, Reply::Empty),
@@ -713,56 +943,76 @@ impl Server {
         let mut w = [0u8; 8];
         w.copy_from_slice(&h.token[24..]);
         let watermark = u64::from_be_bytes(w);
-        if let Some(ib) = self.inboxes.get_mut(&h.mailbox) {
-            ib.messages.retain(|seq, _| *seq > watermark);
-        }
-        Status::Ok
+        let mb = h.mailbox;
+        self.tx(|t| {
+            t.remove_where(db::ENVELOPES, &mb, |k, _| {
+                k.get(32..40)
+                    .and_then(|s| s.try_into().ok())
+                    .map(u64::from_be_bytes)
+                    .is_some_and(|seq| seq <= watermark)
+            })?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     fn blob_put(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
-        if self.blobs.contains_key(&h.mailbox) {
-            return Status::Denied;
-        }
         let ctx = api::pow_context_blob(&h.mailbox, &sha3_512(env));
         if !enclave_tokens::verify(&ctx, self.cfg.effort_blob, &PowProof(h.token)) {
             return Status::Pow;
         }
-        self.stored_lengths.insert(env.len());
-        self.blobs.insert(h.mailbox, (env.to_vec(), now));
-        Status::Ok
+        let id = h.mailbox;
+        let s = self
+            .tx(|t| {
+                if t.has(db::BLOBS, &id)? {
+                    return Ok(Status::Denied);
+                }
+                t.put(db::BLOBS, &id, &cat(&be(now), env))?;
+                Ok(Status::Ok)
+            })
+            .unwrap_or_else(|s| s);
+        if s == Status::Ok {
+            self.stored_lengths.insert(env.len());
+        }
+        s
     }
 
     fn directory(&mut self, req: DirRequest, now: u64) -> (Status, Reply) {
         match (req.kind, req.action) {
             (_, DirAction::Put) => self.dir_put(req, now),
-            (DirKind::Manifest, DirAction::Get) => match self.manifests.get(&req.key) {
-                Some(_) if self.migrations.contains_key(&req.key) => {
-                    (Status::NotFound, Reply::Empty)
-                }
-                Some((_, bytes)) => Self::chunk_reply(bytes, req.index, [0; 32]),
-                None => (Status::NotFound, Reply::Empty),
-            },
-            (DirKind::Migration, DirAction::Get) => match self.migrations.get(&req.key) {
-                Some(bytes) => Self::chunk_reply(bytes, req.index, [0; 32]),
-                None => (Status::NotFound, Reply::Empty),
-            },
-            (DirKind::Vault, DirAction::Get) => match self.vaults.get(&req.key) {
-                Some((_, bytes)) => Self::chunk_reply(bytes, req.index, [0; 32]),
-                None => (Status::NotFound, Reply::Empty),
-            },
+            (DirKind::Manifest, DirAction::Get) => {
+                let got = self.db.read(|r| {
+                    if r.get(db::MIGRATIONS, &req.key)?.is_some() {
+                        return Ok(None);
+                    }
+                    r.get(db::MANIFESTS, &req.key)
+                });
+                self.stored_reply(got, req.index, |v| tail(v))
+            }
+            (DirKind::Migration, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::MIGRATIONS, &req.key));
+                self.stored_reply(got, req.index, |v| v)
+            }
+            (DirKind::Vault, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::VAULTS, &req.key));
+                self.stored_reply(got, req.index, |v| v.get(32..).unwrap_or_default())
+            }
             (DirKind::Bundle, DirAction::Claim) => self.claim_bundle(&req, now),
             (DirKind::Bundle, DirAction::Get) => match self.claims.get(&req.key) {
                 Some((bytes, _)) => Self::chunk_reply(bytes, req.index, req.key),
                 None => (Status::NotFound, Reply::Empty),
             },
-            (DirKind::Attest, DirAction::Get) => match self.attestations.get(&req.key) {
-                Some(list) => Self::chunk_reply(
-                    &enclave_proto::attest::encode_list(list),
-                    req.index,
-                    [0; 32],
-                ),
-                None => (Status::NotFound, Reply::Empty),
-            },
+            (DirKind::Attest, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::ATTESTATIONS, &req.key));
+                match got {
+                    Ok(Some(v)) => Self::chunk_reply(
+                        &enclave_proto::attest::encode_list(&decode_blobs(&v)),
+                        req.index,
+                        [0; 32],
+                    ),
+                    other => self.stored_reply(other, req.index, |v| v),
+                }
+            }
             (DirKind::Username, DirAction::Get) if req.index == 0 => {
                 self.lookup_username(&req, now)
             }
@@ -771,6 +1021,23 @@ impl Server {
                 None => (Status::NotFound, Reply::Empty),
             },
             _ => (Status::Malformed, Reply::Empty),
+        }
+    }
+
+    /// Chunk `index` of a stored object (after `view` strips its header).
+    fn stored_reply(
+        &self,
+        got: db::Result<Option<Vec<u8>>>,
+        index: u32,
+        view: impl Fn(&[u8]) -> &[u8],
+    ) -> (Status, Reply) {
+        match got {
+            Ok(Some(v)) => Self::chunk_reply(view(&v), index, [0; 32]),
+            Ok(None) => (Status::NotFound, Reply::Empty),
+            Err(e) => {
+                log_db_error(&e);
+                (Status::Unavailable, Reply::Empty)
+            }
         }
     }
 
@@ -798,23 +1065,33 @@ impl Server {
         if !enclave_tokens::verify(&ctx, self.cfg.effort_claim, &PowProof(req.proof)) {
             return (Status::Pow, Reply::Empty);
         }
-        let mut device = [0u8; 16];
-        device.copy_from_slice(&req.key[..16]);
-        let Some(db) = self.bundles.get_mut(&device) else {
-            return (Status::NotFound, Reply::Empty);
-        };
-        let p = &db.publication;
-        let opk = if db.next_opk < p.opks.len() {
-            let o = p.opks[db.next_opk].clone();
-            db.next_opk += 1;
-            Some((p.batch.clone(), o))
-        } else {
-            None
-        };
-        let bundle = Bundle {
-            spk: p.spk.clone(),
-            opk,
-            last_resort: p.last_resort.clone(),
+        let device = req.key[..16].to_vec();
+        // Each one-time prekey is served once: the pointer moves in the same
+        // transaction that reads it.
+        let bundle = self.tx(|t| {
+            let Some(v) = t.get(db::BUNDLES, &device)? else {
+                return Ok(None);
+            };
+            let Ok(p) = Publication::decode(tail(&v)) else {
+                return Ok(None);
+            };
+            let next = head_u64(&v) as usize;
+            let opk = if next < p.opks.len() {
+                t.put(db::BUNDLES, &device, &cat(&be(next as u64 + 1), tail(&v)))?;
+                Some((p.batch.clone(), p.opks[next].clone()))
+            } else {
+                None
+            };
+            Ok(Some(Bundle {
+                spk: p.spk.clone(),
+                opk,
+                last_resort: p.last_resort.clone(),
+            }))
+        });
+        let bundle = match bundle {
+            Ok(Some(b)) => b,
+            Ok(None) => return (Status::NotFound, Reply::Empty),
+            Err(s) => return (s, Reply::Empty),
         };
         let bytes = bundle.encode();
         let claim: [u8; 32] = match self.rng.array("server/claim-id") {
@@ -834,6 +1111,9 @@ impl Server {
         if up.total != 0 && up.total != req.total {
             self.uploads.remove(&slot);
             return (Status::Malformed, Reply::Empty);
+        }
+        if up.total == 0 {
+            up.started = now;
         }
         up.total = req.total;
         up.chunks.insert(req.index, req.data);
@@ -907,10 +1187,15 @@ impl Server {
         let Some(root) = claim.root() else {
             return Status::Malformed;
         };
-        let Some((_, mbytes)) = self.manifests.get(&manifest_key(&root)) else {
-            return Status::NotFound;
+        let mbytes = match self.db.read(|r| r.get(db::MANIFESTS, &manifest_key(&root))) {
+            Ok(Some(v)) => v,
+            Ok(None) => return Status::NotFound,
+            Err(e) => {
+                log_db_error(&e);
+                return Status::Unavailable;
+            }
         };
-        let Some(m) = SignedManifest::from_bytes(mbytes)
+        let Some(m) = SignedManifest::from_bytes(tail(&mbytes))
             .ok()
             .and_then(|sm| Manifest::decode(&sm.body).ok())
         else {
@@ -926,20 +1211,42 @@ impl Server {
         if !signed {
             return Status::Invalid;
         }
-        if let Some((owner, last)) = self.usernames.get(&name) {
+        let state = self.db.read(|r| {
+            let holder = r.get(db::USERNAMES, name.as_bytes())?;
+            let moved = match &holder {
+                Some(h) => r.get(db::MOVED, &h[..64.min(h.len())])?,
+                None => None,
+            };
+            let old = r.get(db::NAMES_BY_ROOT, &root)?;
+            Ok((holder, moved, old))
+        });
+        let (holder, moved_to, old) = match state {
+            Ok(s) => s,
+            Err(e) => {
+                log_db_error(&e);
+                return Status::Unavailable;
+            }
+        };
+        let mut drop_owner = None;
+        if let Some(h) = &holder {
+            let owner: [u8; 64] = match h.get(..64).and_then(|o| o.try_into().ok()) {
+                Some(o) => o,
+                None => return Status::Invalid,
+            };
+            let last = head_u64(&h[64..]);
             // The owner changed their recovery words: the name moves along.
-            let moved = self.moved.get(owner) == Some(&root);
-            if *owner != root && !moved {
+            let moved = moved_to.as_deref() == Some(&root[..]);
+            if owner != root && !moved {
                 return Status::Denied;
             }
             if moved {
-                let owner = *owner;
-                self.names_by_root.remove(&owner);
-            } else if *last >= claim.time {
+                drop_owner = Some(owner);
+            } else if last >= claim.time {
                 return Status::Invalid;
             }
         }
-        if let Some(old) = self.names_by_root.get(&root)
+        let old = old.and_then(|o| String::from_utf8(o).ok());
+        if let Some(old) = &old
             && *old != name
             && kt.publish(old, root.to_vec(), now).is_err()
         {
@@ -948,9 +1255,16 @@ impl Server {
         if kt.publish(&name, claim.value.clone(), now).is_err() {
             return Status::Denied;
         }
-        self.usernames.insert(name.clone(), (root, claim.time));
-        self.names_by_root.insert(root, name);
-        Status::Ok
+        let time = claim.time;
+        self.tx(|t| {
+            if let Some(o) = drop_owner {
+                t.del(db::NAMES_BY_ROOT, &o)?;
+            }
+            t.put(db::USERNAMES, name.as_bytes(), &cat(&root, &be(time)))?;
+            t.put(db::NAMES_BY_ROOT, &root, name.as_bytes())?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     /// Keep a device attestation if a device the account has ever listed
@@ -959,21 +1273,26 @@ impl Server {
         let Ok(a) = enclave_proto::attest::Attestation::decode(&bytes) else {
             return Status::Malformed;
         };
-        let signed = self.devices_seen.get(key).is_some_and(|seen| {
-            seen.iter()
+        let key = *key;
+        self.tx(|t| {
+            let seen = decode_seen(&t.get(db::DEVICES_SEEN, &key)?.unwrap_or_default());
+            if !seen
+                .iter()
                 .any(|s| s.id == a.device && a.verify_key(&s.root, &s.key))
-        });
-        if !signed {
-            return Status::Invalid;
-        }
-        let list = self.attestations.entry(*key).or_default();
-        if !list.contains(&bytes) {
-            list.push(bytes);
-            if list.len() > 16 {
-                list.remove(0);
+            {
+                return Ok(Status::Invalid);
             }
-        }
-        Status::Ok
+            let mut list = decode_blobs(&t.get(db::ATTESTATIONS, &key)?.unwrap_or_default());
+            if !list.contains(&bytes) {
+                list.push(bytes);
+                if list.len() > 16 {
+                    list.remove(0);
+                }
+                t.put(db::ATTESTATIONS, &key, &encode_blobs(&list))?;
+            }
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     /// Keep a change of recovery words: both roots signed it, and the new
@@ -986,27 +1305,25 @@ impl Server {
         if &manifest_key(&mig.old.0) != key || !mig.cross_signed() {
             return Status::Invalid;
         }
-        let Some((_, mbytes)) = self.manifests.get(&manifest_key(&mig.new.0)) else {
-            return Status::NotFound;
-        };
-        let Ok(sm) = SignedManifest::from_bytes(mbytes) else {
-            return Status::Invalid;
-        };
-        if mig.verify(&sm, now).is_err() {
-            return Status::Invalid;
-        }
-        if self.migrations.contains_key(key) {
-            return Status::Invalid;
-        }
-        self.migrations.insert(*key, bytes.to_vec());
-        self.moved.insert(mig.old.0, mig.new.0);
-        Status::Ok
+        let key = *key;
+        self.tx(|t| {
+            let Some(v) = t.get(db::MANIFESTS, &manifest_key(&mig.new.0))? else {
+                return Ok(Status::NotFound);
+            };
+            let Ok(sm) = SignedManifest::from_bytes(tail(&v)) else {
+                return Ok(Status::Invalid);
+            };
+            if mig.verify(&sm, now).is_err() || t.has(db::MIGRATIONS, &key)? {
+                return Ok(Status::Invalid);
+            }
+            t.put(db::MIGRATIONS, &key, bytes)?;
+            t.put(db::MOVED, &mig.old.0, &mig.new.0)?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     fn accept_manifest(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {
-        if self.migrations.contains_key(key) {
-            return Status::Denied;
-        }
         let Ok(sm) = SignedManifest::from_bytes(&bytes) else {
             return Status::Malformed;
         };
@@ -1019,23 +1336,33 @@ impl Server {
         if sm.verify(&m.root, now).is_err() {
             return Status::Invalid;
         }
-        if let Some((v, _)) = self.manifests.get(key)
-            && m.version <= *v
-        {
-            return Status::Invalid;
-        }
-        let seen = self.devices_seen.entry(*key).or_default();
-        for d in &m.devices {
-            if !seen.iter().any(|s| s.id == d.id) && seen.len() < 256 {
-                seen.push(SeenDevice {
-                    root: m.root.0,
-                    id: d.id,
-                    key: d.signing.clone(),
-                });
+        let key = *key;
+        self.tx(|t| {
+            if t.has(db::MIGRATIONS, &key)? {
+                return Ok(Status::Denied);
             }
-        }
-        self.manifests.insert(*key, (m.version, bytes));
-        Status::Ok
+            if let Some(v) = t.get(db::MANIFESTS, &key)?
+                && m.version <= head_u64(&v)
+            {
+                return Ok(Status::Invalid);
+            }
+            let mut seen = decode_seen(&t.get(db::DEVICES_SEEN, &key)?.unwrap_or_default());
+            for d in &m.devices {
+                if !seen.iter().any(|s| s.id == d.id) && seen.len() < 256 {
+                    seen.push(SeenDevice {
+                        root: m.root.0,
+                        id: d.id,
+                        key: d.signing.clone(),
+                    });
+                }
+                // Which account a device belongs to, for its publications.
+                t.put(db::DEVICE_OWNER, &d.id, &key)?;
+            }
+            t.put(db::DEVICES_SEEN, &key, &encode_seen(&seen))?;
+            t.put(db::MANIFESTS, &key, &cat(&be(m.version), &bytes))?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     fn accept_publication(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {
@@ -1047,37 +1374,55 @@ impl Server {
         if device_key(&device) != *key {
             return Status::Invalid;
         }
-        let signer = self.manifests.values().find_map(|(_, mb)| {
-            let sm = SignedManifest::from_bytes(mb).ok()?;
-            let m = Manifest::decode(&sm.body).ok()?;
-            m.device(&device).map(|d| d.signing.clone())
+        let signer = self.db.read(|r| {
+            let Some(owner) = r.get(db::DEVICE_OWNER, &device)? else {
+                return Ok(None);
+            };
+            let Some(v) = r.get(db::MANIFESTS, &owner)? else {
+                return Ok(None);
+            };
+            Ok(SignedManifest::from_bytes(tail(&v))
+                .ok()
+                .and_then(|sm| Manifest::decode(&sm.body).ok())
+                .and_then(|m| m.device(&device).map(|d| d.signing.clone())))
         });
-        let Some(signer) = signer else {
-            return Status::NotFound;
+        let signer = match signer {
+            Ok(Some(s)) => s,
+            Ok(None) => return Status::NotFound,
+            Err(e) => {
+                log_db_error(&e);
+                return Status::Unavailable;
+            }
         };
         if p.verify(&signer, now).is_err() {
             return Status::Invalid;
         }
-        self.bundles.insert(
-            device,
-            DeviceBundles {
-                publication: p,
-                next_opk: 0,
-            },
-        );
-        Status::Ok
+        self.tx(|t| {
+            t.put(db::BUNDLES, &device, &cat(&be(0), &bytes))?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
 
     fn accept_vault(&mut self, key: &[u8; 32], owner_secret: &[u8; 32], bytes: Vec<u8>) -> Status {
         let owner = api::credential_hash(owner_secret);
-        if let Some((o, _)) = self.vaults.get(key)
-            && *o != owner
-        {
-            return Status::Denied;
-        }
-        self.vaults.insert(*key, (owner, bytes));
-        Status::Ok
+        let key = *key;
+        self.tx(|t| {
+            if let Some(v) = t.get(db::VAULTS, &key)?
+                && v.get(..32) != Some(&owner[..])
+            {
+                return Ok(Status::Denied);
+            }
+            t.put(db::VAULTS, &key, &cat(&owner, &bytes))?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
     }
+}
+
+/// Storage errors go to the operator's log, never to clients.
+fn log_db_error(e: &db::DbError) {
+    eprintln!("enclave-server: {e}");
 }
 
 enum Reply {

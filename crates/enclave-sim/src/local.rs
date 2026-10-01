@@ -24,7 +24,10 @@ impl LocalTransport {
     }
 
     /// Start a server with `config` (its `id` is the address).
-    pub fn add_server(&self, config: enclave_server::Config) -> enclave_crypto::Result<()> {
+    pub fn add_server(
+        &self,
+        config: enclave_server::Config,
+    ) -> Result<(), enclave_server::ServerError> {
         let day = (self.now() / 86_400) as u32;
         let id = config.id;
         let server = Server::new(config, day)?;

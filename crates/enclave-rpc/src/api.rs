@@ -28,6 +28,8 @@ pub enum Status {
     Pow = 5,
     /// Stored object failed validation (bad signature, rollback).
     Invalid = 6,
+    /// The server can't serve this right now (storage trouble); try later.
+    Unavailable = 7,
 }
 
 impl Status {
@@ -40,6 +42,7 @@ impl Status {
             3 => Status::Quota,
             5 => Status::Pow,
             6 => Status::Invalid,
+            7 => Status::Unavailable,
             _ => Status::Malformed,
         }
     }

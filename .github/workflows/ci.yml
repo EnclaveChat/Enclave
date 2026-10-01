@@ -27,7 +27,7 @@ jobs:
     name: fmt, clippy, test (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: Install system OpenSSL (test oracle only) and UI build dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libfontconfig1-dev libxkbcommon-dev
@@ -38,7 +38,7 @@ jobs:
         run: cargo xtask labels
       - name: Render UI screenshots (software renderer, light and dark)
         run: cargo run --release -p enclave-app --bin enclave-shots -- target/shots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: screenshots
           path: target/shots
@@ -47,7 +47,7 @@ jobs:
     name: build and test (macOS)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --release
@@ -56,7 +56,7 @@ jobs:
     name: build and test (Windows)
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --release
@@ -65,8 +65,8 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   deny-ios:
     name: cargo-deny (iOS licences)
@@ -75,8 +75,8 @@ jobs:
     # external gate G14); required from milestone I1.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: EmbarkStudios/cargo-deny-action@f2ba7abc2abebaf185c833c3961145a3c275caad # v2.0.13
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           arguments: --target aarch64-apple-ios --config deny-ios.toml
           command: check licenses
@@ -85,7 +85,7 @@ jobs:
     name: reproducible builds
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Two clean builds of each binary must be byte-identical
         run: |
           cargo xtask repro enclave-relay
@@ -95,9 +95,15 @@ jobs:
     name: formal models (ProVerif)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install ProVerif
-        run: sudo apt-get update && sudo apt-get install -y proverif
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Ubuntu has no proverif package: build the pinned release from source.
+      - name: Install ProVerif 2.05
+        run: |
+          sudo apt-get update && sudo apt-get install -y ocaml-nox
+          curl -sSfL -o pv.tgz https://bblanche.gitlabpages.inria.fr/proverif/proverif2.05.tar.gz
+          echo "4871f53c32ab4a04669a060c4886ba5d9080496963fb980a9a62d2c429ceabc4  pv.tgz" | sha256sum -c
+          tar xzf pv.tgz && (cd proverif2.05 && ./build -nointeract)
+          echo "PROVERIF=$PWD/proverif2.05/proverif" >> "$GITHUB_ENV"
       - name: Every query gives its expected result
         run: cargo xtask proverif
 
@@ -105,11 +111,11 @@ jobs:
     name: completion gate (report)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       # Reports what is left; becomes the blocking `cargo xtask done` at 1.0.
       - run: cargo xtask done --report | tee done-gate.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: done-gate
           path: done-gate.txt

@@ -54,12 +54,15 @@ fn repro(pkg: &str, bin: &str) -> ExitCode {
         let dir = root.join("target").join(format!("repro-{side}"));
         let _ = fs::remove_dir_all(&dir);
         // Every path the compiler might embed maps to the same name on both
-        // sides: the target directory first (it lies under the source root).
+        // sides. rustc applies the *last* matching mapping, and the target
+        // directory lies under the source root, so it goes last (otherwise
+        // build-script output such as akd_core's generated protobuf code
+        // keeps `repro-a` or `repro-b` in its path).
         let flags = format!(
-            "--remap-path-prefix={}=/target --remap-path-prefix={}=/src --remap-path-prefix={}=/cargo",
-            dir.display(),
+            "--remap-path-prefix={}=/cargo --remap-path-prefix={}=/src --remap-path-prefix={}=/target",
+            cargo_home,
             root.display(),
-            cargo_home
+            dir.display()
         );
         eprintln!("repro: building {pkg}/{bin} in {}", dir.display());
         let status = std::process::Command::new(&cargo)

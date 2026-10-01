@@ -8,7 +8,6 @@
 //!   what could and could not be validated.
 
 use crate::{NetError, Result};
-use enclave_crypto::kem::{MlKemPublic, X448Public};
 use enclave_rpc::ServerKey;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -47,27 +46,12 @@ pub trait Transport: Send + Sync {
 
 /// Encode `key_id ‖ x448 ‖ mlkem` (inverse of [`decode_server_key`]).
 pub fn encode_server_key(k: &ServerKey) -> Vec<u8> {
-    let mut v = Vec::with_capacity(4 + 56 + 1568);
-    v.extend_from_slice(&k.key_id.to_be_bytes());
-    v.extend_from_slice(&k.x448.0);
-    v.extend_from_slice(&k.mlkem.0[..]);
-    v
+    k.to_bytes()
 }
 
 /// Decode `key_id ‖ x448 ‖ mlkem` as served by the dev transport.
 pub fn decode_server_key(b: &[u8]) -> Result<ServerKey> {
-    if b.len() != 4 + 56 + 1568 {
-        return Err(NetError::BadReply);
-    }
-    let key_id = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-    let mut x = [0u8; 56];
-    x.copy_from_slice(&b[4..60]);
-    let mlkem = MlKemPublic::from_slice(&b[60..]).map_err(|_| NetError::BadReply)?;
-    Ok(ServerKey {
-        key_id,
-        x448: X448Public(x),
-        mlkem,
-    })
+    ServerKey::from_bytes(b).map_err(|_| NetError::BadReply)
 }
 
 /// Development transport: length-prefixed frames over TCP.

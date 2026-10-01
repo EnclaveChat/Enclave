@@ -2305,6 +2305,7 @@ dependencies = [
 name = "enclave-av1"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rav1d",
  "thiserror 2.0.21",
 ]
@@ -2534,8 +2535,12 @@ dependencies = [
  "enclave-rpc",
  "enclave-tokens",
  "enclave-wire",
+ "redb",
+ "serde",
  "thiserror 2.0.21",
  "tokio",
+ "toml 0.8.23",
+ "zeroize",
 ]
 
 [[package]]

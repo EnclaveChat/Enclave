@@ -28,6 +28,11 @@ use enclave_wire::{
 
 /// Label for the request key.
 pub const RPC_REQUEST: &str = "enclave/v1/rpc/request";
+/// Label deriving a day's X448 and ML-KEM key seeds from the request-key
+/// chain seed (`docs/12-servers.md` §1.4).
+pub const SERVER_REQUEST_KEY: &str = "enclave/v1/server/request-key";
+/// Label stepping the request-key chain forward one day.
+pub const SERVER_REQUEST_CHAIN: &str = "enclave/v1/server/request-chain";
 /// Label for the reply key.
 pub const RPC_REPLY: &str = "enclave/v1/rpc/reply";
 
@@ -67,6 +72,52 @@ pub struct ServerKey {
     pub mlkem: MlKemPublic,
 }
 
+impl ServerKey {
+    /// Encoded size: `key_id(4) ‖ x448(56) ‖ mlkem(1568)`.
+    pub const ENCODED_LEN: usize = 4 + 56 + 1568;
+
+    /// Encode `key_id ‖ x448 ‖ mlkem`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(Self::ENCODED_LEN);
+        v.extend_from_slice(&self.key_id.to_be_bytes());
+        v.extend_from_slice(&self.x448.0);
+        v.extend_from_slice(&self.mlkem.0[..]);
+        v
+    }
+
+    /// Decode [`ServerKey::to_bytes`].
+    pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        if b.len() != Self::ENCODED_LEN {
+            return Err(RpcError::Malformed);
+        }
+        let key_id = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        let mut x = [0u8; 56];
+        x.copy_from_slice(&b[4..60]);
+        let mlkem = MlKemPublic::from_slice(&b[60..]).map_err(|_| RpcError::Malformed)?;
+        Ok(Self {
+            key_id,
+            x448: X448Public(x),
+            mlkem,
+        })
+    }
+}
+
+impl PartialEq for ServerKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key_id == other.key_id
+            && self.x448.0 == other.x448.0
+            && self.mlkem.0[..] == other.mlkem.0[..]
+    }
+}
+impl Eq for ServerKey {}
+
+impl core::fmt::Debug for ServerKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let fp: [u8; 8] = enclave_crypto::kmac::kmac256(&self.to_bytes(), b"", "debug");
+        write!(f, "ServerKey(day {}, {:02x?})", self.key_id, fp)
+    }
+}
+
 /// The server's secret request key for one day. Deleted after its day plus a
 /// short grace period, which gives forward secrecy for request metadata.
 pub struct ServerSecret {
@@ -92,6 +143,39 @@ impl ServerSecret {
                 mlkem: mp,
             },
         })
+    }
+
+    /// The key for `key_id`, derived from that day's chain seed: a server
+    /// that restarts derives the same key, so clients' cached keys keep
+    /// working, and erasing old seeds erases old keys (forward secrecy).
+    pub fn from_seed(key_id: u32, seed: &[u8; 32]) -> Self {
+        let material: zeroize::Zeroizing<[u8; 56 + 64]> = zeroize::Zeroizing::new(
+            enclave_crypto::kmac::kmac256(seed, &key_id.to_be_bytes(), SERVER_REQUEST_KEY),
+        );
+        let mut x = [0u8; 56];
+        x.copy_from_slice(&material[..56]);
+        let x448 = X448Secret::from_bytes(x);
+        let xp = x448.public();
+        let mut ms = [0u8; 64];
+        ms.copy_from_slice(&material[56..]);
+        let (mlkem, mp) = MlKemSecret::from_seed(&ms);
+        x.fill(0);
+        ms.fill(0);
+        Self {
+            key_id,
+            x448,
+            mlkem,
+            public: ServerKey {
+                key_id,
+                x448: xp,
+                mlkem: mp,
+            },
+        }
+    }
+
+    /// The chain seed for the next day; the caller erases `seed`.
+    pub fn next_seed(seed: &[u8; 32]) -> [u8; 32] {
+        enclave_crypto::kmac::kmac256(seed, b"", SERVER_REQUEST_CHAIN)
     }
 
     /// Public half.

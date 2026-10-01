@@ -1747,7 +1747,7 @@ export component AppWindow inherits Window {
             Caption { text: p.title; font-weight: 600; }
             Flickable {
                 height: 72px;
-                viewport-width: p.count * 76px;
+                content-width: p.count * 76px;
                 HorizontalLayout {
                     spacing: 4px;
                     for c in root.sticker-cells: Rectangle {

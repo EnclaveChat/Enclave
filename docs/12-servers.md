@@ -6,9 +6,26 @@ Source: PLAN.md §12.1 to §12.3 and §12.5. Crates: `enclave-server`, `enclave-
 
 ## 1. `enclave-server`
 
-`enclave_server::Server` is an untrusted mailbox. `Server::handle(request, now)` maps one sealed request (unit or poll) to one sealed reply unit and is transport-agnostic: the dev binary serves it over TCP (`09-transport.md` §1), and a Nym service provider will serve it in production. The server keeps **no accounts, no phone numbers and no IP addresses**; everything it stores is keyed by random addresses, hashes, or public keys. State is in memory today (persistent redb storage is not implemented).
+`enclave_server::Server` is an untrusted mailbox. `Server::handle(request, now)` maps one sealed request (unit or poll) to one sealed reply unit and is transport-agnostic: the dev binary serves it over TCP (`09-transport.md` §1), and a Nym service provider will serve it in production. The server keeps **no accounts, no phone numbers and no IP addresses**; everything it stores is keyed by random addresses, hashes, or public keys. State lives in one redb database file (§1.3); the long-term keys live in a separate key directory (§1.4). Tests, the simulator and the offline demo use the same code over an in-memory database.
 
 ### 1.1 Configuration
+
+Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be overridden from the environment as `ENCLAVE_<SECTION>__<KEY>` (for example `ENCLAVE_SERVER__DOMAIN=a.example`), which is how the compose file sets per-deployment values; integers and `true`/`false` keep their type. Unknown keys are refused, so a typo never silently falls back to a default. `load` also checks that `server.domain` is a domain name, that `policy.ttl_days` and `policy.inbox_quota` are positive and that `kt.epoch_secs` is at least 10.
+
+| Section | Key | Default | Meaning |
+|---|---|---|---|
+| `[server]` | `domain` | `localhost` | Public domain (descriptor, usernames) |
+| | `operator`, `family` | empty | Operator name; operator family (servers of one family never count as independent) |
+| | `data_dir` | `/var/lib/enclave/server` | Holds `server.redb` |
+| | `keys_dir` | `/var/lib/enclave/keys` | Long-term keys (§1.4) |
+| | `listen` | `127.0.0.1:7443` | Where the ingress reaches the server |
+| | `public_dir` | `/var/lib/enclave/public` | Files the front serves (KT pins, descriptor) |
+| `[policy]` | `effort_request`, `effort_claim`, `effort_blob`, `effort_username`, `inbox_quota`, `request_quota`, `token_quota`, `ttl_days` | as `Config` below | Abuse controls |
+| `[kt]` | `enabled`, `epoch_secs` | `true`, 600 | Username log |
+| `[push]` | `forward` | none | Push egress address for due wakes |
+| `[backup]` | `dir`, `interval_hours`, `keep` | none, 24, 7 | Snapshots (§1.5) |
+
+`FileConfig::policy(id)` gives the in-process `Config`:
 
 | Field (`Config`) | Default | Meaning |
 |---|---|---|
@@ -46,7 +63,9 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | `KeyTransparency` | Not wired to `enclave-kt` yet: `NotFound`. |
 | `Report` | The mailbox must be one of this server's request inboxes (`NotFound`). Verify the PoW over `"report" ‖ mailbox ‖ SHA3-512(envelope)` at the request effort (`Pow`); the payload must parse as a `ReportBody` (`Malformed`). Queue it for the operator with the day it arrived; at most 1,000 are kept, oldest dropped first. `Server::take_reports()` hands them to the operator and `Server::disable_request_inbox()` closes a reported account's request inbox. |
 
-`Server::expire(now)` deletes envelopes and blobs older than `ttl_secs` and bundle claims older than 600 s. `Server::rotate(day)` adds a new daily request key and keeps at most two (`09-transport.md` §2.1). `Server::stats()` returns aggregate counters only (requests, cover, stored, tokens burned, denied).
+A storage failure answers `Unavailable` (status 7) and applies nothing; the client tries again later.
+
+`Server::expire(now)` deletes envelopes and blobs older than `ttl_secs`, bundle claims older than 600 s and unfinished uploads older than 600 s. `Server::install_key(key)` makes a request key from the chain (§1.4) current and keeps one previous (`09-transport.md` §2.1); in-memory servers use `Server::rotate(day)`, which draws a random one. `Server::stats()` returns aggregate counters only (requests, cover, stored, tokens burned, denied). `Server::reports()` lists queued reports without removing them; `Server::take_reports()` removes them.
 
 ### 1.3 State the server holds
 
@@ -61,6 +80,34 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | Upload | (kind, key) | chunks received so far | Until complete |
 
 Nothing in this table is an IP address, a Nym identity or an account identifier. Receive times are stored only to expire envelopes.
+
+**Persistence (`db.rs`).** Everything above except claims and unfinished uploads (both short-lived) is kept in redb tables: inboxes, tokens (keyed `mailbox ‖ hash`), envelopes (keyed `mailbox ‖ seq`), manifests, devices seen, attestations, migrations, moved records, device owners, bundles, vaults, blobs, push registrations, usernames, names by root, reports and a `meta` table holding the schema version (1). Each request runs in one write transaction that commits before its reply is sealed, so a server killed at any point either did all of a request or none of it: a burned token stays burned, and an envelope that was acknowledged as stored survives (`tests/restart.rs`). Key-transparency replies, push wakes and bundle claims are held in memory and expire within minutes; losing them in a restart costs a client one retry.
+
+### 1.4 Identity and daily request keys
+
+`enclave-server init` creates the key directory (mode 0700) with two files (mode 0600, written atomically, never overwritten):
+
+| File | Contents |
+|---|---|
+| `identity.key` | The server's composite Ed448 + ML-DSA-87 signing key |
+| `request-chain.key` | `u32(day) ‖ today's chain seed (32) ‖ 0x00`, or `… ‖ 0x01 ‖ yesterday's chain seed (32)` while yesterday's key is still served |
+
+The **server id** is the first 16 bytes of `SHAKE256("enclave/v1/net/server-id" ‖ identity public key)`: self-certifying, so a descriptor or key certificate signed by the identity proves which id it speaks for.
+
+**Request keys** come from a forward-secure seed chain. Day `d`'s key is derived deterministically: `KMAC256(seed_d, u32(d), "enclave/v1/server/request-key")` gives 120 bytes, the X448 secret (56 B) and the ML-KEM-1024 key-generation seed (64 B). The next seed is `seed_{d+1} = KMAC256(seed_d, "", "enclave/v1/server/request-chain")`. At midnight UTC the server steps the chain, rewrites the file with today's and yesterday's seeds, and drops older ones, so nothing on disk can recompute a request key older than yesterday's (`tests/restart.rs`, `request_keys_roll_forward_and_old_seeds_are_gone`). Because keys are deterministic, a server that restarts serves the same key and clients' cached keys keep working. Today's seed also yields tomorrow's key, which the descriptor publishes in advance.
+
+### 1.5 Running a server
+
+```text
+enclave-server init        [--config FILE]   create keys; print the server id
+enclave-server run         [--config FILE]   serve (state in redb, keys from disk)
+enclave-server show-id     [--config FILE]   print the server id
+enclave-server backup DIR  [--config FILE]   snapshot the database (server stopped)
+enclave-server healthcheck [--config FILE]   exit 0 if the server answers
+enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
+```
+
+`run` listens on `server.listen` with the length-prefixed frame transport (`09-transport.md` §1); in a deployment only the Nym ingress on the stack's internal network can reach it. Once a minute it steps the request-key chain if the day changed and expires old objects. With `[backup] dir` set it writes `server-<unix time>.redb` snapshots every `interval_hours` and keeps the newest `keep`. On SIGTERM or Ctrl-C it waits for the request in flight (which has already committed) and exits. A restore needs both a snapshot and the key directory; the key directory must be backed up separately, encrypted and off the host. `dev` is the all-in-memory development server: random keys every start, nothing persisted; a bare `enclave-server [ADDR]` runs it.
 
 ## 2. Directory
 

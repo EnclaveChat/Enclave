@@ -28,3 +28,4 @@ panic = "warn"
 # runs on other people's clips). 8-bit only: we only ever send 8-bit.
 rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8"] }
 thiserror = "2"
+libc = "0.2"

@@ -61,7 +61,9 @@ pub struct Decoder {
     ctx: Option<Dav1dContext>,
 }
 
-const EAGAIN: i32 = -11;
+/// dav1d's "try again": minus the platform's `EAGAIN` (11 on Linux and
+/// Windows, 35 on macOS and iOS), as rav1d defines it.
+const EAGAIN: i32 = -libc::EAGAIN;
 
 impl Decoder {
     /// A new decoder.

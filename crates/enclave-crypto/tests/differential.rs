@@ -7,7 +7,7 @@
 //! | ML-KEM-1024    | libcrux-ml-kem     | RustCrypto `ml-kem`            |
 //! | ML-DSA-87      | libcrux-ml-dsa     | RustCrypto `ml-dsa`            |
 //! | SLH-DSA-256s   | RustCrypto slh-dsa | `fips205`                      |
-//! | X448, Ed448    | RustCrypto         | OpenSSL (system)               |
+//! | X448, Ed448    | RustCrypto         | OpenSSL (system; not Windows)  |
 //! | KMAC256        | in-house           | libcrux-kmac, NIST samples     |
 
 #![allow(clippy::expect_used)]
@@ -147,6 +147,9 @@ fn slhdsa_cross_verify() {
 // X448 and Ed448: RustCrypto vs OpenSSL
 // ---------------------------------------------------------------------------
 
+// The OpenSSL oracle runs where a system OpenSSL exists (Linux, macOS);
+// the code under test is the same on Windows.
+#[cfg(not(windows))]
 #[test]
 fn x448_matches_openssl() {
     use openssl::derive::Deriver;
@@ -171,6 +174,9 @@ fn x448_matches_openssl() {
     }
 }
 
+// The OpenSSL oracle runs where a system OpenSSL exists (Linux, macOS);
+// the code under test is the same on Windows.
+#[cfg(not(windows))]
 #[test]
 fn ed448_matches_openssl() {
     use openssl::pkey::{Id, PKey};
