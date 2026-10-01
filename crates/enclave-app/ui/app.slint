@@ -1135,9 +1135,6 @@ export component AppWindow inherits Window {
                         padding-right: Tokens.space-m;
                         padding-top: Tokens.space-s;
                         spacing: Tokens.space-xs;
-                        // Reactions are 1:1 only for now.
-                        if root.current.kind == 0: HorizontalLayout {
-                        spacing: Tokens.space-xs;
                         for e in ["👍", "❤", "😂", "😮", "😢", "🙏"]: Rectangle {
                             width: Tokens.space-touch-target-min;
                             height: Tokens.space-touch-target-min;
@@ -1163,7 +1160,6 @@ export component AppWindow inherits Window {
                                     root.selected-seq = "";
                                 }
                             }
-                        }
                         }
                         Rectangle { horizontal-stretch: 1; }
                         for m in root.messages: HorizontalLayout {

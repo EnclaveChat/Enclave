@@ -1,4 +1,6 @@
-//! Polls in groups (`docs/07-groups.md` §7.5, `docs/16-features.md`).
+//! Polls in groups (`docs/07-groups.md` §7.5, `docs/16-features.md`), and
+//! the other structured group content (`FLAG_RICH`): pins, reactions,
+//! edits and deletes.
 //!
 //! A poll, each vote and the close are group messages flagged `FLAG_RICH`,
 //! so they are sealed and MAC-authenticated like any other: members know
@@ -11,7 +13,7 @@
 
 use super::search::Place;
 use super::{Client, Event};
-use crate::content::MAX_TEXT;
+use crate::content::{MAX_REACTION, MAX_TEXT};
 use crate::{CoreError, Result};
 use enclave_crypto::hash::sha3_512_parts;
 use enclave_proto::ProtoError;
@@ -30,8 +32,11 @@ const K_POLL: u8 = 1;
 const K_VOTE: u8 = 2;
 const K_CLOSE: u8 = 3;
 const K_PIN: u8 = 4;
+const K_REACT: u8 = 5;
+const K_EDIT: u8 = 6;
+const K_DELETE: u8 = 7;
 
-enum Rich {
+pub(crate) enum Rich {
     Poll {
         id: [u8; 16],
         question: String,
@@ -50,6 +55,20 @@ enum Rich {
         id: [u8; 16],
         on: bool,
     },
+    /// Set (or, empty, remove) our reaction to a message (`group_edits.rs`).
+    React {
+        id: [u8; 16],
+        emoji: String,
+    },
+    /// Replace the text of one of our messages (advisory, 24 h).
+    Edit {
+        id: [u8; 16],
+        text: String,
+    },
+    /// Delete one of our messages for everyone (advisory).
+    Delete {
+        id: [u8; 16],
+    },
 }
 
 fn get_str(r: &mut Reader<'_>, max: usize) -> enclave_proto::Result<String> {
@@ -57,7 +76,7 @@ fn get_str(r: &mut Reader<'_>, max: usize) -> enclave_proto::Result<String> {
 }
 
 impl Rich {
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
             Rich::Poll {
@@ -81,6 +100,15 @@ impl Rich {
             }
             Rich::Pin { id, on } => {
                 w.u8(K_PIN).fixed(id).u8(u8::from(*on));
+            }
+            Rich::React { id, emoji } => {
+                w.u8(K_REACT).fixed(id).bytes(emoji.as_bytes());
+            }
+            Rich::Edit { id, text } => {
+                w.u8(K_EDIT).fixed(id).bytes(text.as_bytes());
+            }
+            Rich::Delete { id } => {
+                w.u8(K_DELETE).fixed(id);
             }
         }
         w.finish()
@@ -113,6 +141,15 @@ impl Rich {
                 poll: r.array()?,
                 tally: r.array()?,
             },
+            K_REACT => Rich::React {
+                id: r.array()?,
+                emoji: get_str(&mut r, MAX_REACTION)?,
+            },
+            K_EDIT => Rich::Edit {
+                id: r.array()?,
+                text: get_str(&mut r, MAX_TEXT)?,
+            },
+            K_DELETE => Rich::Delete { id: r.array()? },
             K_PIN => Rich::Pin {
                 id: r.array()?,
                 on: match r.u8()? {
@@ -325,9 +362,13 @@ impl Client {
         id: &[u8; 16],
         on: bool,
     ) -> Result<()> {
+        self.post_group_rich(gid, &Rich::Pin { id: *id, on }).await
+    }
+
+    /// Send structured content to the group.
+    pub(crate) async fn post_group_rich(&mut self, gid: &[u8; 32], rich: &Rich) -> Result<()> {
         let now = self.now();
         self.prepare_group_send(gid, now).await?;
-        let rich = Rich::Pin { id: *id, on };
         self.post_group(gid, &rich.encode(), FLAG_RICH, now).await
     }
 
@@ -415,6 +456,9 @@ impl Client {
                     poll,
                 }))
             }
+            Rich::React { id, emoji } => self.on_group_react(gid, from, &id, emoji),
+            Rich::Edit { id, text } => self.on_group_edit(gid, from, &id, text, now),
+            Rich::Delete { id } => self.on_group_delete(gid, from, &id),
             Rich::Pin { id, on } => {
                 let place = Place::Group(*gid);
                 let known = self.group_messages(gid)?.iter().any(|m| m.id == id);

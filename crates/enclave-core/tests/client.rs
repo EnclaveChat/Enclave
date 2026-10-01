@@ -1402,6 +1402,86 @@ async fn pinned_messages() {
     }
 }
 
+/// Group reactions, edits and deletes travel by message id; edits and
+/// deletes apply only to the author's own messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_reactions_edits_deletes() {
+    let net = network();
+    let mut cs = Vec::new();
+    for (name, server) in [("Ada", S1), ("Mo", S2), ("Jo", S1)] {
+        cs.push(
+            Client::create(memory(), Arc::new(net.clone()), server, name)
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    let [mut ada, mut mo, mut jo] = <[Client; 3]>::try_from(cs).ok().unwrap();
+    connect(&mut ada, &mut mo).await;
+    connect(&mut ada, &mut jo).await;
+    let gid = ada
+        .create_group("Trip", &[mo.root(), jo.root()])
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 3).await;
+    let find = |c: &Client, text: &str| {
+        c.group_messages(&gid)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.text.starts_with(text))
+            .unwrap()
+    };
+
+    let sent = mo.send_group_text(&gid, "Train at 9").await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let at_ada = find(&ada, "Train at 9");
+    ada.react_group(&gid, at_ada.seq, "👍").await.unwrap();
+    let at_jo = find(&jo, "Train at 9");
+    jo.react_group(&gid, at_jo.seq, "❤").await.unwrap();
+    jo.react_group(&gid, at_jo.seq, "😂").await.unwrap(); // replaces Jo's
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    let m = find(&mo, "Train at 9");
+    let mut emoji: Vec<_> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
+    emoji.sort_unstable();
+    assert_eq!(emoji, vec!["👍", "😂"], "one reaction per member");
+
+    assert!(
+        ada.edit_group_message(&gid, at_ada.seq, "Train at 8")
+            .await
+            .is_err(),
+        "only the author edits"
+    );
+    mo.edit_group_message(&gid, sent.seq, "Train at 10")
+        .await
+        .unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    for c in [&ada, &jo] {
+        let m = find(c, "Train at 1");
+        assert!(m.edited && m.text == "Train at 10");
+    }
+
+    ada.pin_group_message(&gid, at_ada.seq, true).await.unwrap();
+    assert!(
+        ada.delete_group_message(&gid, at_ada.seq).await.is_err(),
+        "not ours"
+    );
+    mo.delete_group_message(&gid, sent.seq).await.unwrap();
+    settle(&mut [&mut ada, &mut mo, &mut jo], 2).await;
+    for c in [&ada, &mo, &jo] {
+        let m = c
+            .group_messages(&gid)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == sent.id)
+            .unwrap();
+        assert!(m.deleted && m.text.is_empty() && m.reactions.is_empty());
+        assert!(
+            c.pinned(&enclave_core::Place::Group(gid)).is_empty(),
+            "unpinned"
+        );
+    }
+}
+
 /// Archive, pin to the top and mute: local to this device. A new message
 /// brings an archived conversation back unless it is muted; at most four
 /// conversations are pinned.

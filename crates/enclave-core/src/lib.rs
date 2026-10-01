@@ -27,8 +27,8 @@ mod rpc;
 
 pub use card::{ContactCard, Invite, LinkError};
 pub use client::{
-    Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, LinkCode, LinkOffer,
-    LinkProgress, LinkingDevice, Message, Options, Reaction,
+    Client, Contact, ContactState, DeviceInfo, Event, GroupInfo, GroupMessage, GroupReaction,
+    LinkCode, LinkOffer, LinkProgress, LinkingDevice, Message, Options, Reaction,
 };
 pub use client::{
     ConvPrefs, Hit, MAX_PINNED_CONVERSATIONS, MAX_PINS, MeetMatch, Place, RecoveryAlert,

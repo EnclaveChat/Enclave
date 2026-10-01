@@ -96,6 +96,7 @@ impl Client {
                 .group_messages(gid)
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|m| !m.deleted)
                 .map(|m| (m.id, m.seq))
                 .collect(),
         };

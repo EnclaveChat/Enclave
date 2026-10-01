@@ -98,6 +98,7 @@ impl Contact {
 mod backup;
 mod devices;
 mod gossip;
+mod group_edits;
 mod groups;
 mod guard;
 mod history;
@@ -114,7 +115,7 @@ mod social;
 mod usernames;
 
 pub use gossip::{GossipItem, KtAlert};
-pub use groups::{GroupInfo, GroupMessage};
+pub use groups::{GroupInfo, GroupMessage, GroupReaction};
 pub use guard::RecoveryAlert;
 pub use invites::{InviteInfo, JOIN_PREFIX, JoinLink};
 pub use link::{DeviceInfo, LinkCode, LinkOffer, LinkProgress, LinkingDevice};
@@ -233,6 +234,13 @@ pub enum Event {
     GroupChanged {
         /// Group.
         group_id: [u8; 32],
+    },
+    /// A reaction, edit or delete changed a group message.
+    GroupMessageChanged {
+        /// Group.
+        group_id: [u8; 32],
+        /// Message position.
+        seq: u64,
     },
     /// Someone pinned or unpinned a message ([`Client::pinned`]).
     PinsChanged {

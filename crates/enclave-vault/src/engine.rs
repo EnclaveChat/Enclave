@@ -219,6 +219,21 @@ fn mime_for(name: &str) -> &'static str {
 /// Edits are allowed for 24 hours (`docs/16-features.md`).
 const EDIT_WINDOW: u64 = 24 * 3600;
 
+/// How a group message reads in the conversation.
+fn group_text(m: &enclave_core::GroupMessage) -> String {
+    if m.deleted {
+        return "This message was deleted.".into();
+    }
+    let mut text = m.text.clone();
+    if m.edited {
+        text.push_str(" (edited)");
+    }
+    for r in &m.reactions {
+        text.push_str(&format!("  {}", r.emoji));
+    }
+    text
+}
+
 /// The list flags of a conversation.
 fn prefs_row(p: enclave_core::ConvPrefs) -> Row {
     Row {
@@ -917,23 +932,44 @@ impl Engine {
                 }
             }
             Cmd::React(id, seq, emoji) => {
-                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
-                    && c.react(&root, seq, &emoji).await.is_err()
-                {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let r = match (root, gid) {
+                    (Some(root), _) => c.react(&root, seq, &emoji).await,
+                    (None, Some(gid)) => c.react_group(&gid, seq, &emoji).await,
+                    (None, None) => Ok(()),
+                };
+                if r.is_err() {
                     self.status = "Couldn't send the reaction. Check your connection.".into();
                 }
             }
             Cmd::Edit(id, seq, text) => {
-                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
-                    && c.edit_message(&root, seq, text.trim()).await.is_err()
-                {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let r = match (root, gid) {
+                    (Some(root), _) => c.edit_message(&root, seq, text.trim()).await,
+                    (None, Some(gid)) => c.edit_group_message(&gid, seq, text.trim()).await,
+                    (None, None) => Ok(()),
+                };
+                if r.is_err() {
                     self.status = "Couldn't edit that message. Edits work for 24 hours.".into();
                 }
             }
             Cmd::Delete(id, seq) => {
-                if let (Some(root), Some(c)) = (self.root_of(&id), self.client.as_mut())
-                    && c.delete_for_everyone(&root, seq).await.is_err()
-                {
+                let (root, gid) = (self.root_of(&id), self.group_of(&id));
+                let Some(c) = self.client.as_mut() else {
+                    return;
+                };
+                let r = match (root, gid) {
+                    (Some(root), _) => c.delete_for_everyone(&root, seq).await,
+                    (None, Some(gid)) => c.delete_group_message(&gid, seq).await,
+                    (None, None) => Ok(()),
+                };
+                if r.is_err() {
                     self.status = "Couldn't delete that message. Check your connection.".into();
                 }
             }
@@ -1648,9 +1684,9 @@ impl Engine {
                 preview: last
                     .map(|m| {
                         if m.from.is_none() {
-                            format!("You: {}", m.text)
+                            format!("You: {}", group_text(m))
                         } else {
-                            format!("{}: {}", m.from_name, m.text)
+                            format!("{}: {}", m.from_name, group_text(m))
                         }
                     })
                     .unwrap_or_else(|| "New group".into()),
@@ -1699,7 +1735,7 @@ impl Engine {
                 let pinned = c.pinned_ids(&Place::Group(g.id));
                 s.pins = pinned
                     .iter()
-                    .filter_map(|id| msgs.iter().find(|m| m.id == *id))
+                    .filter_map(|id| msgs.iter().find(|m| m.id == *id && !m.deleted))
                     .map(|m| {
                         let text = pin_text(&m.text, false);
                         if m.from.is_none() {
@@ -1713,13 +1749,18 @@ impl Engine {
                     .iter()
                     .map(|m| {
                         let mut msg = Msg {
-                            text: m.text.clone(),
+                            text: group_text(m),
                             outgoing: m.from.is_none(),
                             time: clock(m.at),
                             status: if m.delivered { 1 } else { 0 },
                             sender: m.from_name.clone(),
                             seq: m.seq,
-                            pinned: pinned.contains(&m.id),
+                            pinned: !m.deleted && pinned.contains(&m.id),
+                            deleted: m.deleted,
+                            can_edit: m.from.is_none()
+                                && !m.deleted
+                                && m.poll.is_none()
+                                && now.saturating_sub(m.at) <= EDIT_WINDOW,
                             ..Default::default()
                         };
                         if let Some(p) = m.poll.and_then(|id| c.poll(&g.id, &id)) {

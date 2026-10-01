@@ -12,7 +12,7 @@
 use super::search::Place;
 use super::{Client, ContactState, Event, sanitize_name};
 use crate::card::ContactCard;
-use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_TEXT};
+use crate::content::{Content, MAX_CARDS_PER_MESSAGE, MAX_REACTION, MAX_TEXT};
 use crate::{CoreError, Result};
 use enclave_proto::ProtoError;
 use enclave_proto::codec::{Reader, Writer};
@@ -53,6 +53,18 @@ pub struct GroupInfo {
     pub left: bool,
 }
 
+/// A reaction to a group message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupReaction {
+    /// Who (`None` = us).
+    pub from: Option<[u8; 64]>,
+    /// The emoji.
+    pub emoji: String,
+}
+
+/// Most reactions kept on one group message (one per member).
+const MAX_GROUP_REACTIONS: usize = 100;
+
 /// A stored group message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupMessage {
@@ -73,16 +85,34 @@ pub struct GroupMessage {
     /// Id chosen by the sender (the poll id for a poll), so later messages
     /// can refer to it.
     pub id: [u8; 16],
+    /// Reactions, at most one per member.
+    pub reactions: Vec<GroupReaction>,
+    /// Edited by its author.
+    pub edited: bool,
+    /// Deleted by its author.
+    pub deleted: bool,
+}
+
+fn put_who(w: &mut Writer, who: &Option<[u8; 64]>) {
+    match who {
+        Some(r) => w.u8(1).fixed(r),
+        None => w.u8(0),
+    };
+}
+
+fn get_who(r: &mut Reader<'_>) -> enclave_proto::Result<Option<[u8; 64]>> {
+    Ok(match r.u8()? {
+        0 => None,
+        1 => Some(r.array()?),
+        _ => return Err(ProtoError::Decode),
+    })
 }
 
 impl GroupMessage {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(3).u64(self.seq);
-        match &self.from {
-            Some(r) => w.u8(1).fixed(r),
-            None => w.u8(0),
-        };
+        w.u8(4).u64(self.seq);
+        put_who(&mut w, &self.from);
         w.bytes(self.from_name.as_bytes())
             .bytes(self.text.as_bytes())
             .u64(self.at)
@@ -92,48 +122,62 @@ impl GroupMessage {
             None => w.u8(0),
         };
         w.fixed(&self.id);
+        w.u8(self.reactions.len().min(MAX_GROUP_REACTIONS) as u8);
+        for x in self.reactions.iter().take(MAX_GROUP_REACTIONS) {
+            put_who(&mut w, &x.from);
+            w.bytes(x.emoji.as_bytes());
+        }
+        w.u8(u8::from(self.edited)).u8(u8::from(self.deleted));
         w.finish()
     }
 
     fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if !(1..=3).contains(&version) {
+        if !(1..=4).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let seq = r.u64()?;
-        let from = match r.u8()? {
-            0 => None,
-            1 => Some(r.array()?),
-            _ => return Err(ProtoError::Decode),
+        let from = get_who(&mut r)?;
+        let s = |r: &mut Reader<'_>, max| {
+            String::from_utf8(r.bytes(max)?.to_vec()).map_err(|_| ProtoError::Decode)
         };
-        let s = |r: &mut Reader<'_>| {
-            String::from_utf8(r.bytes(1 << 16)?.to_vec()).map_err(|_| ProtoError::Decode)
+        let from_name = s(&mut r, 1 << 16)?;
+        let text = s(&mut r, 1 << 16)?;
+        let at = r.u64()?;
+        let delivered = r.u8()? == 1;
+        let poll = if version >= 2 && r.u8()? == 1 {
+            Some(r.array()?)
+        } else {
+            None
         };
-        let m = Self {
+        let id = if version >= 3 { r.array()? } else { [0; 16] };
+        let mut reactions = Vec::new();
+        let (mut edited, mut deleted) = (false, false);
+        if version >= 4 {
+            for _ in 0..usize::from(r.u8()?).min(MAX_GROUP_REACTIONS) {
+                reactions.push(GroupReaction {
+                    from: get_who(&mut r)?,
+                    emoji: s(&mut r, MAX_REACTION)?,
+                });
+            }
+            edited = r.u8()? == 1;
+            deleted = r.u8()? == 1;
+        }
+        r.end()?;
+        Ok(Self {
             seq,
             from,
-            from_name: s(&mut r)?,
-            text: s(&mut r)?,
-            at: r.u64()?,
-            delivered: r.u8()? == 1,
-            poll: None,
-            id: [0; 16],
-        };
-        let m = GroupMessage {
-            poll: if version >= 2 && r.u8()? == 1 {
-                Some(r.array()?)
-            } else {
-                None
-            },
-            ..m
-        };
-        let m = GroupMessage {
-            id: if version == 3 { r.array()? } else { [0; 16] },
-            ..m
-        };
-        r.end()?;
-        Ok(m)
+            from_name,
+            text,
+            at,
+            delivered,
+            poll,
+            id,
+            reactions,
+            edited,
+            deleted,
+        })
     }
 }
 
@@ -1088,6 +1132,9 @@ impl Client {
             delivered: false,
             poll: None,
             id,
+            reactions: Vec::new(),
+            edited: false,
+            deleted: false,
         };
         self.store
             .put(&msg_ns(gid), &seq.to_be_bytes(), &m.encode(), &mut self.rng)?;
