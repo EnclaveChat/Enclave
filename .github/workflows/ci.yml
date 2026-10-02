@@ -14,9 +14,12 @@ permissions:
 # The toolchain is rust-toolchain.toml's (1.94.1); rustup on the runners
 # installs it on first use.
 
+# Pull requests: a new push supersedes the run in progress. Branch pushes:
+# every commit gets its own complete run (a group per commit), so a burst
+# of pushes doesn't leave the branch with no finished result.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
