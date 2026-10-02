@@ -1210,7 +1210,7 @@ impl Server {
             let Some(name) = api::key_name(&req.key) else {
                 return (Status::Malformed, Reply::Empty);
             };
-            kt.lookup(&name, now)
+            kt.lookup_name(&name, now)
         };
         let Ok(bytes) = found else {
             return (Status::NotFound, Reply::Empty);

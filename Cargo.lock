@@ -2553,6 +2553,7 @@ dependencies = [
  "enclave-calls",
  "enclave-core",
  "enclave-crypto",
+ "enclave-federation",
  "enclave-ipc",
  "enclave-kt",
  "enclave-media",
@@ -2578,11 +2579,14 @@ name = "enclave-kt"
 version = "0.1.0"
 dependencies = [
  "akd",
+ "akd_core",
  "async-trait",
+ "curve25519-dalek",
  "enclave-crypto",
  "enclave-federation",
  "protobuf",
  "redb",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "unicode-normalization",

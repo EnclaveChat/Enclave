@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-wire = { path = "../enclave-wire" }
+enclave-federation = { path = "../enclave-federation" }
 enclave-proto = { path = "../enclave-proto" }
 enclave-rpc = { path = "../enclave-rpc" }
 enclave-kt = { path = "../enclave-kt" }

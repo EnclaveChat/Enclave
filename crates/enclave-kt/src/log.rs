@@ -42,6 +42,8 @@ pub struct KtLog {
     signing: CompositeSigningKey,
     heads: Vec<SignedHead>,
     vrf_public: Vec<u8>,
+    /// The VRF key (for absence proofs, which akd's directory doesn't make).
+    vrf: VrfKey,
     /// skeleton → registered name
     skeletons: HashMap<String, String>,
 }
@@ -75,7 +77,7 @@ impl KtLog {
     ) -> Result<Self> {
         let storage = StorageManager::new_no_cache(store.clone());
         let vrf = VrfKey(Arc::new(vrf_secret));
-        let dir = Directory::new(storage, vrf, AzksParallelismConfig::default())
+        let dir = Directory::new(storage, vrf.clone(), AzksParallelismConfig::default())
             .await
             .map_err(akd_err)?;
         let vrf_public = dir
@@ -100,6 +102,7 @@ impl KtLog {
             signing,
             heads,
             vrf_public,
+            vrf,
             skeletons: HashMap::new(),
         };
         // The names are what's stored; their skeletons are recomputed, so
@@ -196,6 +199,50 @@ impl KtLog {
             rng,
         )
         .await
+    }
+
+    /// Proof that `name` was never registered, against the latest head:
+    /// the VRF proof for the label its first version would have, and akd's
+    /// proof that the tree has no such label. Fails if it was registered.
+    pub async fn lookup_absent(&self, name: &str) -> Result<(AbsenceProof, SignedHead)> {
+        use akd::ecvrf::VRFKeyStorage as _;
+        let head = self.latest().cloned().ok_or(KtError::Lookup)?;
+        let n = normalize(name)?;
+        let storage = StorageManager::new_no_cache(self.store.clone());
+        let azks = match storage
+            .get::<akd::Azks>(&akd::append_only_zks::DEFAULT_AZKS_KEY)
+            .await
+            .map_err(|_| KtError::Lookup)?
+        {
+            akd::storage::types::DbRecord::Azks(a) => a,
+            _ => return Err(KtError::Lookup),
+        };
+        if azks.get_latest_epoch() != head.head.epoch {
+            return Err(KtError::Stale);
+        }
+        let label = AkdLabel::from(n.as_str());
+        let vrf_proof = self
+            .vrf
+            .get_label_proof::<EnclaveKtConfig>(&label, akd::VersionFreshness::Fresh, 1)
+            .await
+            .map_err(|_| KtError::Lookup)?;
+        let node = self.vrf.get_node_label_from_vrf_proof(vrf_proof).await;
+        let proof = azks
+            .get_non_membership_proof::<EnclaveKtConfig, _>(&storage, node)
+            .await
+            .map_err(|_| KtError::Lookup)?;
+        let root: [u8; 32] = head.head.root;
+        // A label that is in the tree has no non-membership proof that
+        // verifies; check before answering.
+        akd_core::verify::verify_nonmembership_for_tests_only::<EnclaveKtConfig>(root, &proof)
+            .map_err(|_| KtError::Lookup)?;
+        Ok((
+            AbsenceProof {
+                vrf_proof: vrf_proof.to_bytes().to_vec(),
+                proof,
+            },
+            head,
+        ))
     }
 
     /// Lookup proof for the committed descriptor digest against the latest
@@ -315,6 +362,77 @@ pub fn verify_lookup(
     )
     .map_err(|_| KtError::Lookup)?;
     Ok((r.value.0, r.version, trusted))
+}
+
+/// Proof that a name was never registered in a log (as of a head).
+#[derive(Clone, Debug)]
+pub struct AbsenceProof {
+    /// VRF proof for the label of the name's first version.
+    pub vrf_proof: Vec<u8>,
+    /// akd's proof that the tree holds no such label.
+    pub proof: akd::NonMembershipProof,
+}
+
+/// Verify that `name` was never registered in the log whose head `sh` is,
+/// under `policy`'s witnesses: the VRF proof binds the label to the name
+/// (under the pinned VRF key), and the tree under the signed root has no
+/// such label. Returns the trusted head time.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_absence(
+    policy: &WitnessPolicy,
+    server_key: &CompositePublic,
+    server_operator: &str,
+    vrf_public: &[u8],
+    sh: &SignedHead,
+    name: &str,
+    proof: &AbsenceProof,
+    now: u64,
+) -> Result<u64> {
+    use akd::Configuration as _;
+    let trusted = policy.check(sh, server_key, server_operator, now)?;
+    let n = normalize(name)?;
+    let pk = akd::ecvrf::VRFPublicKey::try_from(vrf_public).map_err(|_| KtError::Lookup)?;
+    let hashed = EnclaveKtConfig::get_hash_from_label_input(
+        &AkdLabel::from(n.as_str()),
+        akd::VersionFreshness::Fresh,
+        1,
+    );
+    let vrf =
+        akd::ecvrf::Proof::try_from(proof.vrf_proof.as_slice()).map_err(|_| KtError::Lookup)?;
+    pk.verify(&vrf, &hashed).map_err(|_| KtError::Lookup)?;
+    if akd::NodeLabel::new(vrf_label(&proof.vrf_proof)?, 256) != proof.proof.label {
+        return Err(KtError::Lookup);
+    }
+    akd_core::verify::verify_nonmembership_for_tests_only::<EnclaveKtConfig>(
+        sh.head.root,
+        &proof.proof,
+    )
+    .map_err(|_| KtError::Lookup)?;
+    Ok(trusted)
+}
+
+/// The tree label a verified VRF proof gives: the first 32 bytes of the
+/// ECVRF output (RFC 9381 proof-to-hash, as akd computes it:
+/// `SHA-512(0x03 ‖ 0x03 ‖ compress(8·Γ) ‖ 0x00)`, Γ the proof's first 32
+/// bytes). akd keeps this step to itself.
+fn vrf_label(proof: &[u8]) -> Result<[u8; 32]> {
+    use sha2::Digest as _;
+    let gamma = curve25519_dalek::edwards::CompressedEdwardsY(
+        proof
+            .get(..32)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(KtError::Lookup)?,
+    )
+    .decompress()
+    .ok_or(KtError::Lookup)?;
+    let out = sha2::Sha512::new()
+        .chain_update([0x03, 0x03])
+        .chain_update(gamma.mul_by_cofactor().compress().as_bytes())
+        .chain_update([0x00])
+        .finalize();
+    let mut label = [0u8; 32];
+    label.copy_from_slice(&out[..32]);
+    Ok(label)
 }
 
 /// Verify a lookup of a server's committed descriptor digest

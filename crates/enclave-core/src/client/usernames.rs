@@ -13,7 +13,7 @@ use crate::rpc::EFFORT_LADDER;
 use crate::{CoreError, Result, UsernameError};
 use enclave_kt::username::normalize;
 use enclave_kt::wire::{CTX_CLAIM, ROOT_LEN};
-use enclave_kt::{KtError, KtPolicy, LookupReply, UsernameClaim, verify_lookup};
+use enclave_kt::{KtError, KtPolicy, NameAnswer, UsernameClaim, verify_absence, verify_lookup};
 use enclave_rpc::api::{self, DirAction, DirKind, Status};
 
 const SETTING: &str = "username";
@@ -171,12 +171,31 @@ impl Client {
             )
             .await
         {
+            // "Nobody has it" without a proof could be the server hiding
+            // someone: never shown as not found.
             Err(CoreError::Server(Status::NotFound)) => {
-                return Err(UsernameError::NotFound.into());
+                return Err(UsernameError::Unverified.into());
             }
             other => other?,
         };
-        let reply = LookupReply::decode(&bytes).map_err(|_| UsernameError::Unverified)?;
+        let reply = match NameAnswer::decode(&bytes).map_err(|_| UsernameError::Unverified)? {
+            NameAnswer::Found(r) => r,
+            NameAnswer::Absent { head, proof } => {
+                verify_absence(
+                    &policy.witnesses,
+                    &info.head_key,
+                    &info.operator,
+                    &info.vrf_public,
+                    &head,
+                    &name,
+                    &proof,
+                    now,
+                )
+                .map_err(|_| UsernameError::Unverified)?;
+                self.record_head(&head)?;
+                return Err(UsernameError::NotFound.into());
+            }
+        };
         let (value, _, _) = verify_lookup(
             &policy.witnesses,
             &info.head_key,

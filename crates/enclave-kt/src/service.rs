@@ -14,7 +14,7 @@
 use crate::head::WitnessPolicy;
 use crate::log::{KtLog, Witness, WitnessClient};
 use crate::store::KtStore;
-use crate::wire::{KtInfo, KtPolicy, LookupReply};
+use crate::wire::{KtInfo, KtPolicy, LookupReply, NameAnswer};
 use crate::{KtError, Result};
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::CompositeSigningKey;
@@ -33,6 +33,9 @@ enum Job {
     /// A name, or the server's descriptor digest (`None`).
     Lookup {
         name: Option<String>,
+        /// Answer with a [`NameAnswer`] (absence proved) rather than a bare
+        /// [`LookupReply`].
+        answer: bool,
         now: u64,
         reply: mpsc::Sender<Result<Vec<u8>>>,
     },
@@ -256,19 +259,30 @@ impl KtService {
 
     /// An encoded [`LookupReply`] for `name` against a fresh, cosigned head.
     pub fn lookup(&self, name: &str, now: u64) -> Result<Vec<u8>> {
-        self.lookup_label(Some(name.to_string()), now)
+        self.lookup_label(Some(name.to_string()), false, now)
+    }
+
+    /// An encoded [`NameAnswer`] for `name` against a fresh, cosigned head:
+    /// its entry, or proof that it was never registered.
+    pub fn lookup_name(&self, name: &str, now: u64) -> Result<Vec<u8>> {
+        self.lookup_label(Some(name.to_string()), true, now)
     }
 
     /// An encoded [`LookupReply`] for the server's committed descriptor
     /// digest (checked with [`crate::log::verify_descriptor_lookup`]).
     pub fn lookup_descriptor(&self, now: u64) -> Result<Vec<u8>> {
-        self.lookup_label(None, now)
+        self.lookup_label(None, false, now)
     }
 
-    fn lookup_label(&self, name: Option<String>, now: u64) -> Result<Vec<u8>> {
+    fn lookup_label(&self, name: Option<String>, answer: bool, now: u64) -> Result<Vec<u8>> {
         let (reply, rx) = mpsc::channel();
         self.tx
-            .send(Job::Lookup { name, now, reply })
+            .send(Job::Lookup {
+                name,
+                answer,
+                now,
+                reply,
+            })
             .map_err(|_| KtError::Stopped)?;
         rx.recv().map_err(|_| KtError::Stopped)?
     }
@@ -355,7 +369,12 @@ fn run(
                 });
                 let _ = reply.send(r);
             }
-            Job::Lookup { name, now, reply } => {
+            Job::Lookup {
+                name,
+                answer,
+                now,
+                reply,
+            } => {
                 let r = rt.block_on(async {
                     let fresh = log
                         .latest()
@@ -364,11 +383,21 @@ fn run(
                         log.heartbeat(now, &mut rng).await?;
                         cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
                     }
-                    let (proof, head) = match &name {
-                        Some(n) => log.lookup(n).await?,
-                        None => log.lookup_descriptor().await?,
+                    let found = match &name {
+                        Some(n) => log.lookup(n).await,
+                        None => log.lookup_descriptor().await,
                     };
-                    LookupReply { head, proof }.encode()
+                    match (found, &name, answer) {
+                        (Ok((proof, head)), _, false) => LookupReply { head, proof }.encode(),
+                        (Ok((proof, head)), _, true) => {
+                            NameAnswer::Found(LookupReply { head, proof }).encode()
+                        }
+                        (Err(_), Some(n), true) => {
+                            let (proof, head) = log.lookup_absent(n).await?;
+                            NameAnswer::Absent { head, proof }.encode()
+                        }
+                        (Err(e), _, _) => Err(e),
+                    }
                 });
                 let _ = reply.send(r);
             }

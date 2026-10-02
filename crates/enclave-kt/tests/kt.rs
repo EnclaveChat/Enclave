@@ -247,6 +247,60 @@ fn service_round_trip_from_sync_code() {
         KtError::Lookup
     );
     assert!(svc.lookup("nobody", NOW + 10).is_err());
+
+    // "Nobody has it", proved: the label the name's first version would
+    // have isn't in the tree. The proof is for that name only, and a
+    // registered name gets its entry, never an absence proof.
+    let absent = |bytes: Vec<u8>, name: &str| match enclave_kt::NameAnswer::decode(&bytes).unwrap()
+    {
+        enclave_kt::NameAnswer::Absent { head, proof } => enclave_kt::verify_absence(
+            &policy,
+            &info.head_key,
+            &info.operator,
+            &info.vrf_public,
+            &head,
+            name,
+            &proof,
+            NOW + 10,
+        ),
+        enclave_kt::NameAnswer::Found(_) => Err(KtError::Malformed),
+    };
+    let nobody = svc.lookup_name("nobody", NOW + 10).unwrap();
+    absent(nobody.clone(), "nobody").unwrap();
+    assert_eq!(
+        absent(nobody.clone(), "sam"),
+        Err(KtError::Lookup),
+        "not sam's"
+    );
+    assert_eq!(absent(nobody, "nobody2"), Err(KtError::Lookup));
+    match enclave_kt::NameAnswer::decode(&svc.lookup_name("sam", NOW + 10).unwrap()).unwrap() {
+        enclave_kt::NameAnswer::Found(r) => {
+            let (value, _, _) = verify_lookup(
+                &policy,
+                &info.head_key,
+                &info.operator,
+                &info.vrf_public,
+                &r.head,
+                "sam",
+                r.proof,
+                NOW + 10,
+            )
+            .unwrap();
+            assert_eq!(value, vec![3; 80]);
+        }
+        other => panic!("{other:?}"),
+    }
+    // A damaged VRF proof, or one under another log's VRF key, fails.
+    let mut bytes = svc.lookup_name("nobody", NOW + 10).unwrap();
+    if let enclave_kt::NameAnswer::Absent { head, mut proof } =
+        enclave_kt::NameAnswer::decode(&bytes).unwrap()
+    {
+        proof.vrf_proof[40] ^= 1;
+        bytes = enclave_kt::NameAnswer::Absent { head, proof }
+            .encode()
+            .unwrap();
+    }
+    assert_eq!(absent(bytes, "nobody"), Err(KtError::Lookup));
     // Two days later the service starts a heartbeat epoch, cosigned afresh.
     let later = NOW + 2 * 86_400;
     let (value, _, trusted) = check(svc.lookup("alex", later).unwrap(), "alex", later).unwrap();

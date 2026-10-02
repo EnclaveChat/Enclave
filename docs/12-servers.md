@@ -244,7 +244,7 @@ Test `withdrawn_usernames`. Releasing a name when its owner takes another (a bar
 
 ### 3.6 Not implemented yet
 
-The device-clock warning based on trusted time; C2SP cosignature interoperability; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+The device-clock warning based on trusted time; C2SP cosignature interoperability.
 
 ### 3.7 Claims and lookups
 
@@ -263,9 +263,18 @@ The server checks, in order: the PoW (`Pow`); the claim decodes (`Malformed`); t
 
 **Lookup reply** = `u32 len ‖ SignedHead ‖ u32 len ‖ akd LookupProof (akd's protobuf encoding)`, with `SignedHead = head (64) ‖ u32 len ‖ server sig ‖ u8 n ‖ n × (witness (16) ‖ u64(time) ‖ u32 len ‖ sig)`.
 
+**Name answers** (`KtService::lookup_name`, what a `Username`/`Get` returns): `NameAnswer = u8(1) ‖ LookupReply` when the name has an entry. Otherwise it is `u8(2) ‖ u32 len ‖ SignedHead ‖ u32 len ‖ VRF proof ‖ u32 len ‖ akd NonMembershipProof (protobuf)`, a proof that the name was never registered. The server makes the VRF proof for the label of the name's first version (`(name, fresh, version 1)`, the label every registered name has for good) and akd's proof that the tree under the head's root has no such label (`KtLog::lookup_absent`). akd's directory doesn't produce absence proofs, so the log builds them from akd's public parts.
+
+The client (`verify_absence`) does three things:
+1. Checks the head under its witness policy.
+2. Verifies the VRF proof under the pinned VRF key for its own normalized name, and recomputes the label from it: RFC 9381 proof-to-hash, `SHA-512(0x03 ‖ 0x03 ‖ 8·Γ ‖ 0x00)`, first 32 bytes, as akd computes it. The label must equal the proof's.
+3. Checks non-membership against the signed root with akd's own verification.
+
+A server can't claim a name is free without the witnesses' signed root agreeing. A bare `NotFound` status, with no proof, is now `Unverified` on the client (tests `service_round_trip_from_sync_code` in `crates/enclave-kt/tests/kt.rs` and `usernames_through_key_transparency`).
+
 **Self-audit** (`Client::audit_username`, run from `sync` once every 24 h): a client that has a username looks itself up exactly as anyone else would. If the verified answer names another account or server, says the name is free, or fails verification, the client raises `Event::UsernameProblem` and the app shows a persistent notice. Network errors retry at the next sync. The operator can't target a lie at one person without the witnesses signing it for everyone, and the owner is one of those everyones.
 
-**Client** (`Client::find_username`): parse `@name@domain` (a bare name means the home server), pick the pinned log by domain (`Unavailable`), normalize (`NotAllowed`), fetch, then `verify_lookup` with the pinned head key, operator, VRF key and witness policy. Any decoding or verification failure is `Unverified`, never "not found", and the UI refuses to add anyone. A bare root is `NotFound`. The card's root must equal the value's root and its server the log's server (`Unverified`). The result is only a contact card: the usual message request and security-code check follow.
+**Client** (`Client::find_username`): parse `@name@domain` (a bare name means the home server), pick the pinned log by domain (`Unavailable`), normalize (`NotAllowed`), fetch, then `verify_lookup` with the pinned head key, operator, VRF key and witness policy. Any decoding or verification failure is `Unverified`, never "not found", and the UI refuses to add anyone. A verified absence proof, or a bare root (a released name), is `NotFound`; a tombstone is `Withdrawn` (§3.5). The card's root must equal the value's root and its server the log's server (`Unverified`). The result is only a contact card: the usual message request and security-code check follow.
 
 
 ### 3.8 Gossip (RT-04, `client/gossip.rs`)

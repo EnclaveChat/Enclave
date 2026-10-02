@@ -180,6 +180,72 @@ impl LookupReply {
     }
 }
 
+/// The answer to a name lookup: the name's entry, or proof that it was
+/// never registered (`12-servers.md` §3.7).
+#[derive(Clone, Debug)]
+// One per lookup, decoded and dropped: both variants hold a whole proof.
+#[allow(clippy::large_enum_variant)]
+pub enum NameAnswer {
+    /// The name's entry, with its proof.
+    Found(LookupReply),
+    /// Never registered, as of `head`.
+    Absent {
+        /// Head the proof is against, with witness cosignatures.
+        head: SignedHead,
+        /// The absence proof.
+        proof: crate::log::AbsenceProof,
+    },
+}
+
+impl NameAnswer {
+    /// Encode: `u8 1 ‖ LookupReply`, or `u8 2 ‖ u32 len ‖ head ‖ u32 len ‖
+    /// VRF proof ‖ u32 len ‖ non-membership proof (akd protobuf)`.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        match self {
+            Self::Found(r) => Ok([&[1u8][..], &r.encode()?].concat()),
+            Self::Absent { head, proof } => {
+                let head = head.encode();
+                let nm = akd::proto::specs::types::NonMembershipProof::from(&proof.proof)
+                    .write_to_bytes()
+                    .map_err(|_| KtError::Malformed)?;
+                let mut v = vec![2u8];
+                for part in [&head[..], &proof.vrf_proof, &nm] {
+                    v.extend_from_slice(&(part.len() as u32).to_be_bytes());
+                    v.extend_from_slice(part);
+                }
+                Ok(v)
+            }
+        }
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let (&tag, rest) = b.split_first().ok_or(KtError::Malformed)?;
+        match tag {
+            1 => Ok(Self::Found(LookupReply::decode(rest)?)),
+            2 => {
+                let mut r = Cursor(rest);
+                let head = SignedHead::decode(r.bytes(64 * 1024)?)?;
+                let vrf_proof = r.bytes(256)?.to_vec();
+                let pb = akd::proto::specs::types::NonMembershipProof::parse_from_bytes(
+                    r.bytes(MAX_PROOF)?,
+                )
+                .map_err(|_| KtError::Malformed)?;
+                let proof =
+                    akd::NonMembershipProof::try_from(&pb).map_err(|_| KtError::Malformed)?;
+                if !r.0.is_empty() {
+                    return Err(KtError::Malformed);
+                }
+                Ok(Self::Absent {
+                    head,
+                    proof: crate::log::AbsenceProof { vrf_proof, proof },
+                })
+            }
+            _ => Err(KtError::Malformed),
+        }
+    }
+}
+
 /// Everything a client pins for usernames: each server's log parameters and
 /// the witnesses whose cosignatures count. Ships with the app's server list.
 #[derive(Clone)]

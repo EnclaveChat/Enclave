@@ -57,6 +57,17 @@ fn rpc(d: &[u8]) {
     let _ = enclave_rpc::api::DirReply::decode(d);
     // Key transparency: everything a client decodes from a server or pin file.
     let _ = enclave_kt::LookupReply::decode(d);
+    let _ = enclave_kt::NameAnswer::decode(d);
+    // Federation: what a client or operator decodes from a server, a front
+    // or the foundation.
+    let _ = enclave_federation::ServerDescriptor::decode(d);
+    let _ = enclave_federation::WitnessDescriptor::decode(d);
+    let _ = enclave_federation::RelayDescriptor::decode(d);
+    let _ = enclave_federation::KeyCert::decode(d);
+    let _ = enclave_federation::KeyBundle::decode(d);
+    let _ = enclave_federation::ServerList::decode_unsigned(d);
+    let _ = enclave_proto::server_move::ServerMove::decode(d);
+    let _ = enclave_proto::tombstone::Tombstone::decode(d);
     let _ = enclave_kt::SignedHead::decode(d);
     let _ = enclave_kt::KtInfo::decode(d);
     let _ = enclave_kt::KtPolicy::decode(d);

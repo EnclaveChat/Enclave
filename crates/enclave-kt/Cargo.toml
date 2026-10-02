@@ -18,6 +18,11 @@ unicode-security = "0.1"
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-federation = { path = "../enclave-federation" }
 akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf"] }
+# The non-membership check akd uses inside lookup verification, exposed
+# under `public_tests` (it pulls in nothing new): absence proofs.
+akd_core = { version = "0.13.0", default-features = false, features = ["public_tests"] }
+curve25519-dalek = "4"
+sha2 = "0.10"
 async-trait = "0.1"
 thiserror = "2"
 protobuf = "3"
