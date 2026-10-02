@@ -1,11 +1,24 @@
+# The Enclave server without containers (ops/operator-kit/deployment.md
+# describes the compose stack, which is the supported way). Config in
+# /etc/enclave/server.toml (see ops/compose/config/server.toml.example,
+# with data_dir, keys_dir, public_dir and backup.dir under
+# /var/lib/enclave). Before the first start:
+#   sudo -u enclave enclave-server init --config /etc/enclave/server.toml
 [Unit]
-Description=Enclave server (dev transport)
+Description=Enclave server
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/enclave-server 127.0.0.1:7443
-DynamicUser=yes
-# The server keeps everything in memory today; no state directory.
+ExecStart=/usr/local/bin/enclave-server run --config /etc/enclave/server.toml
+# SIGTERM: the request in flight commits, then the server stops.
+KillSignal=SIGTERM
+Restart=on-failure
+User=enclave
+Group=enclave
+StateDirectory=enclave
+StateDirectoryMode=0700
+ConfigurationDirectory=enclave
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -22,6 +35,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 CapabilityBoundingSet=
+UMask=0077
 # No core dumps: they could contain request keys.
 LimitCORE=0
 

@@ -367,8 +367,52 @@ Not implemented yet (C2–C5): GotaTun WireGuard endpoints, a Rosenpass daemon f
 
 ## 6. Deployment
 
-- The dev binary (`enclave-server`, `main.rs`) listens on TCP (default `127.0.0.1:7443`) and is **not for production**; production servers are reachable only through Nym.
-- Planned: Docker and Nix with reproducible builds; redb storage (Postgres for large operators, M11); KT database backups; local aggregate metrics only.
+An operator runs one stack (`ops/compose/compose.yml`) from one image (`ops/docker/Dockerfile`, published as `ghcr.io/enclavechat/enclave-server`), following `ops/operator-kit/deployment.md`.
+
+**The image** has these properties:
+- Built from digest-pinned base images, the pinned toolchain and `Cargo.lock` (`--locked`), with fixed paths and `SOURCE_DATE_EPOCH`, as `cargo xtask repro` checks.
+- Holds `enclave-server`, `enclave-witness`, `enclave-front`, `enclave-relay`, `enclave-push-relay` and `enclave-admin`.
+- Runs on distroless with no shell, as the unprivileged `nonroot` user (65532).
+- Ships its state directories under `/var/lib/enclave` owned by that user, so named volumes start out writable; the key directories are 0700.
+
+**Services** (each runs with a read-only root filesystem, no capabilities and `no-new-privileges`; each has a health check that is the binary's own `healthcheck`):
+
+| Service | Role | Networks | Published |
+|---|---|---|---|
+| `server` | The server (§1), keys in `server-keys` | `backend` (internal), `egress` | Nothing; Nym ingress at N1 |
+| `witness` | The stack's witness (§3.3), plain HTTP inside | `backend` | Through the front |
+| `front` | §4.5 | `backend`, `edge` | 80, 443/tcp |
+| `relay` | Call relay (§5) | `edge` | 51820/udp |
+| `push-relay` | Push relay (profile `push`) | `backend`, `egress` | Nothing |
+
+**Configuration:**
+- Per-deployment values (domain, operator, family, TLS mode, relay address) come from `.env` as `ENCLAVE_<SECTION>__<KEY>` overrides; an empty one counts as unset.
+- The rest is in `config/*.toml` (examples alongside).
+- The foundation's key and list are in `foundation/`.
+- `init` subcommands create keys.
+- `descriptor OUT` subcommands sign the descriptors the foundation lists, before the first start.
+- The server connects its witnesses lazily and retries ones that are down.
+
+**Overrides:**
+- `compose.dev.yml` publishes the server's TCP port on 127.0.0.1 and makes the front self-signed.
+- `compose.e2e.yml` puts three stacks' witnesses on a shared network.
+
+**CI:** the job `federation-e2e-tcp` (`ci/federation/gen.sh`, `crates/enclave-e2e`) runs three stacks from these files under a test foundation:
+- each front's descriptor is fetched over the Enclave TLS profile;
+- usernames verify with cosignatures from the other stacks' witnesses;
+- messages, a group and a file cross servers;
+- push wakes travel through a push relay;
+- a restarted stack keeps its data;
+- no client sees a split view.
+
+The image has no shell and runs as nonroot.
+
+**Other notes:**
+- Backups and restore are in §1 and the deployment guide.
+- Metrics are local aggregates only.
+- `enclave-server dev` (TCP, random keys, nothing kept) remains for development and is **not for production**: production servers are reachable only through Nym (N1).
+- Postgres for large operators is S5.
+- A Nix flake arrives with R2.
 
 ## 7. Scale estimate (100k accounts)
 
