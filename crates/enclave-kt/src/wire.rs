@@ -191,6 +191,35 @@ pub struct KtPolicy {
 }
 
 impl KtPolicy {
+    /// The pins for every listed server that runs a log, with the listed
+    /// witnesses and threshold (`12-servers.md` §4.1). Witness ids are
+    /// derived from their keys.
+    pub fn from_server_list(list: &enclave_federation::ServerList) -> Self {
+        Self {
+            servers: list
+                .servers
+                .iter()
+                .filter_map(|s| {
+                    s.kt.as_ref().map(|k| KtInfo {
+                        server: s.id(),
+                        domain: s.domain.clone(),
+                        operator: s.operator.clone(),
+                        head_key: k.head_key.clone(),
+                        vrf_public: k.vrf_public.clone(),
+                    })
+                })
+                .collect(),
+            witnesses: crate::WitnessPolicy {
+                witnesses: list
+                    .witnesses
+                    .iter()
+                    .map(|w| (w.id(), w.key.clone(), w.operator.clone()))
+                    .collect(),
+                threshold: usize::from(list.witness_threshold.max(1)),
+            },
+        }
+    }
+
     /// The pinned log for `domain`.
     pub fn by_domain(&self, domain: &str) -> Option<&KtInfo> {
         self.servers

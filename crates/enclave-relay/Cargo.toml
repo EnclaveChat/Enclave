@@ -16,6 +16,7 @@ workspace = true
 enclave-calls = { path = "../enclave-calls" }
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-service = { path = "../enclave-service" }
+enclave-federation = { path = "../enclave-federation" }
 redb = "4.3.0"
 serde = { version = "1", features = ["derive"] }
 zeroize = "1"

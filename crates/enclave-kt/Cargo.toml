@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 enclave-crypto = { path = "../enclave-crypto" }
+enclave-federation = { path = "../enclave-federation" }
 akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf"] }
 async-trait = "0.1"
 thiserror = "2"

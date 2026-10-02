@@ -3,7 +3,8 @@
 //! ```text
 //! enclave-relay init            [--config FILE]   create keys; print the descriptor
 //! enclave-relay run             [--config FILE]   serve (keys from disk)
-//! enclave-relay show-descriptor [--config FILE]   print the descriptor (hex)
+//! enclave-relay show-descriptor [--config FILE]   print the peer descriptor (hex)
+//! enclave-relay descriptor OUT  [--config FILE]   write the signed descriptor for the server list
 //! enclave-relay healthcheck     [--config FILE]   exit 0 if `run` is alive
 //! enclave-relay dev ADDR FAMILY [PEER_DESCRIPTOR_HEX ...]   random keys, nothing kept
 //! ```
@@ -41,6 +42,8 @@ struct RelaySection {
     public_addr: Option<SocketAddr>,
     /// Operator family: callers pick relays from different families.
     family: String,
+    /// Operator name (in the signed descriptor).
+    operator: String,
     /// Key directory.
     keys_dir: PathBuf,
     /// Spent-token ledger and the heartbeat file.
@@ -55,6 +58,7 @@ impl Default for RelaySection {
             listen: SocketAddr::from(([0, 0, 0, 0], 51820)),
             public_addr: None,
             family: String::new(),
+            operator: String::new(),
             keys_dir: PathBuf::from("/var/lib/enclave/relay-keys"),
             data_dir: PathBuf::from("/var/lib/enclave/relay"),
             peers: Vec::new(),
@@ -109,6 +113,7 @@ fn main() -> ExitCode {
         "init" => init(&args),
         "run" => runtime().and_then(|rt| rt.block_on(run(&args))),
         "show-descriptor" => show_descriptor(&args),
+        "descriptor" => write_descriptor(&args),
         "healthcheck" => healthcheck(&args),
         "dev" => runtime().and_then(|rt| rt.block_on(dev(&args[1..]))),
         "" | "--help" | "-h" | "help" => {
@@ -161,6 +166,29 @@ fn show_descriptor(args: &[String]) -> Result<(), String> {
     let cfg = load_config(args)?;
     let keys = RelayKeys::load(&cfg.relay.keys_dir).map_err(|e| e.to_string())?;
     println!("{}", encode(&descriptor(&cfg, &keys)));
+    Ok(())
+}
+
+/// The signed descriptor (`enclave_federation::RelayDescriptor`) operators
+/// submit for the foundation's list.
+fn write_descriptor(args: &[String]) -> Result<(), String> {
+    let out = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .ok_or("usage: enclave-relay descriptor OUT")?;
+    let cfg = load_config(args)?;
+    let mut keys = RelayKeys::load(&cfg.relay.keys_dir).map_err(|e| e.to_string())?;
+    keys.advance(today()).map_err(|e| e.to_string())?;
+    let addr = cfg
+        .relay
+        .public_addr
+        .unwrap_or(cfg.relay.listen)
+        .to_string();
+    let d = keys
+        .descriptor(&cfg.relay.operator, &cfg.relay.family, &addr, now())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(out, d.encode()).map_err(|e| format!("{out}: {e}"))?;
+    println!("{}", hex(&d.id()));
     Ok(())
 }
 

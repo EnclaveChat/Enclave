@@ -2306,6 +2306,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-admin"
+version = "0.1.0"
+dependencies = [
+ "enclave-crypto",
+ "enclave-federation",
+ "enclave-kt",
+ "enclave-rpc",
+ "enclave-service",
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "enclave-app"
 version = "0.1.0"
 dependencies = [
@@ -2447,6 +2460,7 @@ dependencies = [
  "akd",
  "async-trait",
  "enclave-crypto",
+ "enclave-federation",
  "protobuf",
  "redb",
  "thiserror 2.0.21",
@@ -2539,6 +2553,7 @@ version = "0.1.0"
 dependencies = [
  "enclave-calls",
  "enclave-crypto",
+ "enclave-federation",
  "enclave-service",
  "redb",
  "serde",

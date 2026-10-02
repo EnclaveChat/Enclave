@@ -1,0 +1,28 @@
+[package]
+name = "enclave-admin"
+description = "Tools for Enclave's foundation and operators: the foundation key, building and signing the server list from operators' signed descriptors, checking descriptors, and the key-transparency pins clients ship with."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-admin"
+path = "src/main.rs"
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-federation = { path = "../enclave-federation" }
+enclave-kt = { path = "../enclave-kt" }
+enclave-service = { path = "../enclave-service" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+enclave-rpc = { path = "../enclave-rpc" }

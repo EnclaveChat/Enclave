@@ -28,6 +28,7 @@ members = [
     "crates/enclave-relay",
     "crates/enclave-service",
     "crates/enclave-federation",
+    "crates/enclave-admin",
     "crates/enclave-fuzz",
     "xtask",
 ]
