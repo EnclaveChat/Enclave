@@ -2524,3 +2524,69 @@ async fn move_to_another_server() {
         .unwrap();
     assert_eq!(restored.card().server, S3);
 }
+
+/// `docs/12-servers.md` §3.5: a name the operator withdraws, and the name
+/// of an account its owner deleted, become tombstones in the log. Lookups
+/// say so, nobody can claim them again, and the deleted account's manifest
+/// is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn withdrawn_usernames() {
+    use enclave_core::UsernameError;
+    let net = network();
+    let policy = net.enable_usernames(&S1, "one.test").unwrap();
+    let mut people = Vec::new();
+    for name in ["Ada", "Ben", "Cyrus"] {
+        let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), S1, name)
+            .await
+            .unwrap();
+        c.set_kt_policy(policy.clone());
+        people.push(c);
+    }
+    let [ada, ben, cy] = people.as_mut_slice() else {
+        unreachable!()
+    };
+    ada.claim_username("ada").await.unwrap();
+    ben.claim_username("benjamin").await.unwrap();
+
+    // The operator withdraws "ada" (once; again changes nothing).
+    let now = net.now();
+    assert!(
+        net.with_server(&S1, |s| s.withdraw_username("ADA", now))
+            .unwrap()
+            .unwrap()
+    );
+    assert!(
+        !net.with_server(&S1, |s| s.withdraw_username("ada", now))
+            .unwrap()
+            .unwrap()
+    );
+    let found = cy.find_username("ada").await;
+    assert!(
+        matches!(found, Err(CoreError::Username(UsernameError::Withdrawn))),
+        "{found:?}"
+    );
+    for (who, name) in [(&mut *cy, "ada"), (&mut *ada, "ada")] {
+        let r = who.claim_username(name).await;
+        assert!(
+            matches!(r, Err(CoreError::Username(UsernameError::Taken))),
+            "{r:?}"
+        );
+    }
+
+    // Ben deletes his account.
+    let ben_card = ben.card();
+    ben.publish_tombstone().await.unwrap();
+    let found = cy.find_username("benjamin").await;
+    assert!(
+        matches!(found, Err(CoreError::Username(UsernameError::Withdrawn))),
+        "{found:?}"
+    );
+    let r = cy.claim_username("benjamin").await;
+    assert!(
+        matches!(r, Err(CoreError::Username(UsernameError::Taken))),
+        "{r:?}"
+    );
+    // His account can't be reached any more, or brought back.
+    assert!(cy.add_contact(&ben_card, "hello?").await.is_err());
+    assert!(ben.claim_username("benjamin2").await.is_err());
+}

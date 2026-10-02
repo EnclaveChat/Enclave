@@ -377,6 +377,8 @@ Deletion, PIN-gated, performs in order:
 3. deletes the inbox, request inbox, directory objects, and every blob the account uploaded (each delete op authenticated by the corresponding credential);
 4. crypto-shreds local data (`14-storage.md` §3) on every device (each device receives a deletion control message; devices offline for 30 days are covered by inbox deletion and manifest expiry).
 
+**As implemented so far** (step 2): `Client::publish_tombstone` signs `Tombstone = u8(1) ‖ root ‖ u64 time` with the root (the record carries the root, not its hash, so the server can check the signature). The home server withdraws the account's username for good, deletes its manifest and its devices' prekeys, and refuses any later manifest for that root (`12-servers.md` §3.5, test `withdrawn_usernames`). Steps 1, 3 and 4, and the PIN-gated flow in the app, are milestone P5.
+
 ## 9. Adding contacts
 
 ### 9.1 Contact QR ("Show my code")

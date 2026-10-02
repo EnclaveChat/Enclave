@@ -20,6 +20,8 @@ pub const CTX_MANIFEST_VETO: &str = "enclave/v1/ctx/manifest-veto";
 pub const CTX_MIGRATION: &str = "enclave/v1/ctx/migration";
 /// Root-signature context for moving an account to another server.
 pub const CTX_SERVER_MOVE: &str = "enclave/v1/proto/moved";
+/// Root-signature context for deleting an account (its username tombstone).
+pub const CTX_TOMBSTONE: &str = "enclave/v1/proto/tombstone";
 
 /// EQXDH stage-1 key that seals the initiator's identity.
 pub const EQXDH_IDENTITY: &str = "enclave/v1/eqxdh/identity";
@@ -62,6 +64,7 @@ pub const INVITE_CAP: &str = "enclave/v1/invite/cap";
 pub const ALL: &[&str] = &[
     CTX_MANIFEST,
     CTX_SERVER_MOVE,
+    CTX_TOMBSTONE,
     CTX_SIGNED_PREKEY,
     CTX_OPK_BATCH,
     CTX_LAST_RESORT,

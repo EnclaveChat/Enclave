@@ -33,6 +33,8 @@ pub const MIGRATIONS: Bytes = TableDefinition::new("migrations");
 pub const MOVED: Bytes = TableDefinition::new("moved");
 /// Accounts that moved to another server: manifest key → `ServerMove`.
 pub const SERVER_MOVES: Bytes = TableDefinition::new("server-moves");
+/// Deleted accounts: manifest key → root-signed `Tombstone`.
+pub const TOMBSTONES: Bytes = TableDefinition::new("tombstones");
 /// Device id → the manifest key of the account that lists it.
 pub const DEVICE_OWNER: Bytes = TableDefinition::new("device-owner");
 /// Prekey publications: device → `next opk ‖ publication`.
@@ -53,7 +55,7 @@ pub const REPORTS: Bytes = TableDefinition::new("reports");
 pub const META: Bytes = TableDefinition::new("meta");
 
 /// The schema this code writes. Older files are migrated on open.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Storage failure. The server answers `Status::Internal` and logs it.
 #[derive(Debug, thiserror::Error)]
@@ -119,7 +121,7 @@ impl Db {
                 )));
             }
             // Every table is opened (so created) at each start: 0 → 1 made
-            // them all, 1 → 2 adds `server-moves`.
+            // them all, 1 → 2 added `server-moves`, 2 → 3 `tombstones`.
             for t in [
                 INBOXES,
                 TOKENS,
@@ -130,6 +132,7 @@ impl Db {
                 MIGRATIONS,
                 MOVED,
                 SERVER_MOVES,
+                TOMBSTONES,
                 DEVICE_OWNER,
                 BUNDLES,
                 VAULTS,
@@ -185,7 +188,7 @@ impl Db {
 }
 
 /// Every table, for snapshots.
-const ALL: [Bytes; 18] = [
+const ALL: [Bytes; 19] = [
     INBOXES,
     TOKENS,
     ENVELOPES,
@@ -195,6 +198,7 @@ const ALL: [Bytes; 18] = [
     MIGRATIONS,
     MOVED,
     SERVER_MOVES,
+    TOMBSTONES,
     DEVICE_OWNER,
     BUNDLES,
     VAULTS,

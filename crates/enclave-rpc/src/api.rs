@@ -126,6 +126,9 @@ pub enum DirKind {
     /// Where an account went when it left this server: a root-signed
     /// `ServerMove` (`12-servers.md` §4.4), keyed like the manifest.
     Moved = 9,
+    /// An account's root-signed deletion (`03-identity.md` §8.5), keyed like
+    /// the manifest: put to delete the account here, get to see it was.
+    Tombstone = 10,
 }
 
 /// Directory action.
@@ -189,6 +192,7 @@ impl DirRequest {
             7 => DirKind::Descriptor,
             8 => DirKind::ServerList,
             9 => DirKind::Moved,
+            10 => DirKind::Tombstone,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {

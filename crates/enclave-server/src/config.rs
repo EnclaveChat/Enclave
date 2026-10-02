@@ -118,6 +118,9 @@ pub struct KtSection {
     pub witnesses: Vec<String>,
     /// Extra roots (PEM) to trust for witnesses' certificates.
     pub witness_ca: Option<PathBuf>,
+    /// Usernames the operator withdrew for breaking its policy
+    /// (`13-operators.md` §1): tombstoned at start, for good.
+    pub withdrawn: Vec<String>,
 }
 
 impl Default for KtSection {
@@ -126,6 +129,7 @@ impl Default for KtSection {
             enabled: true,
             witnesses: Vec::new(),
             witness_ca: None,
+            withdrawn: Vec::new(),
         }
     }
 }

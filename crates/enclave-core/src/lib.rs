@@ -99,6 +99,10 @@ pub enum UsernameError {
     /// Nobody has that name.
     #[error("nobody has that name")]
     NotFound,
+    /// The name was withdrawn: its account was deleted, or the operator
+    /// withdrew it. Nobody can have it again.
+    #[error("that name was withdrawn")]
+    Withdrawn,
     /// The server's answer didn't check out against the pinned log and
     /// witnesses. Never shown as "not found": it may be an attack.
     #[error("the server's answer could not be checked")]

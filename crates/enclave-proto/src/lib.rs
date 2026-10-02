@@ -16,5 +16,6 @@ pub mod migration;
 pub mod ratchet;
 pub mod recovery;
 pub mod server_move;
+pub mod tombstone;
 
 pub use error::{ProtoError, Result};

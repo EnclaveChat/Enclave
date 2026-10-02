@@ -68,6 +68,7 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/ctx/manifest-veto` | CTX-C | — | `attest.rs` `Attestation::sign`, `verify` | A listed device vetoes a manifest update |
 | `enclave/v1/ctx/migration` | CTX-R | — | `migration.rs` `Migration::sign`, `verify` | Old and new roots sign a change of recovery words (03 §8.2) |
 | `enclave/v1/proto/moved` | CTX-R | — | `server_move.rs` `ServerMove::sign`, `verify` | The root signs where the account moved (new server, domain, request inbox, vault locator), kept by the server it left (12 §4.4) |
+| `enclave/v1/proto/tombstone` | CTX-R | — | `tombstone.rs` `Tombstone::sign`, `verify` | The root signs its account's deletion; the home server withdraws the username for good (12 §3.5, 03 §8.5) |
 | `enclave/v1/eqxdh/identity` | KMAC | 256 | `eqxdh.rs` `stage1_key` (through `seal::derive_key`) | Stage-1 key `k_id` that seals the initiator identity |
 | `enclave/v1/ratchet/init-rk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial root key `RK0` from `SK` |
 | `enclave/v1/ratchet/init-hk` | KMAC | 256 | `ratchet.rs` `Session::new` | Initial header keys; two calls with inputs `frame("a")` (HKA) and `frame("b")` (NHKB) |
@@ -208,7 +209,6 @@ These labels belong to features that are specified but not in code. They are res
 |---|---|---|---|---|
 | `enclave/v1/proto/root-hash` | HASH | 256 | `root_hash` of a root public key | 02b §2.1 |
 | `enclave/v1/proto/pending-root` | CTX-R | — | Pending root action with `not_before` | 03 §8.1 |
-| `enclave/v1/proto/tombstone` | CTX-R | — | Account-deletion KT tombstone | 03 §8.5 |
 | `enclave/v1/proto/veto` | CTX-C | — | Device approval or veto of a manifest update | 03 §3.3, §8.1 |
 | `enclave/v1/proto/conv-id` | HASH | 256 | 1:1 conversation ID | 02b §7 |
 | `enclave/v1/proto/msg-id` | HASH | 256 (first 128 used) | 1:1 message ID | 02b §7 |

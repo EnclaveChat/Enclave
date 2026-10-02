@@ -217,19 +217,30 @@ PLAN's quorum values (≥3 independent witnesses, ≥2 during beta) are policy i
 
 ### 3.5 Usernames
 
-`username::normalize(name)`:
+`username::normalize(name)` (`enclave-kt/src/username.rs`):
 
-- trim whitespace and lowercase ASCII;
-- 3 to 32 bytes;
-- only `a`–`z`, `0`–`9` and `_`;
+- trim, NFKC, lowercase (Unicode), and NFKC again;
+- 2 to 32 characters and 3 to 32 bytes of UTF-8 (the directory key is 32 bytes): `ada`, `zoë`, `мария`, `محمد` and `田中` are names, `田` isn't;
+- every character a letter, a digit or `_` that UTS #39 allows in identifiers (no symbols, emoji, invisible or deprecated characters);
+- one script, at UTS #39's *highly restrictive* level: one script, or Latin with Han and Japanese kana, Han with Bopomofo, or Han with Hangul (so `pаypal` with a Cyrillic `а` is refused);
 - the first character is a letter;
-- its skeleton must not equal the skeleton of a reserved name: `admin`, `enclave`, `support`, `security`, `root`, `help`, `official`, `system`.
+- its skeleton must not equal the skeleton of a reserved name: `admin`, `enclave`, `support`, `security`, `root`, `help`, `official`, `system` (in any script).
 
-`username::skeleton(name)` maps look-alikes to one form: first replace `rn` → `m`, `vv` → `w`, `cl` → `d`, and remove `_`; then map characters `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`. `KtLog::publish` refuses a new name whose skeleton equals that of a different registered name (RT-26).
+`username::skeleton(name)` maps look-alikes to one form:
+1. Take the UTS #39 skeleton: every character goes to its prototype in Unicode's confusables table, so an all-Cyrillic `раul` and `paul` share one.
+2. Lowercase it.
+3. Replace `rn` → `m`, `vv` → `w`, `cl` → `d`, and remove `_`.
+4. Map the characters Unicode's table leaves apart in lowercase Latin text: `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`.
 
-A name held by a root that has a stored migration (§2.2) moves to the new root when the new root claims it; the old root no longer holds any name.
+`KtLog::publish` refuses a new name whose skeleton equals that of a different registered name (RT-26). The index is rebuilt from the stored names at every start, so a log is held to the current rules.
 
-The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons), operator tombstones and account-deletion tombstones are not implemented.
+A name held by a root that has a stored migration (§2.2) moves to the new root when the new root claims it; the old root no longer holds any name. The username format is `@name@domain`.
+
+**Tombstones.** A withdrawn name's log value is a tombstone, `0xFF "tombstone" ‖ u8 why`. That is never a root, so older clients read it as "nobody has that name"; current ones as `UsernameError::Withdrawn`. Nobody can claim it again: the server records it as held by no root. Names are withdrawn in two ways:
+- **By the account's owner**, when the account is deleted. The root signs a `Tombstone` (`enclave_proto::tombstone`, `u8(1) ‖ root ‖ u64 time`, ctx `enclave/v1/proto/tombstone`) and puts it to its home server as `DirKind::Tombstone` (10), keyed like the manifest (`Client::publish_tombstone`). The server checks the signature and that it is under a day old. It withdraws the account's name, deletes its manifest and its devices' prekeys, keeps the record (anyone can fetch it), and refuses any later manifest for that root (redb table `tombstones`, schema version 3).
+- **By the operator**, for breaking its policy: `[kt] withdrawn = ["name", …]` in `server.toml`, applied at start (`Server::withdraw_username`; doing it again changes nothing).
+
+Test `withdrawn_usernames`. Releasing a name when its owner takes another (a bare root as its value, kept for the same account) is unchanged.
 
 ### 3.6 Not implemented yet
 

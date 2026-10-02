@@ -55,6 +55,9 @@ pub const PUSH_WINDOW_SECS: u64 = 60;
 pub const PUSH_JITTER_SECS: u64 = 30;
 /// Largest sealed push token accepted.
 const MAX_PUSH_TOKEN: usize = 4096;
+/// The holder recorded for a withdrawn username: no root, so no claim
+/// ever matches it.
+const WITHDRAWN: [u8; 64] = [0xff; 64];
 
 /// A scheduled wake.
 struct Wake {
@@ -1039,6 +1042,10 @@ impl Server {
                 let got = self.db.read(|r| r.get(db::SERVER_MOVES, &req.key));
                 self.stored_reply(got, req.index, |v| v)
             }
+            (DirKind::Tombstone, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::TOMBSTONES, &req.key));
+                self.stored_reply(got, req.index, |v| v)
+            }
             (DirKind::Vault, DirAction::Get) => {
                 let got = self.db.read(|r| r.get(db::VAULTS, &req.key));
                 self.stored_reply(got, req.index, |v| v.get(32..).unwrap_or_default())
@@ -1187,6 +1194,7 @@ impl Server {
             DirKind::Attest => self.accept_attestation(&req.key, object),
             DirKind::Migration => self.accept_migration(&req.key, &object, now),
             DirKind::Moved => self.accept_server_move(&req.key, &object, now),
+            DirKind::Tombstone => self.accept_tombstone(&req.key, &object, now),
             DirKind::Descriptor | DirKind::ServerList => Status::Denied,
         };
         (status, Reply::Empty)
@@ -1416,6 +1424,106 @@ impl Server {
         .unwrap_or_else(|s| s)
     }
 
+    /// An account's deletion (`03-identity.md` §8.5), signed by its root:
+    /// its username is withdrawn for good (a tombstone in the log), its
+    /// manifest and its devices' prekeys go, and no manifest for that root
+    /// is taken again. Inboxes, the vault key and blobs are deleted by
+    /// their owners' credentials, as always.
+    fn accept_tombstone(&mut self, key: &[u8; 32], bytes: &[u8], now: u64) -> Status {
+        let Ok(t) = enclave_proto::tombstone::Tombstone::decode(bytes) else {
+            return Status::Malformed;
+        };
+        if &manifest_key(&t.root.0) != key || t.time.abs_diff(now) > 86_400 || t.verify().is_err() {
+            return Status::Invalid;
+        }
+        let key = *key;
+        let root = t.root.0;
+        let state = self.db.read(|r| {
+            Ok((
+                r.get(db::TOMBSTONES, &key)?.is_some(),
+                r.get(db::MANIFESTS, &key)?,
+                r.get(db::NAMES_BY_ROOT, &root)?,
+            ))
+        });
+        let (done, manifest, name) = match state {
+            Ok(s) => s,
+            Err(e) => {
+                log_db_error(&e);
+                return Status::Unavailable;
+            }
+        };
+        if done {
+            return Status::Ok;
+        }
+        let Some(manifest) = manifest else {
+            return Status::NotFound;
+        };
+        let devices: Vec<[u8; 16]> = SignedManifest::from_bytes(tail(&manifest))
+            .ok()
+            .and_then(|sm| Manifest::decode(&sm.body).ok())
+            .map(|m| m.devices.iter().map(|d| d.id).collect())
+            .unwrap_or_default();
+        let name = name.and_then(|n| String::from_utf8(n).ok());
+        if let Some(n) = &name
+            && self
+                .withdraw_in_log(n, enclave_kt::username::Withdrawn::Deleted, now)
+                .is_err()
+        {
+            return Status::Unavailable;
+        }
+        self.tx(|tx| {
+            tx.put(db::TOMBSTONES, &key, bytes)?;
+            tx.del(db::MANIFESTS, &key)?;
+            for d in &devices {
+                tx.del(db::BUNDLES, d)?;
+            }
+            tx.del(db::NAMES_BY_ROOT, &root)?;
+            if let Some(n) = &name {
+                tx.put(db::USERNAMES, n.as_bytes(), &cat(&WITHDRAWN, &be(now)))?;
+            }
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
+    }
+
+    /// Publish a tombstone for `name` in the key-transparency log.
+    fn withdraw_in_log(
+        &self,
+        name: &str,
+        why: enclave_kt::username::Withdrawn,
+        now: u64,
+    ) -> Result<(), KtError> {
+        let kt = self.kt.as_ref().ok_or(KtError::Stopped)?;
+        kt.publish(name, enclave_kt::username::tombstone(why), now)
+            .map(|_| ())
+    }
+
+    /// The operator withdraws `name` for breaking its policy
+    /// (`13-operators.md` §1): its log entry becomes a tombstone, its holder
+    /// loses it, and nobody can claim it again. Doing it again changes
+    /// nothing.
+    pub fn withdraw_username(&mut self, name: &str, now: u64) -> Result<bool, KtError> {
+        let name = enclave_kt::username::normalize(name)?;
+        let holder = self
+            .db
+            .read(|r| r.get(db::USERNAMES, name.as_bytes()))
+            .map_err(|e| KtError::Directory(e.to_string()))?;
+        if holder.as_deref().is_some_and(|h| h.starts_with(&WITHDRAWN)) {
+            return Ok(false);
+        }
+        self.withdraw_in_log(&name, enclave_kt::username::Withdrawn::ByOperator, now)?;
+        let owner = holder.and_then(|h| h.get(..64).map(<[u8]>::to_vec));
+        self.tx(|t| {
+            if let Some(o) = &owner {
+                t.del(db::NAMES_BY_ROOT, o)?;
+            }
+            t.put(db::USERNAMES, name.as_bytes(), &cat(&WITHDRAWN, &be(now)))?;
+            Ok(Status::Ok)
+        })
+        .map_err(|s| KtError::Directory(format!("{s:?}")))?;
+        Ok(true)
+    }
+
     fn accept_manifest(&mut self, key: &[u8; 32], bytes: Vec<u8>, now: u64) -> Status {
         let Ok(sm) = SignedManifest::from_bytes(&bytes) else {
             return Status::Malformed;
@@ -1431,7 +1539,7 @@ impl Server {
         }
         let key = *key;
         self.tx(|t| {
-            if t.has(db::MIGRATIONS, &key)? {
+            if t.has(db::MIGRATIONS, &key)? || t.has(db::TOMBSTONES, &key)? {
                 return Ok(Status::Denied);
             }
             if let Some(v) = t.get(db::MANIFESTS, &key)?

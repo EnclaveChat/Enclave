@@ -13,6 +13,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+unicode-normalization = "0.1"
+unicode-security = "0.1"
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-federation = { path = "../enclave-federation" }
 akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf"] }

@@ -102,7 +102,15 @@ impl KtLog {
             vrf_public,
             skeletons: HashMap::new(),
         };
-        log.skeletons = log.store.skeletons()?;
+        // The names are what's stored; their skeletons are recomputed, so
+        // a log written under older confusable rules is held to the
+        // current ones.
+        log.skeletons = log
+            .store
+            .skeletons()?
+            .into_values()
+            .map(|n| (skeleton(&n), n))
+            .collect();
         let tree = log.dir.get_epoch_hash().await.map_err(akd_err)?;
         let signed = log.heads.last().map_or(0, |h| h.head.epoch);
         if tree.epoch() == signed + 1 {

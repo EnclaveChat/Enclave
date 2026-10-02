@@ -11,7 +11,7 @@ Source: PLAN.md §12.4, §18 (operator program), RT-25, RT-28. Operator kit file
 | Rate-limit | Server quotas, PoW effort, Privacy Pass issuance limits | Indirectly (slower sends, higher PoW) |
 | Delete a reported blob | Delete by chunk ID from a report | The blob fails to download ("This file is no longer available.") |
 | Disable a reported inbox or mailbox address | Mark the address disabled; writes get `DENIED` | Senders see "Couldn't deliver to Sam." after retries |
-| Tombstone a username that breaks policy | KT tombstone entry | Visible in KT to anyone who looks the name up |
+| Tombstone a username that breaks policy | KT tombstone entry: `[kt] withdrawn = ["name"]` in `server.toml`, applied at start (`12-servers.md` §3.5) | Visible in KT to anyone who looks the name up ("that name was withdrawn"); nobody can claim it again |
 | Refuse registrations | Stop accepting `INBOX_REGISTER` or `KT_WRITE` | New users choose another server |
 
 Operators MUST NOT be able to:

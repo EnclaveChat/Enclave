@@ -344,6 +344,13 @@ async fn run(args: &[String]) -> Result<(), String> {
             },
         };
         server.enable_kt(kt);
+        for name in &cfg.kt.withdrawn {
+            match server.withdraw_username(name, now()) {
+                Ok(true) => eprintln!("username {name}: withdrawn"),
+                Ok(false) => {}
+                Err(e) => eprintln!("username {name}: can't withdraw: {e}"),
+            }
+        }
         std::fs::create_dir_all(&cfg.server.public_dir).map_err(|e| e.to_string())?;
         let pins = cfg.server.public_dir.join("kt-pins.bin");
         std::fs::write(&pins, policy.encode()).map_err(|e| format!("{}: {e}", pins.display()))?;

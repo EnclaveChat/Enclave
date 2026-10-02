@@ -130,7 +130,9 @@ impl Client {
             Ok(card) => {
                 card.root != self.account.root_public.0 || card.server != self.profile.server
             }
-            Err(CoreError::Username(UsernameError::NotFound | UsernameError::Unverified)) => true,
+            Err(CoreError::Username(
+                UsernameError::NotFound | UsernameError::Unverified | UsernameError::Withdrawn,
+            )) => true,
             // Try again at the next sync.
             Err(_) => return Ok(Vec::new()),
         };
@@ -192,6 +194,9 @@ impl Client {
         // Kept for gossip with contacts (RT-04).
         self.record_head(&reply.head)?;
         // A bare root is a released name.
+        if enclave_kt::username::as_tombstone(&value).is_some() {
+            return Err(UsernameError::Withdrawn.into());
+        }
         if value.len() <= ROOT_LEN {
             return Err(UsernameError::NotFound.into());
         }
@@ -201,6 +206,31 @@ impl Client {
             return Err(UsernameError::Unverified.into());
         }
         Ok(card)
+    }
+}
+
+impl Client {
+    /// The server half of deleting the account (`docs/03-identity.md`
+    /// §8.5): the root signs a tombstone and the home server withdraws the
+    /// account's username for good, drops its manifest and prekeys, and
+    /// takes no new manifest for it. Only on the device that holds the
+    /// recovery words.
+    pub async fn publish_tombstone(&mut self) -> Result<()> {
+        let now = self.now();
+        let root = self.account.root.as_ref().ok_or(CoreError::NotAccepted)?;
+        let t = enclave_proto::tombstone::Tombstone::sign(root, now, &mut self.rng)?;
+        let server = self.profile.server;
+        self.rpc
+            .dir_put(
+                &server,
+                DirKind::Tombstone,
+                api::manifest_key(&self.account.root_public.0),
+                [0; 32],
+                &t.encode(),
+                now,
+                &mut self.rng,
+            )
+            .await
     }
 }
 
