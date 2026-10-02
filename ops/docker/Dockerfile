@@ -1,15 +1,62 @@
-# Reproducible-ish build of the Enclave server and relay.
-# docker build -f ops/docker/Dockerfile -t enclave-server .
-FROM rust:1.94.1-slim-bookworm AS build
+# syntax=docker/dockerfile:1
+#
+# Enclave's service images (docs/13-operators.md, ops/compose).
+#
+#   docker build -f ops/docker/Dockerfile --target server -t enclave-server .
+#
+# `server` holds every service an operator's stack runs except the Nym
+# sidecar: enclave-server, enclave-witness, enclave-front, enclave-relay,
+# enclave-push-relay and enclave-admin. The compose file picks the binary
+# per service. The runtime is distroless (no shell, no package manager) and
+# runs as the unprivileged `nonroot` user.
+#
+# Reproducible: base images are pinned by digest, the toolchain by version,
+# dependencies by Cargo.lock (--locked), and the build has fixed paths
+# (/src, /cargo) and a fixed SOURCE_DATE_EPOCH, as in `cargo xtask repro`.
+# Two builds of the same commit give the same binaries (CI job `repro`
+# checks the binaries; `docker-build` builds the image).
+
+ARG RUST_IMAGE=rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+
+FROM ${RUST_IMAGE} AS build
+ENV CARGO_HOME=/cargo \
+    CARGO_INCREMENTAL=0 \
+    CARGO_TERM_COLOR=never \
+    SOURCE_DATE_EPOCH=1700000000 \
+    RUSTUP_TOOLCHAIN=1.94.1 \
+    RUSTFLAGS="--remap-path-prefix=/cargo=/cargo --remap-path-prefix=/src=/src"
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p enclave-server -p enclave-relay
+# The registry and target directory are caches (speed only; what is built
+# depends only on the sources and Cargo.lock).
+RUN --mount=type=cache,target=/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked \
+      -p enclave-server -p enclave-witness -p enclave-front \
+      -p enclave-relay -p enclave-push-relay -p enclave-admin \
+ && mkdir -p /out \
+ && cp target/release/enclave-server target/release/enclave-witness \
+       target/release/enclave-front target/release/enclave-relay \
+       target/release/enclave-push-relay target/release/enclave-admin /out/
+# State directories, owned by `nonroot` (65532), so the named volumes
+# mounted on them start out writable; key directories owner-only.
+RUN cd /var/lib && mkdir -p enclave \
+ && cd enclave && mkdir server public backups witness front relay \
+      keys witness-keys relay-keys push-keys \
+ && chmod 0700 keys witness-keys relay-keys push-keys \
+ && chown -R 65532:65532 /var/lib/enclave
 
-FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /src/target/release/enclave-server /usr/local/bin/enclave-server
-COPY --from=build /src/target/release/enclave-relay /usr/local/bin/enclave-relay
-USER nonroot
-# Dev transport only. Production servers are reached through their Nym
-# client (docs/12-servers.md); do not publish this port on the internet.
-EXPOSE 7443
-ENTRYPOINT ["/usr/local/bin/enclave-server", "0.0.0.0:7443"]
+FROM ${RUNTIME_IMAGE} AS server
+LABEL org.opencontainers.image.title="enclave-server" \
+      org.opencontainers.image.description="Enclave server, witness, front, call relay and push relay" \
+      org.opencontainers.image.source="https://github.com/EnclaveChat/Enclave" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+COPY --from=build /out/ /usr/local/bin/
+COPY --from=build --chown=65532:65532 /var/lib/enclave/ /var/lib/enclave/
+USER nonroot:nonroot
+# State and keys live in volumes under /var/lib/enclave; configuration in
+# /etc/enclave. Nothing listens unless a service is started.
+WORKDIR /var/lib/enclave
+ENTRYPOINT ["/usr/local/bin/enclave-server"]
+CMD ["run", "--config", "/etc/enclave/server.toml"]

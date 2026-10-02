@@ -1,0 +1,17 @@
+# Development: reach the server directly over TCP (the dev transport) with
+# a self-signed front. Never on the internet: production servers are
+# reached only through their Nym ingress.
+#
+#   docker compose -f compose.yml -f compose.dev.yml up -d
+
+services:
+  server:
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-7443}:7443"
+    networks: [backend, egress, dev]
+  front:
+    environment:
+      ENCLAVE_FRONT__TLS: self-signed
+
+networks:
+  dev: {}

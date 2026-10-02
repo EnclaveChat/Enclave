@@ -17,7 +17,7 @@ use std::path::Path;
 pub struct ConfigError(pub String);
 
 /// Read `path` (if given), apply `ENCLAVE_*` overrides from `env`, and
-/// deserialize the result.
+/// deserialize the result. An empty override is ignored.
 pub fn load<T: DeserializeOwned>(
     path: Option<&Path>,
     env: impl IntoIterator<Item = (String, String)>,
@@ -38,6 +38,10 @@ pub fn load<T: DeserializeOwned>(
         let Some((section, key)) = rest.split_once("__") else {
             continue;
         };
+        // Empty is unset (a compose file passes `${VAR:-}` through).
+        if v.is_empty() {
+            continue;
+        }
         let (section, key) = (section.to_lowercase(), key.to_lowercase());
         let entry = table
             .entry(section.clone())
@@ -144,6 +148,19 @@ mod tests {
             ],
         );
         assert!(bad.is_err());
+        // An empty override is no override.
+        #[derive(serde::Deserialize, Debug, Default)]
+        #[serde(default)]
+        struct O {
+            o: Opt,
+        }
+        #[derive(serde::Deserialize, Debug, Default)]
+        #[serde(default)]
+        struct Opt {
+            email: Option<String>,
+        }
+        let o: O = load(None, [("ENCLAVE_O__EMAIL".into(), String::new())]).unwrap();
+        assert_eq!(o.o.email, None);
         assert_eq!(unhex(&hex(&[0, 255, 16])).unwrap(), [0, 255, 16]);
         assert!(unhex("abc").is_none());
     }

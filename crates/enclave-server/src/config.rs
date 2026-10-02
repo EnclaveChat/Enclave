@@ -136,7 +136,8 @@ impl Default for KtSection {
 pub struct PushSection {
     /// Where due wakes are forwarded (the push egress, which carries them
     /// to the push relay over the mixnet). Empty: no push.
-    pub forward: Option<SocketAddr>,
+    /// `HOST:PORT` (a name on the stack's network, or an address).
+    pub forward: Option<String>,
 }
 
 /// `[backup]`

@@ -31,6 +31,8 @@ pub const ATTESTATIONS: Bytes = TableDefinition::new("attestations");
 pub const MIGRATIONS: Bytes = TableDefinition::new("migrations");
 /// Old root → new root.
 pub const MOVED: Bytes = TableDefinition::new("moved");
+/// Accounts that moved to another server: manifest key → `ServerMove`.
+pub const SERVER_MOVES: Bytes = TableDefinition::new("server-moves");
 /// Device id → the manifest key of the account that lists it.
 pub const DEVICE_OWNER: Bytes = TableDefinition::new("device-owner");
 /// Prekey publications: device → `next opk ‖ publication`.
@@ -51,7 +53,7 @@ pub const REPORTS: Bytes = TableDefinition::new("reports");
 pub const META: Bytes = TableDefinition::new("meta");
 
 /// The schema this code writes. Older files are migrated on open.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Storage failure. The server answers `Status::Internal` and logs it.
 #[derive(Debug, thiserror::Error)]
@@ -116,7 +118,8 @@ impl Db {
                     "database schema {current} is newer than this server ({SCHEMA_VERSION})"
                 )));
             }
-            // Version 0 → 1: create every table (redb creates them on open).
+            // Every table is opened (so created) at each start: 0 → 1 made
+            // them all, 1 → 2 adds `server-moves`.
             for t in [
                 INBOXES,
                 TOKENS,
@@ -126,6 +129,7 @@ impl Db {
                 ATTESTATIONS,
                 MIGRATIONS,
                 MOVED,
+                SERVER_MOVES,
                 DEVICE_OWNER,
                 BUNDLES,
                 VAULTS,
@@ -181,7 +185,7 @@ impl Db {
 }
 
 /// Every table, for snapshots.
-const ALL: [Bytes; 17] = [
+const ALL: [Bytes; 18] = [
     INBOXES,
     TOKENS,
     ENVELOPES,
@@ -190,6 +194,7 @@ const ALL: [Bytes; 17] = [
     ATTESTATIONS,
     MIGRATIONS,
     MOVED,
+    SERVER_MOVES,
     DEVICE_OWNER,
     BUNDLES,
     VAULTS,

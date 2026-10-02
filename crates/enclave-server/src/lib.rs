@@ -1035,6 +1035,10 @@ impl Server {
                 let got = self.db.read(|r| r.get(db::MIGRATIONS, &req.key));
                 self.stored_reply(got, req.index, |v| v)
             }
+            (DirKind::Moved, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::SERVER_MOVES, &req.key));
+                self.stored_reply(got, req.index, |v| v)
+            }
             (DirKind::Vault, DirAction::Get) => {
                 let got = self.db.read(|r| r.get(db::VAULTS, &req.key));
                 self.stored_reply(got, req.index, |v| v.get(32..).unwrap_or_default())
@@ -1182,6 +1186,7 @@ impl Server {
             DirKind::Username => self.accept_username(&req.key, &req.proof, &object, now),
             DirKind::Attest => self.accept_attestation(&req.key, object),
             DirKind::Migration => self.accept_migration(&req.key, &object, now),
+            DirKind::Moved => self.accept_server_move(&req.key, &object, now),
             DirKind::Descriptor | DirKind::ServerList => Status::Denied,
         };
         (status, Reply::Empty)
@@ -1375,6 +1380,37 @@ impl Server {
             }
             t.put(db::MIGRATIONS, &key, bytes)?;
             t.put(db::MOVED, &mig.old.0, &mig.new.0)?;
+            Ok(Status::Ok)
+        })
+        .unwrap_or_else(|s| s)
+    }
+
+    /// Where an account of this server went (`12-servers.md` §4.4): signed
+    /// by the root of a manifest held here, leaving this server, recent,
+    /// and newer than any move already recorded.
+    fn accept_server_move(&mut self, key: &[u8; 32], bytes: &[u8], now: u64) -> Status {
+        let Ok(m) = enclave_proto::server_move::ServerMove::decode(bytes) else {
+            return Status::Malformed;
+        };
+        if &manifest_key(&m.root.0) != key
+            || m.from != self.cfg.id
+            || m.time.abs_diff(now) > 86_400
+            || m.verify().is_err()
+        {
+            return Status::Invalid;
+        }
+        let key = *key;
+        self.tx(|t| {
+            if !t.has(db::MANIFESTS, &key)? {
+                return Ok(Status::NotFound);
+            }
+            if let Some(old) = t.get(db::SERVER_MOVES, &key)?
+                && enclave_proto::server_move::ServerMove::decode(&old)
+                    .is_ok_and(|o| o.time >= m.time)
+            {
+                return Ok(Status::Invalid);
+            }
+            t.put(db::SERVER_MOVES, &key, bytes)?;
             Ok(Status::Ok)
         })
         .unwrap_or_else(|s| s)

@@ -390,6 +390,17 @@ impl Client {
         Ok(())
     }
 
+    /// Register every outstanding invite's capabilities again (with a new
+    /// request inbox, after moving to another server).
+    pub(crate) async fn reregister_invites(&mut self, now: u64) -> Result<()> {
+        for inv in self.stored_invites()? {
+            if inv.expires > now {
+                self.register_caps(&inv.cap_hashes(), 0, now).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn register_caps(&mut self, hashes: &[[u8; 32]], flags: u8, now: u64) -> Result<()> {
         let payload = api::frame(&hashes.concat(), &mut self.rng)?;
         let h = RequestHeader {

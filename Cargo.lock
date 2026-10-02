@@ -2377,13 +2377,24 @@ dependencies = [
 name = "enclave-admin"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "enclave-crypto",
  "enclave-federation",
+ "enclave-front",
  "enclave-kt",
  "enclave-rpc",
  "enclave-service",
+ "enclave-tls",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rcgen 0.13.2",
+ "rustls",
  "serde",
+ "tokio",
  "toml 0.8.23",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2483,6 +2494,20 @@ version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "enclave-e2e"
+version = "0.1.0"
+dependencies = [
+ "enclave-core",
+ "enclave-crypto",
+ "enclave-federation",
+ "enclave-net",
+ "enclave-push-relay",
+ "enclave-service",
+ "enclave-store",
+ "tokio",
 ]
 
 [[package]]

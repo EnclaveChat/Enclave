@@ -1,0 +1,489 @@
+//! End-to-end driver: headless Enclave clients against real server stacks
+//! run separately (CI job `federation-e2e-tcp`, `ci/federation/`).
+//!
+//! ```text
+//! enclave-e2e setup         --state DIR --servers A_ID=ADDR,B_ID=ADDR,C_ID=ADDR
+//!                           --foundation FILE --server-list FILE
+//!                           [--push-relay-keys FILE --push-listen ADDR --push-endpoint URL]
+//! enclave-e2e after-restart --state DIR --servers … --foundation FILE --server-list FILE
+//! ```
+//!
+//! Three people, one per stack (Ada on A, Ben on B, Cy on C). `setup`:
+//!
+//! 1. each claims a username on their home server; the others find them
+//!    by `@name@domain`, verified under pins from the foundation's list
+//!    with cosignatures from the other stacks' witnesses;
+//! 2. they add each other and talk across servers;
+//! 3. a group of three, hosted on A;
+//! 4. a file from Ada to Ben (blobs on A, fetched by Ben);
+//! 5. push (when a push relay is given): Ben registers a UnifiedPush
+//!    endpoint this program serves, and Ada's message to him wakes it;
+//! 6. Ada leaves a message for Ben on B, unread.
+//!
+//! Then the CI script restarts stack B, and `after-restart`:
+//!
+//! 7. Ben reads the message B held across the restart and answers; usernames
+//!    on B still verify; the group still works;
+//! 8. at no point did anyone see a split view of a log.
+//!
+//! Profiles are kept in `--state` between the two runs. Any failure exits
+//! non-zero with what went wrong.
+
+use enclave_core::{Client, ContactCard, Event, Options};
+use enclave_crypto::pwhash::PwParams;
+use enclave_federation::{FoundationPublic, ServerList};
+use enclave_net::transport::{TcpTransport, Transport, parse_server};
+use enclave_service::config::flag;
+use enclave_store::FileKeystore;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const NAMES: [&str; 3] = ["ada", "ben", "cy"];
+/// How long to wait for something to arrive.
+const PATIENCE: Duration = Duration::from_secs(180);
+
+struct World {
+    state: PathBuf,
+    transport: Arc<dyn Transport>,
+    servers: Vec<[u8; 16]>,
+    foundation: FoundationPublic,
+    list: Vec<u8>,
+    domains: Vec<String>,
+}
+
+type R<T> = Result<T, String>;
+
+fn e(x: impl std::fmt::Display) -> String {
+    x.to_string()
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("enclave-e2e: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = rt.block_on(async {
+        let w = world(&args)?;
+        match args.first().map(String::as_str) {
+            Some("setup") => setup(&w, &args).await,
+            Some("after-restart") => after_restart(&w).await,
+            _ => Err("usage: enclave-e2e setup|after-restart (see the module docs)".into()),
+        }
+    });
+    match result {
+        Ok(()) => {
+            eprintln!("enclave-e2e: all passed");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("enclave-e2e: FAILED: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn world(args: &[String]) -> R<World> {
+    let need = |n: &str| flag(args, n).ok_or_else(|| format!("missing {n}"));
+    let state = PathBuf::from(need("--state")?);
+    std::fs::create_dir_all(&state).map_err(e)?;
+    let mut addrs = HashMap::new();
+    let mut servers = Vec::new();
+    for s in need("--servers")?.split(',') {
+        let (id, addr) = parse_server(s).ok_or_else(|| format!("--servers: {s}"))?;
+        addrs.insert(id, addr);
+        servers.push(id);
+    }
+    if servers.len() != 3 {
+        return Err("--servers: three stacks expected".into());
+    }
+    let foundation =
+        FoundationPublic::decode(&std::fs::read(need("--foundation")?).map_err(e)?).map_err(e)?;
+    let list = std::fs::read(need("--server-list")?).map_err(e)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(e)?
+        .as_secs();
+    let parsed = ServerList::verify(&list, &foundation, now, 0).map_err(e)?;
+    let domains = servers
+        .iter()
+        .map(|id| {
+            parsed
+                .server(id)
+                .map(|s| s.domain.clone())
+                .ok_or_else(|| "a server isn't in the list".to_string())
+        })
+        .collect::<R<Vec<_>>>()?;
+    Ok(World {
+        state,
+        transport: Arc::new(TcpTransport::new(addrs)),
+        servers,
+        foundation,
+        list,
+        domains,
+    })
+}
+
+fn options(dir: &Path) -> R<Options> {
+    std::fs::create_dir_all(dir).map_err(e)?;
+    Ok(Options {
+        path: Some(dir.join("profile.redb")),
+        keystore: Arc::new(FileKeystore::new(dir.join("keys")).map_err(e)?),
+        passphrase: None,
+        pw_params: PwParams::FLOOR,
+    })
+}
+
+impl World {
+    async fn create(&self, i: usize) -> R<Client> {
+        let (mut c, _) = Client::create(
+            options(&self.state.join(NAMES[i]))?,
+            Arc::clone(&self.transport),
+            self.servers[i],
+            NAMES[i],
+        )
+        .await
+        .map_err(|x| format!("{}: create: {x}", NAMES[i]))?;
+        c.set_foundation(self.foundation.clone()).map_err(e)?;
+        c.offer_server_list(&self.list).map_err(e)?;
+        Ok(c)
+    }
+
+    fn open(&self, i: usize) -> R<Client> {
+        let mut c = Client::open(
+            options(&self.state.join(NAMES[i]))?,
+            Arc::clone(&self.transport),
+        )
+        .map_err(|x| format!("{}: open: {x}", NAMES[i]))?;
+        c.set_foundation(self.foundation.clone()).map_err(e)?;
+        Ok(c)
+    }
+}
+
+/// Every event any client saw, checked at the end for split views.
+#[derive(Default)]
+struct Seen(Vec<Event>);
+
+impl Seen {
+    async fn sync(&mut self, c: &mut Client, who: &str) -> R<Vec<Event>> {
+        let ev = c.sync().await.map_err(|x| format!("{who}: sync: {x}"))?;
+        self.0.extend(ev.iter().cloned());
+        Ok(ev)
+    }
+
+    /// Sync `c` until `want` matches an event, or give up.
+    async fn until(
+        &mut self,
+        c: &mut Client,
+        who: &str,
+        what: &str,
+        want: impl Fn(&Event) -> bool,
+    ) -> R<Event> {
+        let start = Instant::now();
+        loop {
+            for ev in self.sync(c, who).await? {
+                if want(&ev) {
+                    eprintln!("  {who}: {what}");
+                    return Ok(ev);
+                }
+            }
+            if start.elapsed() > PATIENCE {
+                return Err(format!("{who}: no {what} after {PATIENCE:?}"));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    fn no_split_views(&self) -> R<()> {
+        match self
+            .0
+            .iter()
+            .find(|e| matches!(e, Event::KtSplitView { .. } | Event::UsernameProblem { .. }))
+        {
+            Some(ev) => Err(format!("a log looked forked: {ev:?}")),
+            None => Ok(()),
+        }
+    }
+}
+
+fn text_from(root: [u8; 64], text: &'static str) -> impl Fn(&Event) -> bool {
+    move |ev| matches!(ev, Event::Message { root: r, message } if *r == root && message.text == text)
+}
+
+fn group_text(text: &'static str) -> impl Fn(&Event) -> bool {
+    move |ev| matches!(ev, Event::GroupMessage { message, .. } if message.text == text)
+}
+
+async fn setup(w: &World, args: &[String]) -> R<()> {
+    let mut seen = Seen::default();
+    eprintln!("creating Ada on A, Ben on B, Cy on C");
+    let mut ada = w.create(0).await?;
+    let mut ben = w.create(1).await?;
+    let mut cy = w.create(2).await?;
+
+    // 1. Usernames on three servers, found across them.
+    eprintln!("1. usernames");
+    for (c, i) in [(&mut ada, 0), (&mut ben, 1), (&mut cy, 2)] {
+        let got = c
+            .claim_username(NAMES[i])
+            .await
+            .map_err(|x| format!("{}: claim: {x}", NAMES[i]))?;
+        if got != format!("{}@{}", NAMES[i], w.domains[i]) {
+            return Err(format!("{}: claimed {got}", NAMES[i]));
+        }
+    }
+    let ben_card = ada
+        .find_username(&format!("@ben@{}", w.domains[1]))
+        .await
+        .map_err(|x| format!("ada: find ben: {x}"))?;
+    let ada_card = cy
+        .find_username(&format!("@ada@{}", w.domains[0]))
+        .await
+        .map_err(|x| format!("cy: find ada: {x}"))?;
+    if ben_card.root != ben.root() || ada_card.root != ada.root() {
+        return Err("a username led to the wrong account".into());
+    }
+
+    // 2. Contacts across servers.
+    eprintln!("2. one-to-one across servers");
+    connect(&mut seen, &mut ada, "ada", &ben_card, &mut ben, "ben").await?;
+    connect(&mut seen, &mut cy, "cy", &ada_card, &mut ada, "ada").await?;
+    let cy_card = cy.card();
+    connect(&mut seen, &mut ben, "ben", &cy_card, &mut cy, "cy").await?;
+    ada.send_text(&ben.root(), "hello from A")
+        .await
+        .map_err(e)?;
+    seen.until(
+        &mut ben,
+        "ben",
+        "Ada's message",
+        text_from(ada.root(), "hello from A"),
+    )
+    .await?;
+    ben.send_text(&ada.root(), "hello from B")
+        .await
+        .map_err(e)?;
+    seen.until(
+        &mut ada,
+        "ada",
+        "Ben's answer",
+        text_from(ben.root(), "hello from B"),
+    )
+    .await?;
+
+    // 3. A group hosted on A.
+    eprintln!("3. a group of three");
+    let gid = ada
+        .create_group("e2e", &[ben.root(), cy.root()])
+        .await
+        .map_err(|x| format!("ada: create group: {x}"))?;
+    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cy")] {
+        seen.until(c, who, "the group", |ev| {
+            matches!(ev, Event::GroupJoined { .. })
+        })
+        .await?;
+    }
+    ada.send_group_text(&gid, "group hello").await.map_err(e)?;
+    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cy")] {
+        seen.until(c, who, "the group message", group_text("group hello"))
+            .await?;
+    }
+    cy.send_group_text(&gid, "from C to the group")
+        .await
+        .map_err(e)?;
+    seen.until(
+        &mut ada,
+        "ada",
+        "Cy's group message",
+        group_text("from C to the group"),
+    )
+    .await?;
+
+    // 4. A file: blobs on A, fetched by Ben.
+    eprintln!("4. a file");
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i * 31 % 251) as u8).collect();
+    ada.send_attachment(
+        &ben.root(),
+        "e2e.bin",
+        "application/octet-stream",
+        &data,
+        "a file",
+    )
+    .await
+    .map_err(|x| format!("ada: send file: {x}"))?;
+    let ev = seen
+        .until(
+            &mut ben,
+            "ben",
+            "the file message",
+            text_from(ada.root(), "a file"),
+        )
+        .await?;
+    let Event::Message { message, .. } = ev else {
+        return Err("unexpected event".into());
+    };
+    let got = ben
+        .fetch_attachment(&ada.root(), message.seq)
+        .await
+        .map_err(|x| format!("ben: fetch file: {x}"))?;
+    if got != data {
+        return Err("the file arrived changed".into());
+    }
+
+    // 5. Push.
+    if let Some(keys) = flag(args, "--push-relay-keys") {
+        eprintln!("5. push");
+        push(&mut seen, &mut ada, &mut ben, &keys, args).await?;
+    } else {
+        eprintln!("5. push: skipped (no --push-relay-keys)");
+    }
+
+    // 6. Left on B for after the restart.
+    ada.send_text(&ben.root(), "kept across the restart")
+        .await
+        .map_err(e)?;
+    seen.no_split_views()?;
+    std::fs::write(w.state.join("group"), gid).map_err(e)?;
+    Ok(())
+}
+
+/// `a` adds `b` from `card` and `b` accepts.
+async fn connect(
+    seen: &mut Seen,
+    a: &mut Client,
+    a_name: &str,
+    card: &ContactCard,
+    b: &mut Client,
+    b_name: &str,
+) -> R<()> {
+    a.add_contact(card, &format!("hi from {a_name}"))
+        .await
+        .map_err(|x| format!("{a_name}: add {b_name}: {x}"))?;
+    let root = a.root();
+    seen.until(
+        b,
+        b_name,
+        "the request",
+        |ev| matches!(ev, Event::Request { root: r, .. } if *r == root),
+    )
+    .await?;
+    b.accept(&root)
+        .await
+        .map_err(|x| format!("{b_name}: accept: {x}"))?;
+    let broot = b.root();
+    seen.until(
+        a,
+        a_name,
+        "the acceptance",
+        |ev| matches!(ev, Event::Accepted { root: r } if *r == broot),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn push(
+    seen: &mut Seen,
+    ada: &mut Client,
+    ben: &mut Client,
+    keys: &str,
+    args: &[String],
+) -> R<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let need = |n: &str| flag(args, n).ok_or_else(|| format!("missing {n}"));
+    let bytes = std::fs::read(keys).map_err(|x| format!("{keys}: {x}"))?;
+    let one = 4 + 56 + 1568;
+    let relay = enclave_push_relay::RelayPublic::decode(bytes.get(..one).ok_or("short key file")?)
+        .map_err(e)?;
+    let listener = tokio::net::TcpListener::bind(need("--push-listen")?)
+        .await
+        .map_err(e)?;
+    let endpoint = need("--push-endpoint")?;
+    ben.register_push(
+        &relay,
+        enclave_push_relay::Platform::UnifiedPush,
+        endpoint.as_bytes(),
+    )
+    .await
+    .map_err(|x| format!("ben: register push: {x}"))?;
+    ada.send_text(&ben.root(), "wake up").await.map_err(e)?;
+    // Wakes leave the relay in 60-second windows.
+    let (mut s, _) = tokio::time::timeout(PATIENCE, listener.accept())
+        .await
+        .map_err(|_| "no wake reached the push endpoint".to_string())?
+        .map_err(e)?;
+    let mut buf = vec![0u8; 1024];
+    let n = s.read(&mut buf).await.map_err(e)?;
+    if !buf[..n].starts_with(b"POST ") {
+        return Err("the push endpoint got something other than a wake".into());
+    }
+    s.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .map_err(e)?;
+    eprintln!("  ben: woken by push");
+    seen.until(
+        ben,
+        "ben",
+        "the message that woke him",
+        text_from(ada.root(), "wake up"),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn after_restart(w: &World) -> R<()> {
+    let mut seen = Seen::default();
+    let mut ada = w.open(0)?;
+    let mut ben = w.open(1)?;
+    let mut cy = w.open(2)?;
+    let gid: [u8; 32] = std::fs::read(w.state.join("group"))
+        .map_err(e)?
+        .try_into()
+        .map_err(|_| "bad group file".to_string())?;
+
+    eprintln!("7. after B restarted");
+    seen.until(
+        &mut ben,
+        "ben",
+        "the message B kept across the restart",
+        text_from(ada.root(), "kept across the restart"),
+    )
+    .await?;
+    ben.send_text(&ada.root(), "B is back").await.map_err(e)?;
+    seen.until(
+        &mut ada,
+        "ada",
+        "Ben's answer",
+        text_from(ben.root(), "B is back"),
+    )
+    .await?;
+    let card = cy
+        .find_username(&format!("@ben@{}", w.domains[1]))
+        .await
+        .map_err(|x| format!("cy: find ben after the restart: {x}"))?;
+    if card.root != ben.root() {
+        return Err("Ben's username moved".into());
+    }
+    ben.send_group_text(&gid, "group after restart")
+        .await
+        .map_err(e)?;
+    for (c, who) in [(&mut ada, "ada"), (&mut cy, "cy")] {
+        seen.until(
+            c,
+            who,
+            "the group message",
+            group_text("group after restart"),
+        )
+        .await?;
+    }
+    eprintln!("8. no split views");
+    seen.no_split_views()
+}

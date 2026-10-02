@@ -32,6 +32,7 @@ members = [
     "crates/enclave-tls",
     "crates/enclave-witness",
     "crates/enclave-front",
+    "crates/enclave-e2e",
     "crates/enclave-fuzz",
     "xtask",
 ]

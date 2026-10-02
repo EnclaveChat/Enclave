@@ -1,0 +1,11 @@
+# enclave-witness (docs/12-servers.md §3.3). OPERATOR, FAMILY and the
+# public URL come from .env (ENCLAVE_WITNESS__* in compose.yml). Plain HTTP
+# on the internal network: the front serves it at https://DOMAIN/witness/v1/.
+
+[witness]
+listen = "0.0.0.0:7446"
+keys_dir = "/var/lib/enclave/witness-keys"
+data_dir = "/var/lib/enclave/witness"
+# Which logs to witness: the foundation's list, checked with its key.
+foundation = "/etc/enclave/foundation/foundation.pub"
+server_list = "/etc/enclave/foundation/server-list.bin"

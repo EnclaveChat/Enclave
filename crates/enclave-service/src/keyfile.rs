@@ -21,7 +21,8 @@ pub enum KeyError {
     Crypto,
 }
 
-/// Create `dir` (and its parents), readable by the owner only.
+/// Create `dir` (and its parents), readable by the owner only. A directory
+/// that already exists (a container volume, say) is made owner-only too.
 pub fn create_key_dir(dir: &Path) -> Result<(), KeyError> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
@@ -31,7 +32,14 @@ pub fn create_key_dir(dir: &Path) -> Result<(), KeyError> {
         b.mode(0o700);
     }
     b.create(dir)
-        .map_err(|e| KeyError::Io(dir.to_path_buf(), e))
+        .map_err(|e| KeyError::Io(dir.to_path_buf(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| KeyError::Io(dir.to_path_buf(), e))?;
+    }
+    Ok(())
 }
 
 /// Write `bytes` to `path` atomically (temporary file, fsync, rename, fsync

@@ -3,11 +3,20 @@
 //!
 //! ```text
 //! enclave-admin foundation-keygen SECRET_OUT PUBLIC_OUT
-//! enclave-admin server-list build SPEC.toml --key SECRET --out LIST [--now UNIX]
+//! enclave-admin server-list build SPEC.toml --out FILE [--key SECRET] [--now UNIX]
+//! enclave-admin server-list sign UNSIGNED --key SECRET --out LIST [--now UNIX]
 //! enclave-admin server-list verify LIST --foundation PUBLIC [--held-seq N] [--now UNIX]
 //! enclave-admin kt-pins LIST --foundation PUBLIC --out PINS [--now UNIX]
 //! enclave-admin descriptor verify server|witness|relay FILE [--id HEX] [--now UNIX]
+//! enclave-admin descriptor fetch DOMAIN --out FILE [--id HEX] [--ca PEM] [--now UNIX]
 //! ```
+//!
+//! `build` without `--key` writes the list unsigned: the foundation key
+//! can then stay on an offline machine, where `sign` shows what it is about
+//! to sign, signs, and checks the result. `descriptor fetch` gets a
+//! server's descriptor from `https://DOMAIN/.well-known/enclave` over the
+//! Enclave TLS profile (`--ca` adds a root, for a test or private CA) and
+//! verifies it before writing it.
 //!
 //! The list is built from the signed descriptors operators submit: each is
 //! verified (signature, validity, and for servers every key certificate)
@@ -116,10 +125,12 @@ fn main() -> ExitCode {
     let result = match words.as_slice() {
         ["foundation-keygen", ..] => foundation_keygen(&args),
         ["server-list", "build", ..] => build(&args),
+        ["server-list", "sign", ..] => sign(&args),
         ["server-list", "verify", ..] => verify(&args),
         ["kt-pins", ..] => kt_pins(&args),
         ["descriptor", "verify", ..] => verify_descriptor(&args),
-        _ => Err("usage: enclave-admin foundation-keygen | server-list build|verify | kt-pins | descriptor verify (see the module docs)".into()),
+        ["descriptor", "fetch", ..] => fetch_descriptor(&args),
+        _ => Err("usage: enclave-admin foundation-keygen | server-list build|sign|verify | kt-pins | descriptor verify|fetch (see the module docs)".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -161,10 +172,9 @@ fn build(args: &[String]) -> Result<(), String> {
         std::fs::read_to_string(&spec_path).map_err(|e| format!("{}: {e}", spec_path.display()))?;
     let spec: Spec = toml::from_str(&text).map_err(|e| format!("{}: {e}", spec_path.display()))?;
     let now = now_or(args)?;
-    let key = FoundationKey::from_bytes(
-        &keyfile::read_secret(Path::new(&need(args, "--key")?)).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("foundation key: {e}"))?;
+    let key = flag(args, "--key")
+        .map(|k| load_key(Path::new(&k)))
+        .transpose()?;
     if spec.valid_days == 0 || spec.valid_days > 90 {
         return Err("valid_days must be 1 to 90".into());
     }
@@ -245,12 +255,32 @@ fn build(args: &[String]) -> Result<(), String> {
         relays,
         push,
     };
-    let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
-    let signed = list.sign(&key, &mut rng).map_err(|e| e.to_string())?;
-    // Check what was written verifies, before anyone ships it.
-    ServerList::verify(&signed, &key.public(), now, 0).map_err(|e| e.to_string())?;
     let out = need(args, "--out")?;
-    std::fs::write(&out, &signed).map_err(|e| format!("{out}: {e}"))?;
+    match key {
+        Some(key) => write_signed(&list, &key, now, &out),
+        None => {
+            let b = list.encode_unsigned().map_err(|e| e.to_string())?;
+            std::fs::write(&out, b).map_err(|e| format!("{out}: {e}"))?;
+            eprintln!(
+                "unsigned server list seq {} → {out}; sign it with `server-list sign` where the foundation key is",
+                list.seq
+            );
+            Ok(())
+        }
+    }
+}
+
+fn load_key(path: &Path) -> Result<FoundationKey, String> {
+    FoundationKey::from_bytes(&keyfile::read_secret(path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("foundation key: {e}"))
+}
+
+/// Sign, check that what is written verifies, write.
+fn write_signed(list: &ServerList, key: &FoundationKey, now: u64, out: &str) -> Result<(), String> {
+    let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
+    let signed = list.sign(key, &mut rng).map_err(|e| e.to_string())?;
+    ServerList::verify(&signed, &key.public(), now, 0).map_err(|e| e.to_string())?;
+    std::fs::write(out, &signed).map_err(|e| format!("{out}: {e}"))?;
     eprintln!(
         "server list seq {} with {} servers, {} witnesses, {} relays, {} push relays → {out}",
         list.seq,
@@ -260,6 +290,97 @@ fn build(args: &[String]) -> Result<(), String> {
         list.push.len()
     );
     Ok(())
+}
+
+/// Sign a list built elsewhere, after showing what it holds.
+fn sign(args: &[String]) -> Result<(), String> {
+    let path = positional(args, 2, "UNSIGNED")?;
+    let list = ServerList::decode_unsigned(&read(Path::new(&path))?)
+        .map_err(|e| format!("{path}: {e}"))?;
+    let now = now_or(args)?;
+    if list.expires <= now {
+        return Err(format!("{path}: already expired"));
+    }
+    print_list(&list);
+    let key = load_key(Path::new(&need(args, "--key")?))?;
+    write_signed(&list, &key, now, &need(args, "--out")?)
+}
+
+/// Fetch a server's descriptor from its front and check it.
+fn fetch_descriptor(args: &[String]) -> Result<(), String> {
+    let domain = positional(args, 2, "DOMAIN")?;
+    let base = if domain.starts_with("https://") {
+        domain.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{domain}")
+    };
+    let ca = flag(args, "--ca").map(PathBuf::from);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = rt.block_on(get_https(
+        &format!("{base}/.well-known/enclave"),
+        ca.as_deref(),
+    ))?;
+    let d = ServerDescriptor::decode(&bytes).map_err(|e| format!("{base}: {e}"))?;
+    d.verify(now_or(args)?)
+        .map_err(|e| format!("{base}: {e}"))?;
+    if let Some(want) = flag(args, "--id")
+        && unhex(&want).as_deref() != Some(&d.id()[..])
+    {
+        return Err(format!("{base} serves {}, not {want}", hex(&d.id())));
+    }
+    let out = need(args, "--out")?;
+    std::fs::write(&out, &bytes).map_err(|e| format!("{out}: {e}"))?;
+    println!(
+        "server {} {} ({}, {}) → {out}",
+        hex(&d.id()),
+        d.domain,
+        d.operator,
+        d.family
+    );
+    Ok(())
+}
+
+/// GET `url` over the Enclave TLS profile (the public web's roots, plus
+/// `ca`).
+async fn get_https(url: &str, ca: Option<&Path>) -> Result<Vec<u8>, String> {
+    use http_body_util::BodyExt;
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(p) = ca {
+        for c in CertificateDer::pem_slice_iter(&read(p)?) {
+            roots
+                .add(c.map_err(|e| format!("{}: {e}", p.display()))?)
+                .map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+    }
+    let mut tls = enclave_tls::client_config(roots).map_err(|e| e.to_string())?;
+    tls.alpn_protocols.clear();
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_only()
+        .enable_http1()
+        .build();
+    let client: hyper_util::client::legacy::Client<_, http_body_util::Empty<bytes::Bytes>> =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(connector);
+    let uri: hyper::Uri = url.parse().map_err(|e| format!("{url}: {e}"))?;
+    let res = tokio::time::timeout(std::time::Duration::from_secs(30), client.get(uri))
+        .await
+        .map_err(|_| format!("{url}: timeout"))?
+        .map_err(|e| format!("{url}: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("{url}: HTTP {}", res.status()));
+    }
+    let body = http_body_util::Limited::new(res.into_body(), 1 << 20)
+        .collect()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?;
+    Ok(body.to_bytes().to_vec())
 }
 
 fn load_list(args: &[String]) -> Result<ServerList, String> {
@@ -280,7 +401,11 @@ fn load_list(args: &[String]) -> Result<ServerList, String> {
 }
 
 fn verify(args: &[String]) -> Result<(), String> {
-    let l = load_list(args)?;
+    print_list(&load_list(args)?);
+    Ok(())
+}
+
+fn print_list(l: &ServerList) {
     println!(
         "seq {}  issued {}  expires {}  witness threshold {}",
         l.seq, l.issued, l.expires, l.witness_threshold
@@ -317,7 +442,6 @@ fn verify(args: &[String]) -> Result<(), String> {
     for p in &l.push {
         println!("push    {}  {} keys", p.nym_address, p.keys.len());
     }
-    Ok(())
 }
 
 fn kt_pins(args: &[String]) -> Result<(), String> {

@@ -1,0 +1,9 @@
+# enclave-relay, the call relay (docs/12-servers.md §5). OPERATOR, FAMILY
+# and RELAY_PUBLIC_ADDR come from .env (ENCLAVE_RELAY__* in compose.yml).
+
+[relay]
+listen = "0.0.0.0:51820"
+keys_dir = "/var/lib/enclave/relay-keys"
+data_dir = "/var/lib/enclave/relay"
+# Other relays' descriptors (hex, from `enclave-relay show-descriptor`).
+peers = []

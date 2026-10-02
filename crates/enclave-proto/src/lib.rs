@@ -15,5 +15,6 @@ pub mod manifest;
 pub mod migration;
 pub mod ratchet;
 pub mod recovery;
+pub mod server_move;
 
 pub use error::{ProtoError, Result};

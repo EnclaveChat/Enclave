@@ -1,0 +1,37 @@
+# enclave-server (docs/12-servers.md §1.1). DOMAIN, OPERATOR and FAMILY
+# come from .env (ENCLAVE_SERVER__* in compose.yml); anything here can be
+# overridden the same way.
+
+[server]
+# The stack's internal network only: the Nym ingress (or, in development,
+# compose.dev.yml) reaches it here.
+listen = "0.0.0.0:7443"
+data_dir = "/var/lib/enclave/server"
+keys_dir = "/var/lib/enclave/keys"
+public_dir = "/var/lib/enclave/public"
+# The foundation's signed list, served to clients as is.
+server_list = "/etc/enclave/foundation/server-list.bin"
+# This server's Nym address, once the ingress has one (milestone N1).
+nym_address = ""
+
+[policy]
+# Proof-of-work efforts (Equi-X work factor) and quotas. The defaults:
+# effort_request = 64
+# effort_claim = 8
+# effort_blob = 1
+# effort_username = 64
+# inbox_quota = 5000
+# request_quota = 100
+# token_quota = 4096
+# ttl_days = 30
+
+[kt]
+enabled = true
+# Other operators' witnesses that cosign this log (the foundation's list
+# names them), for example ["https://b.example", "https://c.example"].
+witnesses = []
+
+[backup]
+dir = "/var/lib/enclave/backups"
+interval_hours = 24
+keep = 7

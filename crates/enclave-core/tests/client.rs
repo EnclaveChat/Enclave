@@ -2371,3 +2371,156 @@ async fn change_recovery_words() {
         .unwrap();
     assert!(dee.add_contact(&old_card, "hi").await.is_err());
 }
+
+/// Link a second device to `a` (on server `home`).
+#[allow(clippy::panic)]
+async fn link_device(a: &mut Client, net: &LocalTransport, home: [u8; 16]) -> Client {
+    let mut n = enclave_core::LinkingDevice::start(memory(), Arc::new(net.clone()), home)
+        .await
+        .unwrap();
+    let offer = a.link_prepare(&n.code()).await.unwrap();
+    let enclave_core::LinkProgress::Words(words) = n.poll().await.unwrap() else {
+        panic!("words")
+    };
+    let right = offer.choices.iter().position(|c| *c == words).unwrap();
+    a.link_confirm(offer, right).await.unwrap();
+    assert_eq!(n.poll().await.unwrap(), enclave_core::LinkProgress::Ready);
+    n.finish().await.unwrap()
+}
+
+fn texts(c: &Client, root: &[u8; 64]) -> Vec<String> {
+    c.messages(root)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect()
+}
+
+/// `docs/12-servers.md` §4.4: Ada moves from S1 to S3. Her other device
+/// follows; Ben (a contact) is told in his session and writes to S3 with
+/// fresh tokens; a message already on its way to S1 still arrives; Cy,
+/// holding her card from before the move, and Dee, holding an invite link
+/// from before it, reach her on S3 through the record she left on S1; a
+/// backup from before the move is refused; the old server keeps no say.
+#[tokio::test(flavor = "multi_thread")]
+async fn move_to_another_server() {
+    const S3: [u8; 16] = [3; 16];
+    let net = network();
+    net.add_server(enclave_server::Config {
+        id: S3,
+        effort_request: 4,
+        effort_claim: 1,
+        effort_blob: 1,
+        effort_username: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let (mut a, words) = Client::create(memory(), Arc::new(net.clone()), S1, "Ada")
+        .await
+        .unwrap();
+    let (mut b, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Ben")
+        .await
+        .unwrap();
+    let (mut cy, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Cyrus")
+        .await
+        .unwrap();
+    let (mut dee, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Dee")
+        .await
+        .unwrap();
+    connect(&mut a, &mut b).await;
+    let mut a2 = link_device(&mut a, &net, S1).await;
+    settle(&mut [&mut a, &mut a2, &mut b], 2).await;
+    let old_card = a.card();
+    let old_link = a.create_invite(1).await.unwrap();
+    let old_backup = a.export_backup().unwrap();
+
+    // Only the device with the recovery words can move the account.
+    assert!(matches!(
+        a2.move_home(S3).await,
+        Err(CoreError::NotAccepted)
+    ));
+    a.move_home(S3).await.unwrap();
+    assert!(!a.move_pending(), "nothing left to do");
+    assert_eq!(a.card().server, S3);
+    assert_ne!(a.card().request_inbox, old_card.request_inbox);
+
+    // Ada's other device switches when it reads her note on S1.
+    a2.sync().await.unwrap();
+    assert_eq!(a2.card().server, S3);
+    assert_eq!(a2.card().request_inbox, a.card().request_inbox);
+
+    // Ben wrote before reading her notice: it went to S1, and arrives.
+    b.send_text(&a.root(), "on its way to S1").await.unwrap();
+    a.sync().await.unwrap();
+    assert!(texts(&a, &b.root()).contains(&"on its way to S1".to_string()));
+
+    // Ben reads the notice: from now on he writes to S3.
+    b.sync().await.unwrap();
+    let ada = b
+        .contacts()
+        .into_iter()
+        .find(|c| c.root == a.root())
+        .unwrap();
+    assert_eq!(
+        (ada.server, ada.request_inbox),
+        (S3, a.card().request_inbox)
+    );
+    b.send_text(&a.root(), "to S3").await.unwrap();
+    settle(&mut [&mut a, &mut a2], 1).await;
+    assert!(texts(&a, &b.root()).contains(&"to S3".to_string()));
+    assert!(texts(&a2, &b.root()).contains(&"to S3".to_string()));
+    a.send_text(&b.root(), "welcome to S3").await.unwrap();
+    b.sync().await.unwrap();
+    assert!(texts(&b, &a.root()).contains(&"welcome to S3".to_string()));
+
+    // Cy has the card from before the move.
+    cy.add_contact(&old_card, "found you").await.unwrap();
+    let ev = a.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { text, .. } if text == "found you")),
+        "{ev:?}"
+    );
+    let cy_view = cy
+        .contacts()
+        .into_iter()
+        .find(|c| c.root == a.root())
+        .unwrap();
+    assert_eq!(cy_view.server, S3);
+    a.accept(&cy.root()).await.unwrap();
+    cy.sync().await.unwrap();
+    cy.send_text(&a.root(), "it works").await.unwrap();
+    a.sync().await.unwrap();
+    assert!(texts(&a, &cy.root()).contains(&"it works".to_string()));
+    // Her second device published its prekeys on S3: Cy reached it too.
+    a2.sync().await.unwrap();
+    assert!(texts(&a2, &cy.root()).contains(&"it works".to_string()));
+
+    // Dee has an invite link from before the move.
+    let card = ContactCard::from_link(&old_link).unwrap();
+    assert_eq!(card.server, S1);
+    dee.add_contact(&card, "via the old link").await.unwrap();
+    let ev = a.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { text, .. } if text == "via the old link")),
+        "{ev:?}"
+    );
+
+    // A backup from before the move names the inboxes she left.
+    assert!(matches!(
+        Client::restore(
+            &words.join(" "),
+            &old_backup,
+            memory(),
+            Arc::new(net.clone())
+        )
+        .await,
+        Err(CoreError::BackupBeforeMove)
+    ));
+    let fresh = a.export_backup().unwrap();
+    let restored = Client::restore(&words.join(" "), &fresh, memory(), Arc::new(net.clone()))
+        .await
+        .unwrap();
+    assert_eq!(restored.card().server, S3);
+}

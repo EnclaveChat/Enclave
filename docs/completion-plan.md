@@ -178,7 +178,7 @@ Server:
 - A zero-length request returns `KeyCert(cur)‖KeyCert(next)`.
 - `DirKind::Descriptor=7` and `ServerList=8`.
 - Descriptor hash committed to KT.
-- **Moved records** for server migration (label `proto/moved`; closes `12-servers.md` §4) and **KT tombstones** (`proto/tombstone`).
+- **Moved records** for server migration (label `proto/moved`; closes `12-servers.md` §4). KT tombstones (`proto/tombstone`) go with account deletion and operator tombstones (S5, P5).
 
 Client:
 - `enclave-core` gets a `servers` table, and `Transport::server_key` verifies the KeyCert.
@@ -346,7 +346,7 @@ App:
 - `rfd` file picker (portal backend on Linux).
 - Window icon.
 - **About screen** with `AboutSlint` (PC-80) and a licences view from `cargo xtask licenses` (cargo-about).
-- **Onboarding server picker** from the server list.
+- **Onboarding server picker** from the server list, and **Settings → Move to another server** (`Client::move_home`, progress from `move_pending`).
 - **Camera QR scanning on desktop** via `nokhwa` + `rqrr`, replacing the pasted codes (`03` §7).
 - **Seal animation and haptics** (`17` §4).
 

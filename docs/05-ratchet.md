@@ -341,7 +341,7 @@ and a signature would occupy 4,741 B of the 9,160 B content region. Mode switche
 
 ## 11. Gaps and control messages (not yet implemented)
 
-Gap notices ("A message from Sam may not have arrived."), "Delivered late" marks, held units, and the v1 control messages (`SessionSetup`, `TokenRefill`, `DeviceListChanged`, `ForcePQStep`, `ModeChange`, `Reroot`, `Receipt`, `Typing` (since built as content kind 23, `16-features.md` §7), `KTGossip`, `Moved`, `Closed`) are specified for M5–M6 and are not in the code. Content is opaque bytes to `enclave-proto`.
+Gap notices ("A message from Sam may not have arrived."), "Delivered late" marks, held units, and the v1 control messages (`SessionSetup`, `TokenRefill`, `DeviceListChanged`, `ForcePQStep`, `ModeChange`, `Reroot`, `Receipt`, `Typing` (since built as content kind 23, `16-features.md` §7), `KTGossip`, `Moved` (since built as content kinds 25 and 26, `12-servers.md` §4.4), `Closed`) are specified for M5–M6 and are not in the code. Content is opaque bytes to `enclave-proto`.
 
 ## 12. Errors
 

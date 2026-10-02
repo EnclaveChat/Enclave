@@ -75,6 +75,10 @@ pub enum CoreError {
     /// A link or QR code could not be used.
     #[error("link: {0}")]
     Link(#[from] LinkError),
+    /// The backup was taken before the account moved to another server:
+    /// it holds the old inboxes only. Restore a newer one.
+    #[error("this backup is from before the account moved to another server")]
+    BackupBeforeMove,
     /// A username could not be claimed or found.
     #[error("username: {0}")]
     Username(#[from] UsernameError),

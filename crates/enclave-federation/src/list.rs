@@ -310,6 +310,21 @@ impl ServerList {
         Ok(w.finish())
     }
 
+    /// The unsigned encoding (what the foundation key signs), so a list
+    /// can be built on one machine and signed on another, offline one.
+    pub fn encode_unsigned(&self) -> Result<Vec<u8>> {
+        self.body()
+    }
+
+    /// Decode an unsigned list ([`Self::encode_unsigned`]).
+    pub fn decode_unsigned(b: &[u8]) -> Result<Self> {
+        let (list, body_len) = Self::read(b)?;
+        if body_len != b.len() {
+            return Err(FedError::Malformed);
+        }
+        Ok(list)
+    }
+
     /// Sign the list.
     pub fn sign(&self, key: &FoundationKey, rng: &mut HedgedRng) -> Result<Vec<u8>> {
         if self.expires <= self.issued {

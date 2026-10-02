@@ -155,3 +155,75 @@ impl WitnessClient for HttpWitness {
         }
     }
 }
+
+/// A witness reached over HTTPS, connected on first use and again after a
+/// failed connection: a server starts whether or not its witnesses are up,
+/// and heads get their cosignatures once they are.
+pub struct LazyWitness {
+    base: String,
+    extra_ca: Option<std::path::PathBuf>,
+    inner: Option<HttpWitness>,
+}
+
+impl LazyWitness {
+    /// A witness at `base`, trusting `extra_ca` besides the public roots.
+    pub fn new(base: &str, extra_ca: Option<&std::path::Path>) -> Self {
+        Self {
+            base: base.to_string(),
+            extra_ca: extra_ca.map(std::path::Path::to_path_buf),
+            inner: None,
+        }
+    }
+
+    /// The connected witness, connecting (and checking its descriptor) if
+    /// needed.
+    async fn get(&mut self, now: u64) -> Result<&mut HttpWitness, String> {
+        if self.inner.is_none() {
+            let w = HttpWitness::connect(&self.base, self.extra_ca.as_deref(), now).await?;
+            self.inner = Some(w);
+        }
+        self.inner
+            .as_mut()
+            .ok_or_else(|| "not connected".to_string())
+    }
+
+    /// The witness's descriptor, once connected.
+    pub fn descriptor(&self) -> Option<&WitnessDescriptor> {
+        self.inner.as_ref().and_then(HttpWitness::descriptor)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[async_trait::async_trait]
+impl WitnessClient for LazyWitness {
+    /// All zeros until connected (the id comes from its descriptor).
+    fn witness_id(&self) -> [u8; 16] {
+        self.inner.as_ref().map_or([0; 16], |w| w.id)
+    }
+
+    async fn last_epoch(&mut self, server: &[u8; 16]) -> Option<u64> {
+        let now = unix_now();
+        self.get(now).await.ok()?.last_epoch(server).await
+    }
+
+    async fn cosign(
+        &mut self,
+        server_key: &CompositePublic,
+        heads: &[SignedHead],
+        proof: Option<AppendOnlyProof>,
+        now: u64,
+    ) -> Result<Cosignature, KtError> {
+        let base = self.base.clone();
+        let w = self
+            .get(now)
+            .await
+            .map_err(|e| KtError::Directory(format!("witness {base}: {e}")))?;
+        w.cosign(server_key, heads, proof, now).await
+    }
+}

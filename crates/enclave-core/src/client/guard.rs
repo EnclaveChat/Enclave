@@ -142,6 +142,18 @@ impl Client {
         version: u64,
         now: u64,
     ) -> Result<()> {
+        let server = self.profile.server;
+        self.cosign_own_on(&server, signed, version, now).await
+    }
+
+    /// [`Self::cosign_own`], posted to `server`.
+    pub(crate) async fn cosign_own_on(
+        &mut self,
+        server: &[u8; 16],
+        signed: &SignedManifest,
+        version: u64,
+        now: u64,
+    ) -> Result<()> {
         let root = self.account.root_public.0;
         let a = Attestation::sign(
             Verdict::Cosign,
@@ -151,10 +163,9 @@ impl Client {
             &self.device,
             &mut self.rng,
         )?;
-        let server = self.profile.server;
         self.rpc
             .dir_put(
-                &server,
+                server,
                 DirKind::Attest,
                 manifest_key(&root),
                 [0; 32],

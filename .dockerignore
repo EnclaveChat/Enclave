@@ -1,0 +1,6 @@
+# Build context for ops/docker/Dockerfile: sources and Cargo.lock only.
+target/
+.git/
+**/*.redb
+docs/
+formal/

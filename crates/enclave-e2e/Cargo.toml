@@ -1,0 +1,23 @@
+[package]
+name = "enclave-e2e"
+description = "End-to-end test driver: headless Enclave clients against real, separately run server stacks (the federation CI job)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-core = { path = "../enclave-core" }
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-federation = { path = "../enclave-federation" }
+enclave-net = { path = "../enclave-net" }
+enclave-push-relay = { path = "../enclave-push-relay" }
+enclave-service = { path = "../enclave-service" }
+enclave-store = { path = "../enclave-store" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }

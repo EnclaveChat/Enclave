@@ -210,11 +210,143 @@ fn build_verify_and_pin_a_server_list() {
     ]);
     assert!(!ok && err.contains("threshold"), "{err}");
 
+    // Built where the descriptors are, signed where the key is: the
+    // unsigned list carries no signature, and signing it gives a list that
+    // verifies like one built with the key.
+    std::fs::write(dir.join("spec.toml"), spec(7, 2, "a.bin")).unwrap();
+    let (ok, _, err) = admin(&[
+        "server-list",
+        "build",
+        &p("spec.toml"),
+        "--out",
+        &p("unsigned.bin"),
+    ]);
+    assert!(ok && err.contains("unsigned"), "{err}");
+    let (unsigned_verifies, _, _) = admin(&[
+        "server-list",
+        "verify",
+        &p("unsigned.bin"),
+        "--foundation",
+        &p("foundation.pub"),
+    ]);
+    assert!(!unsigned_verifies);
+    let (ok, out, err) = admin(&[
+        "server-list",
+        "sign",
+        &p("unsigned.bin"),
+        "--key",
+        &p("foundation.key"),
+        "--out",
+        &p("list7.bin"),
+    ]);
+    assert!(ok, "{err}");
+    assert!(out.contains("a.example"), "shows what it signs: {out}");
+    let list7 = ServerList::verify(
+        &std::fs::read(dir.join("list7.bin")).unwrap(),
+        &public,
+        NOW,
+        5,
+    )
+    .unwrap();
+    assert_eq!(list7.seq, 7);
+    // A signed list isn't something to sign again.
+    let (ok, _, _) = admin(&[
+        "server-list",
+        "sign",
+        &p("list7.bin"),
+        "--key",
+        &p("foundation.key"),
+        "--out",
+        &p("list8.bin"),
+    ]);
+    assert!(!ok);
+
     // descriptor verify, with the expected id.
     let hex: String = a_id.iter().map(|b| format!("{b:02x}")).collect();
     let (ok, out, _) = admin(&["descriptor", "verify", "server", &p("a.bin"), "--id", &hex]);
     assert!(ok && out.contains("a.example"), "{out}");
     let (ok, _, _) = admin(&["descriptor", "verify", "server", &p("b.bin"), "--id", &hex]);
     assert!(!ok, "wrong id refused");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `descriptor fetch` from a front over the Enclave TLS profile: the
+/// descriptor is checked (and its id, if given) before it is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_a_descriptor_from_a_front() {
+    let dir = std::env::temp_dir().join(format!("enclave-admin-fetch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |n: &str| dir.join(n).display().to_string();
+    let mut rng = HedgedRng::new().unwrap();
+    let (d, id) = server_descriptor("a.example", &mut rng);
+    write(&dir, "descriptor.bin", &d.encode());
+
+    // A front for 127.0.0.1 under a test CA.
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca.self_signed(&ca_key).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])
+        .unwrap()
+        .signed_by(&key, &ca, &ca_key)
+        .unwrap();
+    write(&dir, "ca.pem", ca.pem().as_bytes());
+    let certs = std::sync::Arc::new(enclave_front::CertStore::default());
+    certs.set_pem(&leaf.pem(), &key.serialize_pem()).unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("https://{}", l.local_addr().unwrap());
+    let site = enclave_front::Site::new(dir.clone(), None).router();
+    tokio::spawn(enclave_front::serve_https(l, site, certs));
+
+    let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    let run = |args: Vec<String>| {
+        tokio::task::spawn_blocking(move || {
+            let a: Vec<&str> = args.iter().map(String::as_str).collect();
+            admin(&a)
+        })
+    };
+    let fetch = |out: &str, id: &str| {
+        vec![
+            "descriptor".into(),
+            "fetch".into(),
+            base.clone(),
+            "--ca".into(),
+            p("ca.pem"),
+            "--out".into(),
+            p(out),
+            "--id".into(),
+            id.into(),
+        ]
+    };
+    let (ok, out, err) = run(fetch("fetched.bin", &hex)).await.unwrap();
+    assert!(ok, "{err}");
+    assert!(out.contains("a.example"), "{out}");
+    assert_eq!(std::fs::read(dir.join("fetched.bin")).unwrap(), d.encode());
+
+    // Another id: refused, nothing written.
+    let (ok, _, err) = run(fetch("other.bin", &"00".repeat(16))).await.unwrap();
+    assert!(!ok && err.contains("not"), "{err}");
+    assert!(!dir.join("other.bin").exists());
+    // A damaged descriptor: refused.
+    let mut bad = d.encode();
+    let n = bad.len();
+    bad[n / 2] ^= 1;
+    write(&dir, "descriptor.bin", &bad);
+    let (ok, _, _) = run(fetch("bad.bin", &hex)).await.unwrap();
+    assert!(!ok);
+    assert!(!dir.join("bad.bin").exists());
+    // Without the test CA, the front isn't trusted.
+    let (ok, _, err) = run(vec![
+        "descriptor".into(),
+        "fetch".into(),
+        base.clone(),
+        "--out".into(),
+        p("untrusted.bin"),
+    ])
+    .await
+    .unwrap();
+    assert!(!ok, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,0 +1,7 @@
+# enclave-push-relay (docs/10-push.md), for operators who run one for the
+# foundation's list (`docker compose --profile push up -d`).
+
+[relay]
+listen = "0.0.0.0:7445"
+keys_dir = "/var/lib/enclave/push-keys"
+public_dir = "/var/lib/enclave/public"

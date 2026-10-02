@@ -112,6 +112,7 @@ mod location;
 mod meet;
 mod messages;
 mod migrate;
+mod moves;
 mod notes;
 mod pins;
 mod polls;
@@ -737,6 +738,8 @@ impl Client {
         if self.contacts.contains_key(&card.root) {
             return Ok(());
         }
+        // An old card (or invite link): the account may have moved since.
+        let card = &self.follow_moves(card).await?;
         let now = self.now();
         let server = card.server;
         let (peer_manifest, vault) = self.fetch_peer(card, now).await?;
@@ -1109,6 +1112,7 @@ impl Client {
             self.save_profile()?;
         }
         events.append(&mut self.process_migrations(now).await?);
+        events.append(&mut self.home_upkeep(now).await?);
         Ok(events)
     }
 
@@ -1116,6 +1120,13 @@ impl Client {
     /// expiry, invites.
     async fn sync_upkeep(&mut self, now: u64) -> Result<Vec<Event>> {
         let mut events = Vec::new();
+        // First: until it has switched, our own manifest check would look
+        // at the home we are leaving.
+        if let Err(e) = self.push_home_move(now).await
+            && matches!(e, CoreError::Net(_))
+        {
+            return Err(e);
+        }
         events.append(&mut self.refresh_manifests(now).await?);
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
@@ -1511,6 +1522,10 @@ impl Client {
                     self.queue_migration(&root, &dev, &b)?;
                     Ok(Vec::new())
                 }
+                Content::HomeMoved { .. } => {
+                    self.queue_home_moved(&content)?;
+                    Ok(Vec::new())
+                }
                 _ => Ok(Vec::new()),
             };
         }
@@ -1575,6 +1590,19 @@ impl Client {
             Content::Migration(b) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);
                 self.queue_migration(&root, &dev, &b)?;
+            }
+            Content::ServerMoved {
+                server,
+                inbox,
+                request_inbox,
+                vault_locator,
+                tokens,
+            } => {
+                self.on_server_moved(
+                    &mut c,
+                    (&server, &inbox, &request_inbox, &vault_locator),
+                    tokens,
+                );
             }
             Content::RecoveryShare(share) => {
                 c.received_since_refill = c.received_since_refill.saturating_add(1);

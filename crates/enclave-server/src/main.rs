@@ -7,6 +7,7 @@
 //! enclave-server backup DIR  [--config FILE]   write a consistent snapshot now
 //! enclave-server restore SNAPSHOT [--config FILE]   put a snapshot back (server stopped)
 //! enclave-server descriptor  [--config FILE]   verify and describe the published descriptor
+//! enclave-server descriptor OUT [--config FILE]  sign a descriptor now (for the foundation's list)
 //! enclave-server healthcheck [--config FILE]   exit 0 if the server answers
 //! enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
 //! ```
@@ -62,7 +63,10 @@ fn main() -> ExitCode {
         "show-id" => show_id(&args),
         "backup" => backup_now(&args),
         "restore" => restore(&args),
-        "descriptor" => show_descriptor(&args),
+        "descriptor" => match args.get(1).filter(|a| !a.starts_with("--")) {
+            Some(out) => write_descriptor(&args, out),
+            None => show_descriptor(&args),
+        },
         "healthcheck" => runtime().and_then(|rt| rt.block_on(healthcheck(&args))),
         "dev" => runtime().and_then(|rt| rt.block_on(dev(&args[1.min(args.len())..]))),
         "--help" | "-h" | "help" => {
@@ -304,22 +308,21 @@ async fn run(args: &[String]) -> Result<(), String> {
             return Err("set server.operator (key transparency names the operator)".into());
         }
         let store = KtStore::open(&kt_path(&cfg)).map_err(|e| e.to_string())?;
-        // Witnesses that can't be reached now are skipped: heads get their
-        // cosignatures when enough answer.
+        // Witnesses are connected when first needed and again after a
+        // failure, so the server starts whether or not they are up; heads
+        // get their cosignatures once enough answer.
         let mut witnesses: Vec<Box<dyn enclave_kt::WitnessClient>> = Vec::new();
         let mut pinned = Vec::new();
         for url in &cfg.kt.witnesses {
-            match enclave_witness::HttpWitness::connect(url, cfg.kt.witness_ca.as_deref(), now())
-                .await
-            {
-                Ok(w) => {
-                    if let Some(d) = w.descriptor() {
-                        pinned.push((d.id(), d.key.clone(), d.operator.clone()));
-                    }
-                    witnesses.push(Box::new(w));
-                }
-                Err(e) => eprintln!("witness {url}: {e}"),
+            let mut w = enclave_witness::LazyWitness::new(url, cfg.kt.witness_ca.as_deref());
+            // Try now; reachable witnesses also go into the development
+            // pins file.
+            let _ = enclave_kt::WitnessClient::last_epoch(&mut w, &id).await;
+            match w.descriptor() {
+                Some(d) => pinned.push((d.id(), d.key.clone(), d.operator.clone())),
+                None => eprintln!("witness {url}: not reachable yet; will retry"),
             }
+            witnesses.push(Box::new(w));
         }
         let kt = KtService::open(
             store.clone(),
@@ -414,8 +417,8 @@ async fn run(args: &[String]) -> Result<(), String> {
             }
         });
     }
-    if let Some(fwd) = cfg.push.forward {
-        spawn_push_forwarder(Arc::clone(&server), fwd.to_string());
+    if let Some(fwd) = cfg.push.forward.clone() {
+        spawn_push_forwarder(Arc::clone(&server), fwd);
     }
     let listener = TcpListener::bind(cfg.server.listen)
         .await
@@ -446,8 +449,30 @@ fn publish_descriptor(
         head_key: i.head_key,
         vrf_public: i.vrf_public,
     });
+    let d = sign_descriptor(cfg, keys, kt, t)?;
+    let bytes = d.encode();
+    std::fs::create_dir_all(&cfg.server.public_dir).map_err(|e| e.to_string())?;
+    let path = cfg.server.public_dir.join("descriptor.bin");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &bytes)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    server.set_descriptor(bytes);
+    if let Some(Err(e)) = server.commit_descriptor(d.digest(), t) {
+        eprintln!("committing the descriptor to the log failed: {e}");
+    }
+    Ok(())
+}
+
+/// Today's descriptor: valid two days, today's and tomorrow's request keys.
+fn sign_descriptor(
+    cfg: &FileConfig,
+    keys: &ServerKeys,
+    kt: Option<enclave_federation::KtKeys>,
+    t: u64,
+) -> Result<enclave_federation::ServerDescriptor, String> {
     let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
-    let d = enclave_federation::ServerDescriptor::sign(
+    enclave_federation::ServerDescriptor::sign(
         &keys.identity,
         &cfg.server.domain,
         &cfg.server.operator,
@@ -464,18 +489,38 @@ fn publish_descriptor(
         t + 2 * 86_400,
         &mut rng,
     )
-    .map_err(|e| format!("descriptor: {e}"))?;
-    let bytes = d.encode();
-    std::fs::create_dir_all(&cfg.server.public_dir).map_err(|e| e.to_string())?;
-    let path = cfg.server.public_dir.join("descriptor.bin");
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &bytes)
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    server.set_descriptor(bytes);
-    if let Some(Err(e)) = server.commit_descriptor(d.digest(), t) {
-        eprintln!("committing the descriptor to the log failed: {e}");
-    }
+    .map_err(|e| format!("descriptor: {e}"))
+}
+
+/// `descriptor OUT`: sign a descriptor without running the server (for
+/// the foundation's list, before the first start). The key-transparency
+/// keys are the ones `run` uses: the head key, and the VRF public key
+/// derived from the VRF secret.
+fn write_descriptor(args: &[String], out: &str) -> Result<(), String> {
+    let cfg = load_config(args)?;
+    let mut keys = ServerKeys::load(&cfg.server.keys_dir).map_err(|e| e.to_string())?;
+    keys.chain.advance_to(today()).map_err(|e| e.to_string())?;
+    let kt = if cfg.kt.enabled {
+        let head = keys.kt_head_copy().map_err(|e| e.to_string())?;
+        let head_key = head.public().clone();
+        let vrf = *keys.kt_vrf;
+        let id = keys.id();
+        let vrf_public = runtime()?.block_on(async {
+            enclave_kt::KtLog::new(id, head, vrf)
+                .await
+                .map(|l| l.vrf_public().to_vec())
+                .map_err(|e| e.to_string())
+        })?;
+        Some(enclave_federation::KtKeys {
+            head_key,
+            vrf_public,
+        })
+    } else {
+        None
+    };
+    let d = sign_descriptor(&cfg, &keys, kt, now())?;
+    std::fs::write(out, d.encode()).map_err(|e| format!("{out}: {e}"))?;
+    println!("{}", hex(&d.id()));
     Ok(())
 }
 

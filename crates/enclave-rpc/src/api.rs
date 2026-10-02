@@ -123,6 +123,9 @@ pub enum DirKind {
     /// The foundation's signed server list as this server mirrors it
     /// (`12-servers.md` §4.1); get only, key ignored.
     ServerList = 8,
+    /// Where an account went when it left this server: a root-signed
+    /// `ServerMove` (`12-servers.md` §4.4), keyed like the manifest.
+    Moved = 9,
 }
 
 /// Directory action.
@@ -185,6 +188,7 @@ impl DirRequest {
             6 => DirKind::Migration,
             7 => DirKind::Descriptor,
             8 => DirKind::ServerList,
+            9 => DirKind::Moved,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {

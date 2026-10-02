@@ -179,6 +179,37 @@ pub enum Content {
         /// Pinned (else unpinned).
         on: bool,
     },
+    /// The sender's account moved to another server (`12-servers.md`
+    /// §4.4): where to write from now on, with fresh write tokens (the old
+    /// ones were for the old server).
+    ServerMoved {
+        /// The new home server.
+        server: [u8; 16],
+        /// The account inbox there.
+        inbox: [u8; 32],
+        /// The request inbox there (for their card).
+        request_inbox: [u8; 32],
+        /// The vault key's locator there (for their card).
+        vault_locator: [u8; 32],
+        /// Fresh write tokens for the new inbox.
+        tokens: Vec<Token>,
+    },
+    /// To our other devices: the account moved to another server, with the
+    /// new inboxes and their owner secrets.
+    HomeMoved {
+        /// The new home server.
+        server: [u8; 16],
+        /// Account inbox.
+        inbox: [u8; 32],
+        /// Its owner secret.
+        inbox_owner: [u8; 32],
+        /// Request inbox.
+        request_inbox: [u8; 32],
+        /// Its owner secret.
+        request_owner: [u8; 32],
+        /// The vault key's locator.
+        vault_locator: [u8; 32],
+    },
     /// A copy, for our other devices, of content we sent to `to`.
     SelfCopy {
         /// The conversation it belongs to.
@@ -212,6 +243,8 @@ const K_PQ_STEP: u8 = 21;
 const K_STICKER: u8 = 22;
 const K_TYPING: u8 = 23;
 const K_MIGRATION: u8 = 24;
+const K_SERVER_MOVED: u8 = 25;
+const K_HOME_MOVED: u8 = 26;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -434,6 +467,39 @@ impl Content {
                 }
                 w.u8(K_LOCATION).fixed(id).bytes(location).u32(*expires);
             }
+            Content::ServerMoved {
+                server,
+                inbox,
+                request_inbox,
+                vault_locator,
+                tokens,
+            } => {
+                if tokens.len() > MAX_TOKENS {
+                    return too_large;
+                }
+                w.u8(K_SERVER_MOVED)
+                    .fixed(server)
+                    .fixed(inbox)
+                    .fixed(request_inbox)
+                    .fixed(vault_locator);
+                put_tokens(&mut w, tokens);
+            }
+            Content::HomeMoved {
+                server,
+                inbox,
+                inbox_owner,
+                request_inbox,
+                request_owner,
+                vault_locator,
+            } => {
+                w.u8(K_HOME_MOVED)
+                    .fixed(server)
+                    .fixed(inbox)
+                    .fixed(inbox_owner)
+                    .fixed(request_inbox)
+                    .fixed(request_owner)
+                    .fixed(vault_locator);
+            }
             Content::SelfCopy { to, content } => {
                 if content.len() > MAX_SELF_COPY || content.first() == Some(&K_SELF_COPY) {
                     return too_large;
@@ -523,6 +589,21 @@ impl Content {
                 },
             },
             K_MIGRATION => Content::Migration(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
+            K_SERVER_MOVED => Content::ServerMoved {
+                server: r.array()?,
+                inbox: r.array()?,
+                request_inbox: r.array()?,
+                vault_locator: r.array()?,
+                tokens: get_tokens(&mut r)?,
+            },
+            K_HOME_MOVED => Content::HomeMoved {
+                server: r.array()?,
+                inbox: r.array()?,
+                inbox_owner: r.array()?,
+                request_inbox: r.array()?,
+                request_owner: r.array()?,
+                vault_locator: r.array()?,
+            },
             K_TYPING => Content::Typing {
                 on: match r.u8()? {
                     0 => false,
@@ -626,6 +707,21 @@ mod tests {
             Content::Typing { on: true },
             Content::Typing { on: false },
             Content::Migration(vec![8; 300]),
+            Content::ServerMoved {
+                server: [1; 16],
+                inbox: [2; 32],
+                request_inbox: [3; 32],
+                vault_locator: [4; 32],
+                tokens: vec![[5; 32]; MAX_TOKENS],
+            },
+            Content::HomeMoved {
+                server: [1; 16],
+                inbox: [2; 32],
+                inbox_owner: [3; 32],
+                request_inbox: [4; 32],
+                request_owner: [5; 32],
+                vault_locator: [6; 32],
+            },
             Content::Sticker {
                 id: [6; 16],
                 pack: vec![2; 300],

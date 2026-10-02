@@ -18,6 +18,8 @@ pub const CTX_MANIFEST_COSIGN: &str = "enclave/v1/ctx/manifest-cosign";
 pub const CTX_MANIFEST_VETO: &str = "enclave/v1/ctx/manifest-veto";
 /// Root-signature context for a change of recovery words (old and new root).
 pub const CTX_MIGRATION: &str = "enclave/v1/ctx/migration";
+/// Root-signature context for moving an account to another server.
+pub const CTX_SERVER_MOVE: &str = "enclave/v1/proto/moved";
 
 /// EQXDH stage-1 key that seals the initiator's identity.
 pub const EQXDH_IDENTITY: &str = "enclave/v1/eqxdh/identity";
@@ -59,6 +61,7 @@ pub const INVITE_CAP: &str = "enclave/v1/invite/cap";
 /// All labels in this crate, for uniqueness checks.
 pub const ALL: &[&str] = &[
     CTX_MANIFEST,
+    CTX_SERVER_MOVE,
     CTX_SIGNED_PREKEY,
     CTX_OPK_BATCH,
     CTX_LAST_RESORT,

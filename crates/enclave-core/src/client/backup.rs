@@ -100,9 +100,34 @@ impl Client {
         profile.cursor = 0;
         profile.request_cursor = 0;
 
-        // The previous manifest (for the chain), then ours with a new device.
         let mut rpc = Rpc::new(Arc::clone(&transport));
         let root = account.root_public.0;
+        // A backup from before a move names inboxes the account left (and
+        // not the new ones' secrets): refuse it rather than read the old
+        // home forever.
+        match rpc
+            .dir_get(
+                &profile.server,
+                DirKind::Moved,
+                DirAction::Get,
+                manifest_key(&root),
+                [0; 32],
+                now,
+                &mut rng,
+            )
+            .await
+        {
+            Ok(b) => {
+                let m = enclave_proto::server_move::ServerMove::decode(&b)?;
+                if m.verify().is_ok() && m.root.0 == root && m.from == profile.server {
+                    return Err(CoreError::BackupBeforeMove);
+                }
+            }
+            Err(CoreError::Server(_)) => {}
+            Err(e) => return Err(e),
+        }
+
+        // The previous manifest (for the chain), then ours with a new device.
         let prev_bytes = rpc
             .dir_get(
                 &profile.server,
@@ -194,6 +219,8 @@ impl Client {
             let Some(card) = client.contacts.get(&root).and_then(|c| c.card.clone()) else {
                 continue;
             };
+            // They may have moved to another server since the backup.
+            let card = client.follow_moves(&card).await.unwrap_or(card);
             let Ok((peer_manifest, vault)) = client.fetch_peer(&card, now).await else {
                 continue;
             };

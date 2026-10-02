@@ -27,7 +27,7 @@
 pub mod client;
 pub mod service;
 
-pub use client::HttpWitness;
+pub use client::{HttpWitness, LazyWitness};
 pub use service::WitnessService;
 
 use akd::AppendOnlyProof;
