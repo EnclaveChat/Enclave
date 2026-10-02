@@ -180,3 +180,88 @@ async fn three_servers_one_list() {
     ada.set_foundation(foundation.public()).unwrap();
     assert_eq!(ada.server_list().unwrap().seq, 2);
 }
+
+/// The real network, seen by a device whose clock is `skew` seconds off.
+struct SkewedClock {
+    net: LocalTransport,
+    skew: std::sync::Mutex<i64>,
+}
+
+#[async_trait::async_trait]
+impl enclave_net::transport::Transport for SkewedClock {
+    async fn exchange(&self, server: &[u8; 16], request: Vec<u8>) -> enclave_net::Result<Vec<u8>> {
+        self.net.exchange(server, request).await
+    }
+    fn now(&self) -> u64 {
+        let skew = *self.skew.lock().unwrap();
+        self.net.now().saturating_add_signed(skew)
+    }
+    async fn server_key(&self, server: &[u8; 16]) -> enclave_net::Result<enclave_rpc::ServerKey> {
+        self.net.server_key(server).await
+    }
+}
+
+/// A device clock that trusted time (the witnesses' median timestamp) shows
+/// to be wrong raises a warning once, and another when it's right again
+/// (RT-23).
+#[tokio::test(flavor = "multi_thread")]
+async fn rt23_clock_skew_warning_shown() {
+    use enclave_core::client::clock::{AHEAD_SECS, CHECK_EVERY_SECS};
+    use enclave_net::transport::Transport as _;
+    let net = LocalTransport::new();
+    let (server, witnesses) = net.add_federated_server("a.test", 1).unwrap();
+    let id = server.id();
+    let mut rng = HedgedRng::new().unwrap();
+    let foundation = FoundationKey::generate(&mut rng).unwrap();
+    let signed = list(1, &[server], &witnesses, net.now())
+        .sign(&foundation, &mut rng)
+        .unwrap();
+    let t = Arc::new(SkewedClock {
+        net: net.clone(),
+        skew: std::sync::Mutex::new(0),
+    });
+    let (mut ada, _) = Client::create(memory(), t.clone(), id, "Ada")
+        .await
+        .unwrap();
+    ada.set_foundation(foundation.public()).unwrap();
+    ada.offer_server_list(&signed).unwrap();
+    let clock_events = |ev: &[Event]| -> Vec<Option<i64>> {
+        ev.iter()
+            .filter_map(|e| match e {
+                Event::ClockSkew { skew } => Some(*skew),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // A right clock: nothing.
+    let ev = ada.sync().await.unwrap();
+    assert!(clock_events(&ev).is_empty(), "{ev:?}");
+    assert_eq!(ada.clock_skew().unwrap(), None);
+
+    // Two hours behind: warned once, at the next check (due by the
+    // device's clock, which moved two hours less).
+    *t.skew.lock().unwrap() = -2 * 3600;
+    net.advance(CHECK_EVERY_SECS + 2 * 3600);
+    let ev = ada.sync().await.unwrap();
+    let got = clock_events(&ev);
+    assert_eq!(got.len(), 1, "{ev:?}");
+    assert!(got[0].is_some_and(|s| (-2 * 3600 - 60..=-2 * 3600 + 60).contains(&s)));
+    assert!(ada.clock_skew().unwrap().is_some());
+    let ev = ada.sync().await.unwrap();
+    assert!(clock_events(&ev).is_empty(), "once: {ev:?}");
+
+    // Set right: the warning goes.
+    *t.skew.lock().unwrap() = 0;
+    net.advance(CHECK_EVERY_SECS);
+    let ev = ada.sync().await.unwrap();
+    assert_eq!(clock_events(&ev), vec![None], "{ev:?}");
+    assert_eq!(ada.clock_skew().unwrap(), None);
+
+    // Days ahead: past where any head is still fresh.
+    *t.skew.lock().unwrap() = i64::try_from(AHEAD_SECS).unwrap() + 86_400;
+    let ev = ada.sync().await.unwrap();
+    let got = clock_events(&ev);
+    assert!(matches!(got.as_slice(), [Some(s)] if *s > 0), "{ev:?}");
+    assert!(t.now() > net.now());
+}

@@ -1,4 +1,5 @@
-//! Durable server state in redb (`docs/12-servers.md` §1.3).
+//! Durable server state (`docs/12-servers.md` §1.3, §6): redb, or
+//! PostgreSQL.
 //!
 //! Every table maps bytes to bytes; the server encodes values itself. A
 //! request that changes state does so in one write transaction, committed
@@ -6,11 +7,20 @@
 //! stored survives a crash, and a replayed request after a restart finds
 //! the token gone. Tests and the simulator use redb's in-memory backend:
 //! the same code, no files.
+//!
+//! **Backends.** A redb file (`Db::open`) is the default. An operator who
+//! wants the state in PostgreSQL gives a URL (`Db::connect`): every table
+//! is rows of one relation `enclave_kv (tbl text, k bytea, v bytea)`,
+//! primary key `(tbl, k)`, in the same transactions. `bytea` compares
+//! bytewise, so prefix scans and key order are the same as redb's. Backups
+//! are always redb files (`Db::snapshot`), and `Db::copy_from` loads one
+//! into either backend.
 
 use redb::{
     Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, TableError,
-    WriteTransaction,
+    TableHandle, WriteTransaction,
 };
+use std::cell::RefCell;
 use std::path::Path;
 
 type Bytes = TableDefinition<'static, &'static [u8], &'static [u8]>;
@@ -35,6 +45,15 @@ pub const MOVED: Bytes = TableDefinition::new("moved");
 pub const SERVER_MOVES: Bytes = TableDefinition::new("server-moves");
 /// Deleted accounts: manifest key → root-signed `Tombstone`.
 pub const TOMBSTONES: Bytes = TableDefinition::new("tombstones");
+/// Requests already opened: `u32 key_id ‖ replay id` → empty, until the
+/// day's key is deleted.
+pub const REPLAYS: Bytes = TableDefinition::new("replays");
+/// Proofs of work already accepted: `u32 day ‖ proof` → empty, kept while
+/// the day can still be proven for (today and yesterday).
+pub const POW_SPENT: Bytes = TableDefinition::new("pow-spent");
+/// Proofs that a key-transparency log equivocated: server id (padded to
+/// 32 B) → `Equivocation`.
+pub const EQUIVOCATIONS: Bytes = TableDefinition::new("equivocations");
 /// Device id → the manifest key of the account that lists it.
 pub const DEVICE_OWNER: Bytes = TableDefinition::new("device-owner");
 /// Prekey publications: device → `next opk ‖ publication`.
@@ -55,12 +74,19 @@ pub const REPORTS: Bytes = TableDefinition::new("reports");
 pub const META: Bytes = TableDefinition::new("meta");
 
 /// The schema this code writes. Older files are migrated on open.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Storage failure. The server answers `Status::Internal` and logs it.
 #[derive(Debug, thiserror::Error)]
 #[error("storage: {0}")]
 pub struct DbError(String);
+
+impl DbError {
+    /// A storage error with this message.
+    pub fn new(msg: &str) -> Self {
+        Self(msg.to_string())
+    }
+}
 
 macro_rules! from_redb {
     ($($t:ty),*) => {$(
@@ -77,7 +103,8 @@ from_redb!(
     redb::TransactionError,
     redb::TableError,
     redb::StorageError,
-    redb::CommitError
+    redb::CommitError,
+    postgres::Error
 );
 
 /// Result of a storage operation.
@@ -85,14 +112,19 @@ pub type Result<T> = core::result::Result<T, DbError>;
 
 /// The server database.
 pub struct Db {
-    db: Database,
+    backend: Backend,
+}
+
+enum Backend {
+    Redb(Database),
+    Pg(Box<crate::pg::Pg>),
 }
 
 impl Db {
-    /// Open (or create) the database file at `path`, migrating it.
+    /// Open (or create) the redb database file at `path`, migrating it.
     pub fn open(path: &Path) -> Result<Self> {
         let db = Self {
-            db: Database::create(path)?,
+            backend: Backend::Redb(Database::create(path)?),
         };
         db.migrate()?;
         Ok(db)
@@ -101,94 +133,129 @@ impl Db {
     /// A database that lives in memory (tests, simulator, dev demo).
     pub fn memory() -> Result<Self> {
         let db = Self {
-            db: Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?,
+            backend: Backend::Redb(
+                Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?,
+            ),
         };
         db.migrate()?;
         Ok(db)
     }
 
+    /// Connect to PostgreSQL at `url` (`postgres://user:password@host/db`),
+    /// creating the table and migrating.
+    pub fn connect(url: &str) -> Result<Self> {
+        let db = Self {
+            backend: Backend::Pg(Box::new(crate::pg::Pg::connect(url)?)),
+        };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    /// Which backend: `"redb"` or `"postgres"`.
+    pub fn backend(&self) -> &'static str {
+        match self.backend {
+            Backend::Redb(_) => "redb",
+            Backend::Pg(_) => "postgres",
+        }
+    }
+
     fn migrate(&self) -> Result<()> {
-        let w = self.db.begin_write()?;
-        {
-            let mut meta = w.open_table(META)?;
-            let current = meta
-                .get(&b"schema"[..])?
-                .and_then(|v| v.value().try_into().ok().map(u32::from_be_bytes))
+        self.write(|t| {
+            let current = t
+                .get(META, b"schema")?
+                .and_then(|v| v.try_into().ok().map(u32::from_be_bytes))
                 .unwrap_or(0);
             if current > SCHEMA_VERSION {
                 return Err(DbError(format!(
                     "database schema {current} is newer than this server ({SCHEMA_VERSION})"
                 )));
             }
-            // Every table is opened (so created) at each start: 0 → 1 made
-            // them all, 1 → 2 added `server-moves`, 2 → 3 `tombstones`.
-            for t in [
-                INBOXES,
-                TOKENS,
-                ENVELOPES,
-                MANIFESTS,
-                DEVICES_SEEN,
-                ATTESTATIONS,
-                MIGRATIONS,
-                MOVED,
-                SERVER_MOVES,
-                TOMBSTONES,
-                DEVICE_OWNER,
-                BUNDLES,
-                VAULTS,
-                BLOBS,
-                PUSH,
-                USERNAMES,
-                NAMES_BY_ROOT,
-                REPORTS,
-            ] {
-                w.open_table(t)?;
-            }
-            meta.insert(&b"schema"[..], &SCHEMA_VERSION.to_be_bytes()[..])?;
-        }
-        w.commit()?;
-        Ok(())
+            // Every table is created at each start: 0 → 1 made them all,
+            // 1 → 2 added `server-moves`, 2 → 3 `tombstones`, 3 → 4
+            // `replays`, 4 → 5 `pow-spent`, 5 → 6 `equivocations`.
+            t.create_tables()?;
+            t.put(META, b"schema", &SCHEMA_VERSION.to_be_bytes())
+        })
     }
 
     /// Run `f` in one write transaction and commit it.
     pub fn write<R>(&self, f: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
-        let w = self.db.begin_write()?;
-        let r = f(&mut Tx { w: &w })?;
-        w.commit()?;
-        Ok(r)
+        match &self.backend {
+            Backend::Redb(db) => {
+                let w = db.begin_write()?;
+                let r = f(&mut Tx {
+                    inner: TxInner::Redb(&w),
+                })?;
+                w.commit()?;
+                Ok(r)
+            }
+            Backend::Pg(pg) => pg.transaction(|t| {
+                f(&mut Tx {
+                    inner: TxInner::Pg(RefCell::new(t)),
+                })
+            }),
+        }
     }
 
     /// Run `f` in a read transaction.
-    pub fn read<R>(&self, f: impl FnOnce(&Rx) -> Result<R>) -> Result<R> {
-        let r = self.db.begin_read()?;
-        f(&Rx { r })
+    pub fn read<R>(&self, f: impl FnOnce(&Rx<'_>) -> Result<R>) -> Result<R> {
+        match &self.backend {
+            Backend::Redb(db) => {
+                let r = db.begin_read()?;
+                f(&Rx {
+                    inner: RxInner::Redb(r),
+                })
+            }
+            Backend::Pg(pg) => pg.transaction(|t| {
+                f(&Rx {
+                    inner: RxInner::Pg(RefCell::new(t)),
+                })
+            }),
+        }
     }
 
-    /// Copy every table into a fresh database file at `path` (a consistent
-    /// snapshot for backups: one read transaction).
+    /// Every `(table, key, value)`, in one read transaction.
+    fn dump(&self) -> Result<Vec<(Bytes, Rows)>> {
+        self.read(|r| ALL.iter().map(|t| Ok((*t, r.scan(*t, b"")?))).collect())
+    }
+
+    /// Copy every table into a fresh redb file at `path` (a consistent
+    /// snapshot for backups: one read transaction), whatever the backend.
     pub fn snapshot(&self, path: &Path) -> Result<()> {
+        let rows = self.dump()?;
         let out = Database::create(path)?;
-        let r = self.db.begin_read()?;
         let w = out.begin_write()?;
-        for t in ALL {
-            let src = match r.open_table(t) {
-                Ok(s) => s,
-                Err(TableError::TableDoesNotExist(_)) => continue,
-                Err(e) => return Err(e.into()),
-            };
+        for (t, kvs) in rows {
             let mut dst = w.open_table(t)?;
-            for item in src.iter()? {
-                let (k, v) = item?;
-                dst.insert(k.value(), v.value())?;
+            for (k, v) in kvs {
+                dst.insert(k.as_slice(), v.as_slice())?;
             }
         }
         w.commit()?;
         Ok(())
     }
+
+    /// Replace everything here with the contents of `src` (restoring a
+    /// snapshot into either backend), in one transaction.
+    pub fn copy_from(&self, src: &Db) -> Result<()> {
+        let rows = src.dump()?;
+        self.write(|t| {
+            for (table, kvs) in &rows {
+                t.remove_where(*table, b"", |_, _| true)?;
+                for (k, v) in kvs {
+                    t.put(*table, k, v)?;
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
+/// `(key, value)` pairs in key order.
+type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// Every table, for snapshots.
-const ALL: [Bytes; 19] = [
+const ALL: [Bytes; 22] = [
     INBOXES,
     TOKENS,
     ENVELOPES,
@@ -199,6 +266,9 @@ const ALL: [Bytes; 19] = [
     MOVED,
     SERVER_MOVES,
     TOMBSTONES,
+    REPLAYS,
+    POW_SPENT,
+    EQUIVOCATIONS,
     DEVICE_OWNER,
     BUNDLES,
     VAULTS,
@@ -212,58 +282,130 @@ const ALL: [Bytes; 19] = [
 
 /// A write transaction.
 pub struct Tx<'a> {
-    w: &'a WriteTransaction,
+    inner: TxInner<'a>,
+}
+
+enum TxInner<'a> {
+    Redb(&'a WriteTransaction),
+    Pg(RefCell<&'a mut dyn crate::pg::Kv>),
 }
 
 /// A read transaction.
-pub struct Rx {
-    r: ReadTransaction,
+pub struct Rx<'a> {
+    inner: RxInner<'a>,
+}
+
+enum RxInner<'a> {
+    Redb(ReadTransaction),
+    Pg(RefCell<&'a mut dyn crate::pg::Kv>),
+}
+
+/// The keys starting with `prefix`, as a half-open range `[prefix, end)`;
+/// `None` for no upper bound (an empty prefix, or all 0xff).
+fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last < 0xff {
+            end.push(last + 1);
+            return Some(end);
+        }
+    }
+    None
 }
 
 impl Tx<'_> {
+    fn create_tables(&mut self) -> Result<()> {
+        if let TxInner::Redb(w) = &self.inner {
+            for t in ALL {
+                w.open_table(t)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Value at `key`.
     pub fn get(&self, t: Bytes, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let table = self.w.open_table(t)?;
-        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+        match &self.inner {
+            TxInner::Redb(w) => {
+                let table = w.open_table(t)?;
+                Ok(table.get(key)?.map(|v| v.value().to_vec()))
+            }
+            TxInner::Pg(c) => c.borrow_mut().get(t.name(), key),
+        }
     }
 
     /// Whether `key` exists.
     pub fn has(&self, t: Bytes, key: &[u8]) -> Result<bool> {
-        let table = self.w.open_table(t)?;
-        Ok(table.get(key)?.is_some())
+        Ok(self.get(t, key)?.is_some())
     }
 
     /// Set `key`.
     pub fn put(&mut self, t: Bytes, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut table = self.w.open_table(t)?;
-        table.insert(key, value)?;
-        Ok(())
+        match &self.inner {
+            TxInner::Redb(w) => {
+                let mut table = w.open_table(t)?;
+                table.insert(key, value)?;
+                Ok(())
+            }
+            TxInner::Pg(c) => c.borrow_mut().put(t.name(), key, value),
+        }
     }
 
     /// Remove `key`; returns whether it existed.
     pub fn del(&mut self, t: Bytes, key: &[u8]) -> Result<bool> {
-        let mut table = self.w.open_table(t)?;
-        Ok(table.remove(key)?.is_some())
+        match &self.inner {
+            TxInner::Redb(w) => {
+                let mut table = w.open_table(t)?;
+                Ok(table.remove(key)?.is_some())
+            }
+            TxInner::Pg(c) => c.borrow_mut().del(t.name(), key),
+        }
     }
 
     /// Every `(key, value)` whose key starts with `prefix`, in key order.
     pub fn scan(&self, t: Bytes, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let table = self.w.open_table(t)?;
-        scan_table(&table, prefix)
+        self.range(t, prefix, prefix, usize::MAX)
+    }
+
+    /// Up to `limit` `(key, value)` pairs with `from ≤ key` under `prefix`.
+    fn range(
+        &self,
+        t: Bytes,
+        prefix: &[u8],
+        from: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        match &self.inner {
+            TxInner::Redb(w) => {
+                let table = w.open_table(t)?;
+                range_table(&table, prefix, from, limit)
+            }
+            TxInner::Pg(c) => {
+                c.borrow_mut()
+                    .range(t.name(), from, prefix_end(prefix).as_deref(), limit)
+            }
+        }
     }
 
     /// Number of keys starting with `prefix`.
     pub fn count(&self, t: Bytes, prefix: &[u8]) -> Result<usize> {
-        let table = self.w.open_table(t)?;
-        let mut n = 0;
-        for item in table.range(prefix..)? {
-            let (k, _) = item?;
-            if !k.value().starts_with(prefix) {
-                break;
+        match &self.inner {
+            TxInner::Redb(w) => {
+                let table = w.open_table(t)?;
+                let mut n = 0;
+                for item in table.range(prefix..)? {
+                    let (k, _) = item?;
+                    if !k.value().starts_with(prefix) {
+                        break;
+                    }
+                    n += 1;
+                }
+                Ok(n)
             }
-            n += 1;
+            TxInner::Pg(c) => c
+                .borrow_mut()
+                .count(t.name(), prefix, prefix_end(prefix).as_deref()),
         }
-        Ok(n)
     }
 
     /// The first `(key, value)` with `from ≤ key` that starts with `prefix`.
@@ -273,14 +415,7 @@ impl Tx<'_> {
         prefix: &[u8],
         from: &[u8],
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let table = self.w.open_table(t)?;
-        let Some(item) = table.range(from..)?.next() else {
-            return Ok(None);
-        };
-        let (k, v) = item?;
-        Ok(k.value()
-            .starts_with(prefix)
-            .then(|| (k.value().to_vec(), v.value().to_vec())))
+        Ok(self.range(t, prefix, from, 1)?.pop())
     }
 
     /// Remove every key starting with `prefix` for which `drop` is true;
@@ -297,33 +432,32 @@ impl Tx<'_> {
             .filter(|(k, v)| drop(k, v))
             .map(|(k, _)| k)
             .collect();
-        let mut table = self.w.open_table(t)?;
         for k in &doomed {
-            table.remove(k.as_slice())?;
+            self.del(t, k)?;
         }
         Ok(doomed.len())
     }
 }
 
-impl Rx {
+impl Rx<'_> {
     /// Value at `key`.
     pub fn get(&self, t: Bytes, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let table = match self.r.open_table(t) {
-            Ok(t) => t,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+        match &self.inner {
+            RxInner::Redb(r) => {
+                let table = match r.open_table(t) {
+                    Ok(t) => t,
+                    Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+                Ok(table.get(key)?.map(|v| v.value().to_vec()))
+            }
+            RxInner::Pg(c) => c.borrow_mut().get(t.name(), key),
+        }
     }
 
     /// Every `(key, value)` whose key starts with `prefix`.
     pub fn scan(&self, t: Bytes, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let table = match self.r.open_table(t) {
-            Ok(t) => t,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        scan_table(&table, prefix)
+        self.range(t, prefix, prefix, usize::MAX)
     }
 
     /// The first two `(key, value)` pairs with `from ≤ key` under `prefix`
@@ -334,31 +468,44 @@ impl Rx {
         prefix: &[u8],
         from: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let table = match self.r.open_table(t) {
-            Ok(t) => t,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        let mut out = Vec::new();
-        for item in table.range(from..)? {
-            let (k, v) = item?;
-            if !k.value().starts_with(prefix) || out.len() == 2 {
-                break;
+        self.range(t, prefix, from, 2)
+    }
+
+    fn range(
+        &self,
+        t: Bytes,
+        prefix: &[u8],
+        from: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        match &self.inner {
+            RxInner::Redb(r) => {
+                let table = match r.open_table(t) {
+                    Ok(t) => t,
+                    Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+                    Err(e) => return Err(e.into()),
+                };
+                range_table(&table, prefix, from, limit)
             }
-            out.push((k.value().to_vec(), v.value().to_vec()));
+            RxInner::Pg(c) => {
+                c.borrow_mut()
+                    .range(t.name(), from, prefix_end(prefix).as_deref(), limit)
+            }
         }
-        Ok(out)
     }
 }
 
-fn scan_table(
+/// Up to `limit` pairs from `from` on, while keys start with `prefix`.
+fn range_table(
     table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     prefix: &[u8],
+    from: &[u8],
+    limit: usize,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let mut out = Vec::new();
-    for item in table.range(prefix..)? {
+    for item in table.range(from..)? {
         let (k, v) = item?;
-        if !k.value().starts_with(prefix) {
+        if !k.value().starts_with(prefix) || out.len() == limit {
             break;
         }
         out.push((k.value().to_vec(), v.value().to_vec()));

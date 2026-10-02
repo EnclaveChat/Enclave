@@ -35,6 +35,9 @@ pub const SERVER_REQUEST_KEY: &str = "enclave/v1/server/request-key";
 pub const SERVER_REQUEST_CHAIN: &str = "enclave/v1/server/request-chain";
 /// Label for the reply key.
 pub const RPC_REPLY: &str = "enclave/v1/rpc/reply";
+/// What a server remembers of each request it opened, to refuse a replay:
+/// `SHAKE256(label ‖ u32 key_id ‖ ephemeral X448 key ‖ ML-KEM ciphertext)`.
+pub const NET_REPLAY_ID: &str = "enclave/v1/net/replay-id";
 
 /// Errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
@@ -329,6 +332,17 @@ pub struct Opened {
     pub envelope: Vec<u8>,
     /// Keys for the reply.
     pub exchange: Exchange,
+    /// The daily key it was sealed to.
+    pub key_id: u32,
+    /// Identifies this request (its ephemeral values are fresh for every
+    /// sealing): a server refuses the same id twice.
+    pub replay_id: [u8; 32],
+}
+
+fn replay_id(key_id: u32, eph: &[u8], ct: &[u8]) -> [u8; 32] {
+    enclave_crypto::hash::shake256(
+        &[NET_REPLAY_ID.as_bytes(), &key_id.to_be_bytes(), eph, ct].concat(),
+    )
 }
 
 /// Server: open a request unit or poll. The unit does not name the daily key
@@ -348,6 +362,7 @@ fn open_with(secret: &ServerSecret, bytes: &[u8]) -> Result<Opened> {
     match bytes.len() {
         UNIT_LEN => {
             let u = WireUnit::decode(bytes)?;
+            let rid = replay_id(secret.key_id, &u.eph_x448, &u.kem_ct[..]);
             let ex = server_exchange(secret, &X448Public(u.eph_x448), &MlKemCiphertext(u.kem_ct))?;
             let pt = seal::open(&ex.request, &ad, &u.sealed[..])?;
             let header = RequestHeader::decode(&pt[..REQUEST_HEADER_LEN])?;
@@ -355,10 +370,13 @@ fn open_with(secret: &ServerSecret, bytes: &[u8]) -> Result<Opened> {
                 header,
                 envelope: pt[REQUEST_HEADER_LEN..].to_vec(),
                 exchange: ex,
+                key_id: secret.key_id,
+                replay_id: rid,
             })
         }
         POLL_LEN => {
             let p = PollRequest::decode(bytes)?;
+            let rid = replay_id(secret.key_id, &p.eph_x448, &p.kem_ct[..]);
             let ex = server_exchange(secret, &X448Public(p.eph_x448), &MlKemCiphertext(p.kem_ct))?;
             let pt = seal::open(&ex.request, &ad, &p.sealed)?;
             let header = RequestHeader::decode(&pt)?;
@@ -366,6 +384,8 @@ fn open_with(secret: &ServerSecret, bytes: &[u8]) -> Result<Opened> {
                 header,
                 envelope: Vec::new(),
                 exchange: ex,
+                key_id: secret.key_id,
+                replay_id: rid,
             })
         }
         _ => Err(RpcError::Malformed),

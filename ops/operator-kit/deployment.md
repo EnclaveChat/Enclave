@@ -133,6 +133,28 @@ docker compose start server
 `restore` puts the server and key-transparency snapshots taken at the
 same moment back, keeping the files it replaces as `*.redb.old`.
 
+## State in PostgreSQL (optional)
+
+The server keeps its state in a redb file in the `server-data` volume by
+default. To keep it in PostgreSQL instead (`docs/12-servers.md` §6):
+
+```sh
+mkdir -p secrets
+pw=$(openssl rand -hex 24)
+printf '%s' "$pw" > secrets/postgres_password
+printf 'postgres://enclave:%s@postgres/enclave' "$pw" > secrets/database_url
+chmod 0444 secrets/database_url
+docker compose -f compose.yml -f compose.postgres.yml up -d
+```
+
+Use the same `-f` pair for every later command. The database is reachable
+only on the stack's internal network. Snapshots in the `backups` volume
+stay redb files and are taken while the server runs; `restore` loads one
+into PostgreSQL in a single transaction. The key-transparency log stays in
+`server-data`, so keep backing that volume's snapshots up too. Moving an
+existing stack: stop the server, take a `backup`, switch to
+`compose.postgres.yml`, and `restore` that snapshot.
+
 ## Keys and rotation
 
 - **Request keys** rotate every day by themselves, from a forward-secure

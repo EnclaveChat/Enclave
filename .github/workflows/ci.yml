@@ -110,8 +110,30 @@ jobs:
       - name: Every query gives its expected result
         run: cargo xtask proverif
 
+  postgres:
+    name: server state on PostgreSQL
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_PASSWORD: enclave
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      # The same tests on redb and on PostgreSQL (tests/common/mod.rs).
+      - name: Backend conformance, restarts and replays on both backends
+        env:
+          ENCLAVE_TEST_POSTGRES: postgres://postgres:enclave@127.0.0.1:5432/postgres
+          ENCLAVE_REQUIRE_POSTGRES: "1"
+        run: cargo test -p enclave-server --test backends --test restart --test replay -- --nocapture
+
   tls-interop:
-    name: TLS interop (OpenSSL 3.5) and ACME (pebble)
+    name: TLS interop (OpenSSL 3.5), ACME (pebble), C2SP cosignatures (Go)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,6 +157,14 @@ jobs:
         run: |
           cargo test -p enclave-tls --test openssl35 -- --nocapture
           cargo test -p enclave-front --test front -- --nocapture
+      # Witness notes checked by the reference Go implementation of C2SP
+      # signed notes and cosignatures (Ed25519 cosignature/v1, ML-DSA-44).
+      - name: C2SP cosignatures verify with transparency-dev/formats
+        env:
+          ENCLAVE_C2SP_OUT: ${{ runner.temp }}/c2sp
+        run: |
+          cargo test -p enclave-witness --test witness -- --nocapture
+          (cd ci/c2sp && go run . "$ENCLAVE_C2SP_OUT")
       - if: failure()
         run: cat /tmp/pebble.log
 

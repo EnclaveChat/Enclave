@@ -263,6 +263,37 @@ impl Rpc {
         Err(CoreError::Server(Status::Pow))
     }
 
+    /// Create an inbox (`flags` is `FLAG_CREATE`, with `FLAG_REQUEST_INBOX`
+    /// for a request inbox) owned by `owner`, escalating proof of work as
+    /// the server asks.
+    pub async fn create_inbox(
+        &mut self,
+        server: &ServerId,
+        mailbox: [u8; 32],
+        owner: [u8; 32],
+        flags: u8,
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        let ctx = api::pow_context_inbox(&mailbox, now / 86_400);
+        for effort in EFFORT_LADDER {
+            let proof = enclave_tokens::solve(&ctx, effort, rng)?;
+            let h = RequestHeader {
+                op: Op::RegisterTokens,
+                flags,
+                mailbox,
+                token: owner,
+            };
+            let env = api::frame(&proof.0, rng)?;
+            match self.call(server, h, &env, now, rng).await?.status {
+                Status::Ok => return Ok(()),
+                Status::Pow => continue,
+                s => return Err(CoreError::Server(s)),
+            }
+        }
+        Err(CoreError::Server(Status::Pow))
+    }
+
     /// Write to a request inbox, escalating proof of work as the server asks.
     pub async fn write_request(
         &mut self,
@@ -272,7 +303,8 @@ impl Rpc {
         now: u64,
         rng: &mut HedgedRng,
     ) -> Result<()> {
-        let ctx = api::pow_context_request(&inbox, &enclave_crypto::hash::sha3_512(env));
+        let ctx =
+            api::pow_context_request(&inbox, now / 86_400, &enclave_crypto::hash::sha3_512(env));
         for effort in EFFORT_LADDER {
             let proof = enclave_tokens::solve(&ctx, effort, rng)?;
             let h = RequestHeader {
@@ -300,7 +332,8 @@ impl Rpc {
         now: u64,
         rng: &mut HedgedRng,
     ) -> Result<()> {
-        let ctx = api::pow_context_report(&inbox, &enclave_crypto::hash::sha3_512(env));
+        let ctx =
+            api::pow_context_report(&inbox, now / 86_400, &enclave_crypto::hash::sha3_512(env));
         for effort in EFFORT_LADDER {
             let proof = enclave_tokens::solve(&ctx, effort, rng)?;
             let h = RequestHeader {

@@ -15,6 +15,10 @@
 //!    quorum and differs from ours at the same epoch **proves** the server
 //!    equivocated: we keep both heads, raise [`crate::Event::KtSplitView`],
 //!    and send ours back so they hold the proof too.
+//! 5. We publish the proof (`enclave_kt::Equivocation`) to a server other
+//!    than the one that equivocated (our home server, or another the list
+//!    names) as `DirKind::Equivocation`. That server checks it and hands it
+//!    to the witnesses, which never cosign that log again.
 
 use super::Client;
 use crate::content::Content;
@@ -28,6 +32,8 @@ const NS_KT_HEADS: &str = "kt-heads";
 const NS_KT_HEARD: &str = "kt-heard";
 const NS_KT_SENT: &str = "kt-sent";
 const NS_KT_ALERT: &str = "kt-alert";
+/// Alerts whose proof a server took (`server ‖ epoch` → empty).
+const NS_KT_PUBLISHED: &str = "kt-published";
 /// Items per message.
 pub const MAX_ITEMS: usize = 3;
 /// Bytes one item takes: server, epoch, digest.
@@ -243,7 +249,55 @@ impl Client {
                 None => self.record_head(&sh)?,
             }
         }
+        self.publish_equivocations(now).await?;
         Ok(events)
+    }
+
+    /// Publish each proof we hold to a server other than the one that
+    /// equivocated, until one takes it. A network failure leaves it for the
+    /// next sync.
+    async fn publish_equivocations(&mut self, now: u64) -> Result<()> {
+        for (k, proof) in self.store.scan(NS_KT_ALERT)? {
+            if self.store.get(NS_KT_PUBLISHED, &k)?.is_some() {
+                continue;
+            }
+            let Some(e) = equivocation(&proof) else {
+                continue;
+            };
+            let culprit = e.server();
+            let to = if self.profile.server != culprit {
+                Some(self.profile.server)
+            } else {
+                self.server_list()
+                    .and_then(|l| l.servers.iter().map(|s| s.id()).find(|id| *id != culprit))
+            };
+            let Some(to) = to else {
+                continue;
+            };
+            let mut key = [0u8; 32];
+            key[..16].copy_from_slice(&culprit);
+            match self
+                .rpc
+                .dir_put(
+                    &to,
+                    enclave_rpc::api::DirKind::Equivocation,
+                    key,
+                    [0; 32],
+                    &e.encode(),
+                    now,
+                    &mut self.rng,
+                )
+                .await
+            {
+                Ok(()) => {}
+                // It can't take it (a server that doesn't know the log):
+                // nobody else will either, so stop trying.
+                Err(CoreError::Server(_)) => {}
+                Err(e) => return Err(e),
+            }
+            self.store.put(NS_KT_PUBLISHED, &k, &[], &mut self.rng)?;
+        }
+        Ok(())
     }
 
     /// Whether `sh` is signed by a log we pin and cosigned by our witness
@@ -309,6 +363,14 @@ impl Client {
             epoch: u64::from_be_bytes(k.get(16..24)?.try_into().ok()?),
         })
     }
+}
+
+/// The two heads of a stored alert (`u32 len ‖ ours ‖ theirs`).
+fn equivocation(proof: &[u8]) -> Option<enclave_kt::Equivocation> {
+    let n = u32::from_be_bytes(proof.get(..4)?.try_into().ok()?) as usize;
+    let a = SignedHead::decode(proof.get(4..4 + n)?).ok()?;
+    let b = SignedHead::decode(proof.get(4 + n..)?).ok()?;
+    Some(enclave_kt::Equivocation { a, b })
 }
 
 #[cfg(test)]

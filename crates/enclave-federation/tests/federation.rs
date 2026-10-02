@@ -93,6 +93,7 @@ fn descriptors_witnesses_and_relays() {
         effort_claim: 8,
         effort_blob: 1,
         effort_username: 64,
+        effort_inbox: 16,
         inbox_quota: 5_000,
         request_quota: 100,
         token_quota: 4_096,

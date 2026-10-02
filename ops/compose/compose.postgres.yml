@@ -1,0 +1,51 @@
+# Server state in PostgreSQL instead of the redb file in the server-data
+# volume (docs/12-servers.md §6). The key-transparency log stays a redb file
+# there; backups are redb snapshots either way.
+#
+#   mkdir -p secrets
+#   pw=$(openssl rand -hex 24)
+#   printf '%s' "$pw" > secrets/postgres_password
+#   printf 'postgres://enclave:%s@postgres/enclave' "$pw" > secrets/database_url
+#   chmod 0444 secrets/database_url        # read by the server's unprivileged user
+#   docker compose -f compose.yml -f compose.postgres.yml up -d
+#
+# Postgres is only on the internal backend network.
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      POSTGRES_USER: enclave
+      POSTGRES_DB: enclave
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "enclave", "-d", "enclave"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: local
+      options: { max-size: "10m", max-file: "3" }
+
+  server:
+    environment:
+      ENCLAVE_DATABASE__URL_FILE: /run/secrets/database_url
+    secrets: [database_url]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  database_url:
+    file: ./secrets/database_url
+
+volumes:
+  postgres-data:

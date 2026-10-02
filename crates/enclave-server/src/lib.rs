@@ -22,6 +22,7 @@
 pub mod config;
 pub mod db;
 pub mod keys;
+mod pg;
 
 use db::{Db, Tx};
 use enclave_crypto::hash::sha3_512;
@@ -80,6 +81,8 @@ pub struct Config {
     pub effort_blob: u32,
     /// Proof-of-work effort for claiming a username.
     pub effort_username: u32,
+    /// Proof-of-work effort for creating an inbox (0: none, development).
+    pub effort_inbox: u32,
     /// Maximum stored envelopes per inbox.
     pub inbox_quota: usize,
     /// Maximum pending requests per request inbox.
@@ -98,6 +101,7 @@ impl Default for Config {
             effort_claim: 8,
             effort_blob: 1,
             effort_username: 64,
+            effort_inbox: 16,
             inbox_quota: 5_000,
             request_quota: 100,
             token_quota: 4_096,
@@ -247,6 +251,8 @@ pub struct Stats {
     pub tokens_burned: u64,
     /// Denied requests.
     pub denied: u64,
+    /// Replayed requests refused.
+    pub replays: u64,
 }
 
 /// An Enclave server.
@@ -283,6 +289,12 @@ pub struct Server {
     descriptor: Vec<u8>,
     /// The foundation's server list as mirrored here (`DirKind::ServerList`).
     server_list: Vec<u8>,
+    /// Head keys of the logs the list names, to check equivocation proofs.
+    listed_logs: HashMap<[u8; 16], enclave_crypto::sig::CompositePublic>,
+    /// URLs of the witnesses the list names.
+    listed_witnesses: Vec<String>,
+    /// Equivocation proofs accepted and not yet passed on to witnesses.
+    equivocations_out: Vec<enclave_kt::Equivocation>,
     rng: HedgedRng,
 }
 
@@ -352,7 +364,25 @@ impl Server {
             key_bundle: Vec::new(),
             descriptor: Vec::new(),
             server_list: Vec::new(),
+            listed_logs: HashMap::new(),
+            listed_witnesses: Vec::new(),
+            equivocations_out: Vec::new(),
             rng,
+        })
+        .inspect(|s| {
+            // Replay ids of keys deleted while the server was down.
+            let oldest = s.keys.iter().map(|k| k.key_id).min().unwrap_or(0);
+            let r = s.db.write(|t| {
+                t.remove_where(db::REPLAYS, &[], |k, _| {
+                    k.get(..4)
+                        .and_then(|b| b.try_into().ok())
+                        .map(u32::from_be_bytes)
+                        .is_none_or(|d| d < oldest)
+                })
+            });
+            if let Err(e) = r {
+                log_db_error(&e);
+            }
         })
     }
 
@@ -382,7 +412,36 @@ impl Server {
     /// Set the server list served as `DirKind::ServerList`. The server
     /// doesn't check it (it holds no foundation key); clients do.
     pub fn set_server_list(&mut self, list: Vec<u8>) {
+        let parsed = enclave_federation::ServerList::decode_unchecked(&list).ok();
+        self.listed_logs = parsed
+            .iter()
+            .flat_map(|l| &l.servers)
+            .filter_map(|s| s.kt.as_ref().map(|k| (s.id(), k.head_key.clone())))
+            .collect();
+        self.listed_witnesses = parsed
+            .iter()
+            .flat_map(|l| &l.witnesses)
+            .map(|w| w.url.clone())
+            .filter(|u| !u.is_empty())
+            .collect();
         self.server_list = list;
+    }
+
+    /// Accept equivocation proofs for `server`'s log under `head_key`
+    /// (the server list does this for every log it names).
+    pub fn pin_log(&mut self, server: [u8; 16], head_key: enclave_crypto::sig::CompositePublic) {
+        self.listed_logs.insert(server, head_key);
+    }
+
+    /// URLs of the witnesses the server list names.
+    pub fn listed_witnesses(&self) -> &[String] {
+        &self.listed_witnesses
+    }
+
+    /// Equivocation proofs accepted since the last call, for the operator's
+    /// process to pass on to the witnesses (`12-servers.md` §3.8).
+    pub fn take_equivocations(&mut self) -> Vec<enclave_kt::Equivocation> {
+        std::mem::take(&mut self.equivocations_out)
     }
 
     /// The database (backups, operator tools).
@@ -423,6 +482,85 @@ impl Server {
         while self.keys.len() > 2 {
             self.keys.pop_back();
         }
+        self.prune_replays(7);
+    }
+
+    fn garbage(&mut self) -> Vec<u8> {
+        let mut r = vec![0u8; enclave_wire::UNIT_LEN];
+        if self.rng.fill("server/garbage-reply", &mut r).is_err() {
+            r.fill(0);
+        }
+        r
+    }
+
+    /// Check a proof of work made for today or yesterday (`ctx(day)` is its
+    /// context) and spend it: each proof is accepted once (`12-servers.md`
+    /// §1.1, RT-06). False if it doesn't verify, was spent, or can't be
+    /// recorded.
+    fn spend_pow(
+        &mut self,
+        ctx: impl Fn(u64) -> Vec<u8>,
+        effort: u32,
+        proof: &[u8; 32],
+        now: u64,
+    ) -> bool {
+        let today = now / 86_400;
+        let Some(day) = [today, today.saturating_sub(1)]
+            .into_iter()
+            .find(|d| enclave_tokens::verify(&ctx(*d), effort, &PowProof(*proof)))
+        else {
+            return false;
+        };
+        let k = cat(&u32::try_from(day).unwrap_or(u32::MAX).to_be_bytes(), proof);
+        self.db
+            .write(|t| {
+                if t.has(db::POW_SPENT, &k)? {
+                    return Ok(false);
+                }
+                t.put(db::POW_SPENT, &k, &[])?;
+                Ok(true)
+            })
+            .unwrap_or_else(|e| {
+                log_db_error(&e);
+                false
+            })
+    }
+
+    /// Record a request's replay id; false if it was seen (or can't be
+    /// recorded).
+    fn first_time(&mut self, key_id: u32, id: &[u8; 32]) -> bool {
+        let k = cat(&key_id.to_be_bytes(), id);
+        self.db
+            .write(|t| {
+                if t.has(db::REPLAYS, &k)? {
+                    return Ok(false);
+                }
+                t.put(db::REPLAYS, &k, &[])?;
+                Ok(true)
+            })
+            .unwrap_or_else(|e| {
+                log_db_error(&e);
+                false
+            })
+    }
+
+    /// Forget the replay ids of keys this server no longer holds: their
+    /// requests can't be opened any more. Looks back `days` days before the
+    /// oldest key held.
+    fn prune_replays(&mut self, days: u32) {
+        let Some(oldest) = self.keys.iter().map(|k| k.key_id).min() else {
+            return;
+        };
+        let r = self.db.write(|t| {
+            let mut n = 0;
+            for d in oldest.saturating_sub(days)..oldest {
+                n += t.remove_where(db::REPLAYS, &d.to_be_bytes(), |_, _| true)?;
+            }
+            Ok(n)
+        });
+        if let Err(e) = r {
+            log_db_error(&e);
+        }
     }
 
     /// Counters.
@@ -446,9 +584,17 @@ impl Server {
     /// uploads.
     pub fn expire(&mut self, now: u64) {
         let ttl = self.cfg.ttl_secs;
+        // Spent proofs of days that can't be proven for any more.
+        let oldest = u32::try_from((now / 86_400).saturating_sub(1)).unwrap_or(u32::MAX);
         let _ = self.tx(|t| {
             t.remove_where(db::ENVELOPES, b"", |_, v| now > head_u64(v) + ttl)?;
-            t.remove_where(db::BLOBS, b"", |_, v| now > head_u64(v) + ttl)
+            t.remove_where(db::BLOBS, b"", |_, v| now > head_u64(v) + ttl)?;
+            t.remove_where(db::POW_SPENT, b"", |k, _| {
+                k.get(..4)
+                    .and_then(|b| b.try_into().ok())
+                    .map(u32::from_be_bytes)
+                    .is_none_or(|d| d < oldest)
+            })
         });
         self.claims.retain(|_, (_, t)| now <= *t + 600);
         self.kt_replies.retain(|_, (_, t)| now <= *t + 600);
@@ -514,14 +660,14 @@ impl Server {
         let keys: Vec<&ServerSecret> = self.keys.iter().collect();
         let opened = match enclave_rpc::open_request(&keys, request) {
             Ok(o) => o,
-            Err(_) => {
-                let mut r = vec![0u8; enclave_wire::UNIT_LEN];
-                if self.rng.fill("server/garbage-reply", &mut r).is_err() {
-                    r.fill(0);
-                }
-                return r;
-            }
+            Err(_) => return self.garbage(),
         };
+        // A request opened before is a replay (`09-transport.md` §2.3): it
+        // gets the same random bytes as one that doesn't open.
+        if !self.first_time(opened.key_id, &opened.replay_id) {
+            self.stats.replays += 1;
+            return self.garbage();
+        }
         let (status, extra_flags, reply_token, payload) =
             self.dispatch(&opened.header, &opened.envelope, now);
         if status == Status::Denied {
@@ -560,7 +706,7 @@ impl Server {
                 self.stats.cover += 1;
                 (Status::Ok, 0, none, Reply::Empty)
             }
-            Op::RegisterTokens => (self.register_tokens(h, env), 0, none, Reply::Empty),
+            Op::RegisterTokens => (self.register_tokens(h, env, now), 0, none, Reply::Empty),
             Op::Write => (self.write(h, env, now), 0, none, Reply::Empty),
             Op::WriteRequest => (self.write_request(h, env, now), 0, none, Reply::Empty),
             Op::Poll => self.poll(h),
@@ -587,10 +733,25 @@ impl Server {
         }
     }
 
-    fn register_tokens(&mut self, h: &RequestHeader, env: &[u8]) -> Status {
+    fn register_tokens(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
         let owner_hash = api::credential_hash(&h.token);
         let mb = h.mailbox;
         if h.flags & FLAG_CREATE != 0 {
+            // A new inbox costs a proof of work for its address, today's or
+            // yesterday's (`09-transport.md` §3.1).
+            if self.cfg.effort_inbox > 0 {
+                let proof: Option<[u8; 32]> = api::unframe(env)
+                    .ok()
+                    .and_then(|p| p.get(..32))
+                    .and_then(|p| p.try_into().ok());
+                let effort = self.cfg.effort_inbox;
+                let ok = proof.is_some_and(|p| {
+                    self.spend_pow(|d| api::pow_context_inbox(&mb, d), effort, &p, now)
+                });
+                if !ok {
+                    return Status::Pow;
+                }
+            }
             let mut owner = [0u8; 32];
             owner.copy_from_slice(&h.token);
             let ib = Inbox {
@@ -826,8 +987,9 @@ impl Server {
     fn write_request(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
         let invite = h.flags & FLAG_INVITE != 0;
         if !invite {
-            let ctx = api::pow_context_request(&h.mailbox, &sha3_512(env));
-            if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
+            let digest = sha3_512(env);
+            let ctx = |d| api::pow_context_request(&h.mailbox, d, &digest);
+            if !self.spend_pow(ctx, self.cfg.effort_request, &h.token, now) {
                 return Status::Pow;
             }
         }
@@ -862,8 +1024,9 @@ impl Server {
     /// (it must be one of ours). Costs a proof of work; the queue keeps the
     /// newest [`MAX_REPORTS`].
     fn report(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
-        let ctx = api::pow_context_report(&h.mailbox, &sha3_512(env));
-        if !enclave_tokens::verify(&ctx, self.cfg.effort_request, &PowProof(h.token)) {
+        let digest = sha3_512(env);
+        let ctx = |d| api::pow_context_report(&h.mailbox, d, &digest);
+        if !self.spend_pow(ctx, self.cfg.effort_request, &h.token, now) {
             return Status::Pow;
         }
         let Ok(body) = api::unframe(env).and_then(api::ReportBody::decode) else {
@@ -1046,6 +1209,10 @@ impl Server {
                 let got = self.db.read(|r| r.get(db::TOMBSTONES, &req.key));
                 self.stored_reply(got, req.index, |v| v)
             }
+            (DirKind::Equivocation, DirAction::Get) => {
+                let got = self.db.read(|r| r.get(db::EQUIVOCATIONS, &req.key));
+                self.stored_reply(got, req.index, |v| v)
+            }
             (DirKind::Vault, DirAction::Get) => {
                 let got = self.db.read(|r| r.get(db::VAULTS, &req.key));
                 self.stored_reply(got, req.index, |v| v.get(32..).unwrap_or_default())
@@ -1122,9 +1289,8 @@ impl Server {
     }
 
     fn claim_bundle(&mut self, req: &DirRequest, now: u64) -> (Status, Reply) {
-        let day = now / 86_400;
-        let ctx = api::pow_context_claim(&req.key, day);
-        if !enclave_tokens::verify(&ctx, self.cfg.effort_claim, &PowProof(req.proof)) {
+        let ctx = |d| api::pow_context_claim(&req.key, d);
+        if !self.spend_pow(ctx, self.cfg.effort_claim, &req.proof, now) {
             return (Status::Pow, Reply::Empty);
         }
         let device = req.key[..16].to_vec();
@@ -1195,9 +1361,49 @@ impl Server {
             DirKind::Migration => self.accept_migration(&req.key, &object, now),
             DirKind::Moved => self.accept_server_move(&req.key, &object, now),
             DirKind::Tombstone => self.accept_tombstone(&req.key, &object, now),
+            DirKind::Equivocation => self.accept_equivocation(&req.key, &object),
             DirKind::Descriptor | DirKind::ServerList => Status::Denied,
         };
         (status, Reply::Empty)
+    }
+
+    /// A proof that a log equivocated (`12-servers.md` §3.8): for this
+    /// server's own log or one the server list names, keyed by its server
+    /// id, both heads signed with its head key. Kept (the first per log) and
+    /// queued for the witnesses.
+    fn accept_equivocation(&mut self, key: &[u8; 32], object: &[u8]) -> Status {
+        let Ok(e) = enclave_kt::Equivocation::decode(object) else {
+            return Status::Malformed;
+        };
+        if key[..16] != e.server() || key[16..] != [0; 16] {
+            return Status::Invalid;
+        }
+        let head_key = match self.kt_info() {
+            Some(i) if i.server == e.server() => Some(i.head_key),
+            _ => self.listed_logs.get(&e.server()).cloned(),
+        };
+        let Some(head_key) = head_key else {
+            return Status::NotFound;
+        };
+        if e.verify(&head_key).is_err() {
+            return Status::Invalid;
+        }
+        let bytes = e.encode();
+        let new = self.tx(|t| {
+            if t.has(db::EQUIVOCATIONS, key)? {
+                return Ok(false);
+            }
+            t.put(db::EQUIVOCATIONS, key, &bytes)?;
+            Ok(true)
+        });
+        match new {
+            Ok(true) => {
+                self.equivocations_out.push(e);
+                Status::Ok
+            }
+            Ok(false) => Status::Ok,
+            Err(s) => s,
+        }
     }
 
     fn lookup_username(&mut self, req: &DirRequest, now: u64) -> (Status, Reply) {
@@ -1235,13 +1441,16 @@ impl Server {
         object: &[u8],
         now: u64,
     ) -> Status {
+        if self.kt.is_none() {
+            return Status::NotFound;
+        }
+        let ctx = |d| api::pow_context_username(key, d);
+        if !self.spend_pow(ctx, self.cfg.effort_username, proof, now) {
+            return Status::Pow;
+        }
         let Some(kt) = &self.kt else {
             return Status::NotFound;
         };
-        let ctx = api::pow_context_username(key, now / 86_400);
-        if !enclave_tokens::verify(&ctx, self.cfg.effort_username, &PowProof(*proof)) {
-            return Status::Pow;
-        }
         let Ok(claim) = UsernameClaim::decode(object) else {
             return Status::Malformed;
         };

@@ -452,6 +452,13 @@ impl ServerList {
         Ok(list)
     }
 
+    /// Decode a signed list without checking its signatures: for a server
+    /// that serves its operator's copy and holds no foundation key (clients
+    /// check it with [`ServerList::verify`]).
+    pub fn decode_unchecked(b: &[u8]) -> Result<Self> {
+        Ok(Self::read(b)?.0)
+    }
+
     /// The server with `id`.
     pub fn server(&self, id: &[u8; 16]) -> Option<&ListedServer> {
         self.servers.iter().find(|s| s.id() == *id)

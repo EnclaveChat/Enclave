@@ -24,6 +24,34 @@ pub struct FileConfig {
     pub push: PushSection,
     /// Backups.
     pub backup: BackupSection,
+    /// Where state is kept (redb by default, or PostgreSQL).
+    pub database: DatabaseSection,
+}
+
+/// `[database]`: a redb file in `server.data_dir` unless a PostgreSQL URL
+/// is given (`docs/12-servers.md` §6).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DatabaseSection {
+    /// `postgres://user:password@host/db`; empty for redb.
+    pub url: String,
+    /// A file holding the URL (a Docker secret), used when `url` is empty.
+    pub url_file: Option<PathBuf>,
+}
+
+impl DatabaseSection {
+    /// The PostgreSQL URL, if one is configured.
+    pub fn postgres_url(&self) -> Result<Option<String>, ConfigError> {
+        if !self.url.is_empty() {
+            return Ok(Some(self.url.clone()));
+        }
+        match &self.url_file {
+            Some(p) => std::fs::read_to_string(p)
+                .map(|s| Some(s.trim().to_string()))
+                .map_err(|e| ConfigError(format!("{}: {e}", p.display()))),
+            None => Ok(None),
+        }
+    }
 }
 
 /// `[server]`
@@ -81,6 +109,8 @@ pub struct PolicySection {
     pub effort_blob: u32,
     /// Proof-of-work effort for claiming a username.
     pub effort_username: u32,
+    /// Proof-of-work effort for creating an inbox.
+    pub effort_inbox: u32,
     /// Maximum stored envelopes per inbox.
     pub inbox_quota: usize,
     /// Maximum pending requests per request inbox.
@@ -99,6 +129,7 @@ impl Default for PolicySection {
             effort_claim: c.effort_claim,
             effort_blob: c.effort_blob,
             effort_username: c.effort_username,
+            effort_inbox: c.effort_inbox,
             inbox_quota: c.inbox_quota,
             request_quota: c.request_quota,
             token_quota: c.token_quota,
@@ -208,6 +239,7 @@ impl FileConfig {
             effort_claim: p.effort_claim,
             effort_blob: p.effort_blob,
             effort_username: p.effort_username,
+            effort_inbox: p.effort_inbox,
             inbox_quota: n(p.inbox_quota),
             request_quota: n(p.request_quota),
             token_quota: n(p.token_quota),
@@ -224,6 +256,7 @@ impl FileConfig {
             effort_claim: p.effort_claim,
             effort_blob: p.effort_blob,
             effort_username: p.effort_username,
+            effort_inbox: p.effort_inbox,
             inbox_quota: p.inbox_quota,
             request_quota: p.request_quota,
             token_quota: p.token_quota,

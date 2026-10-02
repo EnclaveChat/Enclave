@@ -117,6 +117,15 @@ fn db_path(cfg: &FileConfig) -> PathBuf {
     cfg.server.data_dir.join("server.redb")
 }
 
+/// The server's database: PostgreSQL if `[database]` names one, otherwise
+/// the redb file in `data_dir`.
+fn open_db(cfg: &FileConfig) -> Result<Db, String> {
+    match cfg.database.postgres_url().map_err(|e| e.to_string())? {
+        Some(url) => Db::connect(&url).map_err(|e| format!("postgres: {e}")),
+        None => Db::open(&db_path(cfg)).map_err(|e| e.to_string()),
+    }
+}
+
 fn kt_path(cfg: &FileConfig) -> PathBuf {
     cfg.server.data_dir.join("kt.redb")
 }
@@ -160,7 +169,8 @@ fn backup_now(args: &[String]) -> Result<(), String> {
     let cfg = load_config(args)?;
     // redb allows one process per file: this works only while `run` is
     // stopped; a running server takes its own snapshots (`[backup]`).
-    let db = Db::open(&db_path(&cfg)).map_err(|e| e.to_string())?;
+    // PostgreSQL is snapshotted in one transaction while it runs.
+    let db = open_db(&cfg)?;
     let kt = if kt_path(&cfg).exists() {
         Some(KtStore::open(&kt_path(&cfg)).map_err(|e| e.to_string())?)
     } else {
@@ -188,11 +198,20 @@ fn restore(args: &[String]) -> Result<(), String> {
         .ok_or("expected a server-<time>.redb snapshot")?;
     let cfg = load_config(args)?;
     // Opening it checks it is a database this server can read.
-    drop(Db::open(&snap).map_err(|e| format!("{}: {e}", snap.display()))?);
-    // redb takes a lock: if `run` holds the database, this fails here.
-    drop(Db::open(&db_path(&cfg)).map_err(|e| format!("is the server running? {e}"))?);
+    let snap_db = Db::open(&snap).map_err(|e| format!("{}: {e}", snap.display()))?;
     let kt_snap = snap.with_file_name(name.replacen("server-", "kt-", 1));
-    let mut pairs = vec![(snap.clone(), db_path(&cfg))];
+    let mut pairs = Vec::new();
+    if let Some(url) = cfg.database.postgres_url().map_err(|e| e.to_string())? {
+        // Into PostgreSQL: everything replaced in one transaction.
+        let db = Db::connect(&url).map_err(|e| format!("postgres: {e}"))?;
+        db.copy_from(&snap_db).map_err(|e| e.to_string())?;
+        println!("{} -> postgres", snap.display());
+    } else {
+        // redb takes a lock: if `run` holds the database, this fails here.
+        drop(Db::open(&db_path(&cfg)).map_err(|e| format!("is the server running? {e}"))?);
+        pairs.push((snap.clone(), db_path(&cfg)));
+    }
+    drop(snap_db);
     if kt_snap.exists() {
         pairs.push((kt_snap, kt_path(&cfg)));
     }
@@ -293,7 +312,8 @@ async fn run(args: &[String]) -> Result<(), String> {
     keys.chain.advance_to(today()).map_err(|e| e.to_string())?;
     let id = keys.id();
     std::fs::create_dir_all(&cfg.server.data_dir).map_err(|e| e.to_string())?;
-    let db = Db::open(&db_path(&cfg)).map_err(|e| e.to_string())?;
+    let db = open_db(&cfg)?;
+    eprintln!("state: {}", db.backend());
     let mut server =
         Server::open(cfg.policy(id), db, keys.chain.keys()).map_err(|e| e.to_string())?;
     server.set_key_bundle(chain_bundle(&keys)?);
@@ -404,6 +424,16 @@ async fn run(args: &[String]) -> Result<(), String> {
                 let mut s = server.lock().await;
                 s.expire(now());
                 refresh_server_list(&cfg, &mut s, &mut list_seen);
+                // Proofs that a log equivocated go to every witness we know.
+                let proofs = s.take_equivocations();
+                if !proofs.is_empty() {
+                    let mut urls = cfg.kt.witnesses.clone();
+                    urls.extend(s.listed_witnesses().iter().cloned());
+                    urls.sort();
+                    urls.dedup();
+                    let ca = cfg.kt.witness_ca.clone();
+                    tokio::spawn(forward_equivocations(urls, ca, proofs));
+                }
             }
         });
     }
@@ -553,6 +583,33 @@ fn refresh_server_list(
             *seen = Some(modified);
         }
         Err(e) => eprintln!("{}: {e}", path.display()),
+    }
+}
+
+/// Hand equivocation proofs to witnesses (`docs/12-servers.md` §3.8).
+async fn forward_equivocations(
+    urls: Vec<String>,
+    ca: Option<std::path::PathBuf>,
+    proofs: Vec<enclave_kt::Equivocation>,
+) {
+    for url in urls {
+        let w = match enclave_witness::HttpWitness::connect(&url, ca.as_deref(), now()).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("equivocation: witness {url}: {e}");
+                continue;
+            }
+        };
+        for p in &proofs {
+            match w.publish_equivocation(p).await {
+                Ok(_) => eprintln!(
+                    "equivocation of log {} (epoch {}) handed to {url}",
+                    hex(&p.server()),
+                    p.epoch()
+                ),
+                Err(e) => eprintln!("equivocation: {e}"),
+            }
+        }
     }
 }
 

@@ -134,3 +134,76 @@ fn manifest_rollback_is_refused_by_the_directory() {
     );
     assert_eq!(st, Status::Invalid);
 }
+
+/// A bundle claim costs a proof of work, and a proof claims once: one
+/// solution can't drain a device's one-time prekeys (RT-06).
+#[test]
+fn rt06_opk_claim_requires_pow() {
+    let mut rng = HedgedRng::new().unwrap();
+    let mut net = Network::new();
+    let s = [1u8; 16];
+    net.add_server(s, 4);
+    let bob = SimUser::create(&mut net, s, 1, &mut rng);
+    let key = api::device_key(&bob.manifest.devices[0].id);
+    let claim = |net: &mut Network, proof: [u8; 32], rng: &mut HedgedRng| {
+        net.dir_get(
+            &s,
+            api::DirKind::Bundle,
+            api::DirAction::Claim,
+            key,
+            proof,
+            rng,
+        )
+    };
+    assert!(claim(&mut net, [0; 32], &mut rng).is_none(), "no proof");
+    let day = net.now / 86_400;
+    let proof = enclave_tokens::solve(&api::pow_context_claim(&key, day), 1, &mut rng).unwrap();
+    assert!(claim(&mut net, proof.0, &mut rng).is_some());
+    assert!(claim(&mut net, proof.0, &mut rng).is_none(), "spent");
+    let other = enclave_tokens::solve(&api::pow_context_claim(&key, day), 1, &mut rng).unwrap();
+    assert!(claim(&mut net, other.0, &mut rng).is_some(), "a new proof");
+}
+
+/// A request-inbox write needs a proof of work or an invite capability, and
+/// a proof writes once: the same envelope can't be written again and again
+/// to push real requests out (RT-25).
+#[test]
+fn rt25_request_requires_pow_or_capability() {
+    let mut rng = HedgedRng::new().unwrap();
+    let mut net = Network::new();
+    let s = [1u8; 16];
+    net.add_server(s, 4);
+    let bob = SimUser::create(&mut net, s, 1, &mut rng);
+    let inbox = bob.card().request_inbox;
+    let env = vec![7u8; ENVELOPE_LEN];
+    let ctx = api::pow_context_request(
+        &inbox,
+        net.now / 86_400,
+        &enclave_crypto::hash::sha3_512(&env),
+    );
+    let proof = enclave_tokens::solve(&ctx, 4, &mut rng).unwrap();
+    let write = |net: &mut Network, token: [u8; 32], rng: &mut HedgedRng| {
+        let h = RequestHeader {
+            op: Op::WriteRequest,
+            flags: 0,
+            mailbox: inbox,
+            token,
+        };
+        net.call(&s, h, &env, rng).0
+    };
+    assert_eq!(write(&mut net, [0; 32], &mut rng), Status::Pow, "no proof");
+    assert_eq!(write(&mut net, proof.0, &mut rng), Status::Ok);
+    assert_eq!(write(&mut net, proof.0, &mut rng), Status::Pow, "spent");
+    // An invite capability stands in for the proof only if it's registered.
+    let h = RequestHeader {
+        op: Op::WriteRequest,
+        flags: api::FLAG_INVITE,
+        mailbox: inbox,
+        token: [9; 32],
+    };
+    assert_eq!(
+        net.call(&s, h, &env, &mut rng).0,
+        Status::Denied,
+        "unknown capability"
+    );
+}

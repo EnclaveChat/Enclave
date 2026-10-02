@@ -583,6 +583,7 @@ pub async fn run_with(
                 effort_claim: 1,
                 effort_blob: 1,
                 effort_username: 4,
+                effort_inbox: 1,
                 ..Default::default()
             });
             let kt = t.enable_usernames(&DEMO_SERVER, DEMO_DOMAIN);
@@ -2481,6 +2482,12 @@ impl Engine {
                 s.shown_share = share.to_string();
             }
         }
+        s.clock_skew = c
+            .clock_skew()
+            .ok()
+            .flatten()
+            .map(describe_skew)
+            .unwrap_or_default();
         s.kt_split = c
             .kt_alert()
             .map(|a| {
@@ -2866,4 +2873,18 @@ impl Engine {
         }
         s
     }
+}
+
+/// "3 hours behind", "2 days ahead": a clock skew in words.
+fn describe_skew(skew: i64) -> String {
+    let secs = skew.unsigned_abs();
+    let (n, unit) = if secs < 2 * 3600 {
+        (secs.div_ceil(60), "minute")
+    } else if secs < 2 * 86_400 {
+        (secs / 3600, "hour")
+    } else {
+        (secs / 86_400, "day")
+    };
+    let way = if skew < 0 { "behind" } else { "ahead" };
+    format!("{n} {unit}{} {way}", if n == 1 { "" } else { "s" })
 }

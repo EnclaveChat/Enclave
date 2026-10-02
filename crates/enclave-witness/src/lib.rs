@@ -13,9 +13,20 @@
 //! ```text
 //! GET  /witness/v1/descriptor        the signed WitnessDescriptor
 //! GET  /witness/v1/last/<server hex> the 64-byte head last cosigned for that log (404: none)
+//! GET  /witness/v1/checkpoint/<server hex>
+//!                                    that head as a C2SP checkpoint with this witness's
+//!                                    cosignature/v1 line (text; `enclave_kt::c2sp`)
+//! GET  /witness/v1/c2sp-key          the verifier keys of those notes, one per line
+//!                                    (Ed25519 cosignature/v1, ML-DSA-44)
 //! POST /witness/v1/cosign            CosignRequest → Cosignature
 //!                                    (403 log not listed or bad signature,
 //!                                     409 not append-only, 400 malformed)
+//! POST /witness/v1/equivocation      Equivocation (two heads of a listed log, one epoch,
+//!                                    two roots) → 201 new, 200 held; 403 unlisted or
+//!                                    bad signature. The log is never cosigned again
+//!                                    (cosign answers 410).
+//! GET  /witness/v1/equivocation/<server hex>
+//!                                    the proof held (404: none)
 //! CosignRequest = u8(1) ‖ u32(n) ‖ n × (u32 len ‖ SignedHead) ‖ u8(has proof) [‖ u32 len ‖ AppendOnlyProof (akd protobuf)]
 //! ```
 //!

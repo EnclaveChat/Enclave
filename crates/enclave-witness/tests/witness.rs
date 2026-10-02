@@ -1,6 +1,7 @@
 //! Two witnesses run as services over HTTPS (the Enclave TLS profile); a
 //! log reaches them as `HttpWitness`es and their cosignatures meet a
-//! threshold of 2 under pins derived from the server list. A fork of the
+//! threshold of 2 under pins derived from the server list, and they serve
+//! the head as a C2SP checkpoint with their C2SP cosignatures. A fork of the
 //! log is refused, and so is a log the list doesn't name.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -10,6 +11,7 @@ use enclave_federation::{
     FoundationKey, KtKeys, ListedServer, ListedWitness, ServerList, WitnessDescriptor, server_id,
     witness_id,
 };
+use enclave_kt::c2sp::{C2spKey, verify_note};
 use enclave_kt::{
     KtLog, KtPolicy, KtService, KtStore, LookupReply, Witness, WitnessClient, verify_lookup,
 };
@@ -50,11 +52,13 @@ async fn start_witness(
     let mut rng = HedgedRng::new().unwrap();
     let key = CompositeSigningKey::generate(&mut rng).unwrap();
     let id = witness_id(key.public());
-    let d = WitnessDescriptor::sign(
+    let c2sp = C2spKey::derive(&id, key.seed().as_slice());
+    let d = WitnessDescriptor::sign_with_c2sp(
         &key,
         name,
         name,
         "https://w",
+        c2sp.vkeys(),
         now() - 5,
         now() + 86_400,
         &mut rng,
@@ -62,7 +66,7 @@ async fn start_witness(
     .unwrap();
     let store = KtStore::open(&dir.join(format!("{name}.redb"))).unwrap();
     let w = Witness::with_store(id, name, key, store).unwrap();
-    let svc = Arc::new(WitnessService::new(w, d.encode()));
+    let svc = Arc::new(WitnessService::new(w, d.encode()).with_c2sp(c2sp));
     svc.set_logs(list).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -187,6 +191,25 @@ async fn two_remote_witnesses_meet_threshold_two() {
     .unwrap();
     assert_eq!(value, vec![2; 80]);
 
+    // The same head as a C2SP checkpoint, cosigned in both C2SP formats
+    // under the keys the witness's descriptor names.
+    let w1c = HttpWitness::connect(&u1, Some(&ca), now()).await.unwrap();
+    let vkeys = w1c.c2sp_vkeys().await.unwrap();
+    assert_eq!(vkeys, w1c.descriptor().unwrap().c2sp_vkeys);
+    assert_eq!(vkeys.len(), 2);
+    let note = w1c.checkpoint(&id).await.unwrap();
+    for v in &vkeys {
+        let (text, _) = verify_note(v, &note).unwrap();
+        assert_eq!(text, enclave_kt::c2sp::checkpoint(&reply.head.head));
+    }
+    // For the Go reference implementation (CI job `tls-interop`).
+    if let Ok(out) = std::env::var("ENCLAVE_C2SP_OUT") {
+        let out = std::path::Path::new(&out);
+        std::fs::create_dir_all(out).unwrap();
+        std::fs::write(out.join("vkeys.txt"), vkeys.join("\n") + "\n").unwrap();
+        std::fs::write(out.join("note.txt"), &note).unwrap();
+    }
+
     // A fork: the same server key, a different history from epoch 1. Both
     // witnesses have cosigned epoch 2 of the real log and refuse it.
     let mut fork = KtLog::new(id, CompositeSigningKey::from_seed(&head_seed).unwrap(), vrf)
@@ -204,6 +227,29 @@ async fn two_remote_witnesses_meet_threshold_two() {
             .await,
         Err(enclave_kt::KtError::NotAppendOnly)
     );
+
+    // The fork's epoch-2 head beside the real one proves the log
+    // equivocated. A witness takes the proof once, serves it, and never
+    // cosigns that log again.
+    let fork_head = fork.heads_after(1, 2).pop().unwrap();
+    assert_eq!(fork_head.head.epoch, reply.head.head.epoch);
+    let e = enclave_kt::Equivocation {
+        a: reply.head.clone(),
+        b: fork_head.clone(),
+    };
+    assert_eq!(w.publish_equivocation(&e).await, Ok(true));
+    assert_eq!(w.publish_equivocation(&e).await, Ok(false));
+    assert_eq!(w.equivocation(&id).await.unwrap(), Some(e.clone()));
+    assert_eq!(
+        w.cosign(fork.public_key(), &heads, None, now()).await,
+        Err(enclave_kt::KtError::Equivocated)
+    );
+    // Two copies of one head prove nothing.
+    let same = enclave_kt::Equivocation {
+        a: fork_head.clone(),
+        b: fork_head,
+    };
+    assert!(w.publish_equivocation(&same).await.is_err());
 
     // A log the list doesn't name: refused outright.
     let other = CompositeSigningKey::generate(&mut rng).unwrap();

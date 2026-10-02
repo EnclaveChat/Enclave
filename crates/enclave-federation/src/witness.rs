@@ -3,7 +3,7 @@
 //! ```text
 //! witness id = first 16 B of SHAKE256("enclave/v1/kt/witness-id" ‖ public key)
 //! descriptor = u8(1) ‖ public key (2,649) ‖ bytes(operator) ‖ bytes(family) ‖ bytes(url)
-//!            ‖ u64(published) ‖ u64(expires)
+//!            ‖ bytes(C2SP verifier keys, "\n"-separated, or empty) ‖ u64(published) ‖ u64(expires)
 //!            ‖ CompositeSign(key, "enclave/v1/kt/witness-descriptor", all of the above)
 //! ```
 
@@ -18,6 +18,9 @@ pub const CTX_WITNESS_DESCRIPTOR: &str = "enclave/v1/kt/witness-descriptor";
 /// Label of the witness id.
 pub const WITNESS_ID_LABEL: &str = "enclave/v1/kt/witness-id";
 const VERSION: u8 = 1;
+/// Longest list of C2SP verifier keys (an ML-DSA-44 key is about 1,800
+/// characters).
+const MAX_C2SP: usize = 8192;
 
 /// A witness id from its cosigning key.
 pub fn witness_id(key: &CompositePublic) -> [u8; 16] {
@@ -38,6 +41,9 @@ pub struct WitnessDescriptor {
     pub family: String,
     /// HTTPS base URL of the cosigning API.
     pub url: String,
+    /// The verifier keys (`name+id+key`) of the C2SP cosignatures it
+    /// publishes (`enclave_kt::c2sp`); empty if none.
+    pub c2sp_vkeys: Vec<String>,
     /// When signed.
     pub published: u64,
     /// Valid until.
@@ -58,6 +64,7 @@ impl WitnessDescriptor {
             .bytes(self.operator.as_bytes())
             .bytes(self.family.as_bytes())
             .bytes(self.url.as_bytes())
+            .bytes(self.c2sp_vkeys.join("\n").as_bytes())
             .u64(self.published)
             .u64(self.expires);
         w.finish()
@@ -73,11 +80,37 @@ impl WitnessDescriptor {
         expires: u64,
         rng: &mut HedgedRng,
     ) -> Result<Self> {
+        Self::sign_with_c2sp(
+            key,
+            operator,
+            family,
+            url,
+            Vec::new(),
+            published,
+            expires,
+            rng,
+        )
+    }
+
+    /// Build and sign, naming the witness's C2SP cosigning keys.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_with_c2sp(
+        key: &CompositeSigningKey,
+        operator: &str,
+        family: &str,
+        url: &str,
+        c2sp_vkeys: Vec<String>,
+        published: u64,
+        expires: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<Self> {
         if operator.is_empty()
             || operator.len() > MAX_NAME
             || family.len() > MAX_NAME
             || url.len() > MAX_ADDRESS
             || expires <= published
+            || c2sp_vkeys.join("\n").len() > MAX_C2SP
+            || c2sp_vkeys.iter().any(|k| k.is_empty() || k.contains('\n'))
         {
             return Err(FedError::Malformed);
         }
@@ -86,6 +119,7 @@ impl WitnessDescriptor {
             operator: operator.into(),
             family: family.into(),
             url: url.into(),
+            c2sp_vkeys,
             published,
             expires,
             signature: Vec::new(),
@@ -114,6 +148,10 @@ impl WitnessDescriptor {
             operator: utf8(r.bytes(MAX_NAME)?)?,
             family: utf8(r.bytes(MAX_NAME)?)?,
             url: utf8(r.bytes(MAX_ADDRESS)?)?,
+            c2sp_vkeys: match utf8(r.bytes(MAX_C2SP)?)? {
+                s if s.is_empty() => Vec::new(),
+                s => s.split('\n').map(str::to_string).collect(),
+            },
             published: r.u64()?,
             expires: r.u64()?,
             signature: read_sig(&mut r)?.to_vec(),

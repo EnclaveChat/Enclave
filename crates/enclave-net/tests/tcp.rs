@@ -24,6 +24,7 @@ async fn spawn_server() -> (std::net::SocketAddr, [u8; 16]) {
     let mut server = Server::new(
         Config {
             id,
+            effort_inbox: 0,
             ..Config::default()
         },
         day,

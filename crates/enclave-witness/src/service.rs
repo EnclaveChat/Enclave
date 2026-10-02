@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use enclave_crypto::sig::CompositePublic;
 use enclave_federation::ServerList;
+use enclave_kt::c2sp::C2spKey;
 use enclave_kt::{KtError, Witness};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tokio::sync::Mutex;
 pub struct WitnessService {
     inner: Mutex<Inner>,
     clock: fn() -> u64,
+    c2sp: Option<C2spKey>,
 }
 
 struct Inner {
@@ -25,6 +27,8 @@ struct Inner {
     /// Listed logs: server id → head-signing key.
     logs: HashMap<[u8; 16], CompositePublic>,
     descriptor: Vec<u8>,
+    /// The C2SP note of the head last cosigned, per log.
+    notes: HashMap<[u8; 16], String>,
 }
 
 fn system_now() -> u64 {
@@ -48,9 +52,18 @@ impl WitnessService {
                 witness,
                 logs: HashMap::new(),
                 descriptor,
+                notes: HashMap::new(),
             }),
             clock,
+            c2sp: None,
         }
+    }
+
+    /// Also cosign every head in the C2SP `cosignature/v1` format with
+    /// `key` (`enclave_kt::c2sp`), served at `/witness/v1/checkpoint/…`.
+    pub fn with_c2sp(mut self, key: C2spKey) -> Self {
+        self.c2sp = Some(key);
+        self
     }
 
     /// Witness the logs of the servers in `list` (those that run one),
@@ -89,13 +102,22 @@ impl WitnessService {
             .ok_or(StatusCode::FORBIDDEN)?;
         let mut rng =
             enclave_crypto::rng::HedgedRng::new().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let inner = &mut *inner;
         match inner
             .witness
             .cosign(&key, &req.heads, req.proof, now, &mut rng)
             .await
         {
-            Ok(c) => Ok(c.encode()),
+            Ok(c) => {
+                if let (Some(k), Some(h)) = (&self.c2sp, req.heads.last())
+                    && let Ok(note) = k.cosign(&h.head, c.time, &mut rng)
+                {
+                    inner.notes.insert(server, note);
+                }
+                Ok(c.encode())
+            }
             Err(KtError::NotAppendOnly) => Err(StatusCode::CONFLICT),
+            Err(KtError::Equivocated) => Err(StatusCode::GONE),
             Err(KtError::Signature) => Err(StatusCode::FORBIDDEN),
             Err(KtError::Directory(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
             Err(_) => Err(StatusCode::BAD_REQUEST),
@@ -112,12 +134,67 @@ impl WitnessService {
             .map(|h| h.encode())
     }
 
+    /// Take a proof that a listed log equivocated: `201` if new, `200` if
+    /// already held; the log is never cosigned again (`410` from then on).
+    pub async fn equivocation(&self, body: &[u8]) -> Result<StatusCode, StatusCode> {
+        let e = enclave_kt::Equivocation::decode(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut inner = self.inner.lock().await;
+        let key = inner
+            .logs
+            .get(&e.server())
+            .cloned()
+            .ok_or(StatusCode::FORBIDDEN)?;
+        match inner.witness.record_equivocation(&key, &e) {
+            Ok(true) => {
+                eprintln!(
+                    "log {} equivocated at epoch {}: no longer witnessed",
+                    hex(&e.server()),
+                    e.epoch()
+                );
+                Ok(StatusCode::CREATED)
+            }
+            Ok(false) => Ok(StatusCode::OK),
+            Err(KtError::Directory(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            Err(_) => Err(StatusCode::FORBIDDEN),
+        }
+    }
+
+    /// The proof held that `server`'s log equivocated.
+    pub async fn equivocation_of(&self, server: &[u8; 16]) -> Option<Vec<u8>> {
+        self.inner
+            .lock()
+            .await
+            .witness
+            .equivocation(server)
+            .map(enclave_kt::Equivocation::encode)
+    }
+
+    /// The C2SP signed note for the head last cosigned for `server`
+    /// (signed afresh after a restart: it's still the newest).
+    pub async fn checkpoint(&self, server: &[u8; 16]) -> Option<String> {
+        let k = self.c2sp.as_ref()?;
+        let now = (self.clock)();
+        let mut inner = self.inner.lock().await;
+        if let Some(n) = inner.notes.get(server) {
+            return Some(n.clone());
+        }
+        let head = inner.witness.last_head(server)?;
+        let mut rng = enclave_crypto::rng::HedgedRng::new().ok()?;
+        let note = k.cosign(&head, now, &mut rng).ok()?;
+        inner.notes.insert(*server, note.clone());
+        Some(note)
+    }
+
     /// The HTTP routes.
     pub fn router(self: Arc<Self>) -> Router {
         Router::new()
             .route("/witness/v1/descriptor", get(descriptor))
+            .route("/witness/v1/c2sp-key", get(c2sp_key))
+            .route("/witness/v1/checkpoint/{server}", get(checkpoint))
             .route("/witness/v1/last/{server}", get(last))
             .route("/witness/v1/cosign", post(cosign))
+            .route("/witness/v1/equivocation", post(equivocation))
+            .route("/witness/v1/equivocation/{server}", get(equivocation_of))
             .layer(DefaultBodyLimit::max(MAX_REQUEST))
             .with_state(self)
     }
@@ -142,6 +219,37 @@ async fn last(
         .await
         .map(|h| h.to_vec())
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn c2sp_key(State(s): State<Arc<WitnessService>>) -> Result<String, StatusCode> {
+    s.c2sp
+        .as_ref()
+        .map(|k| k.vkeys().iter().map(|v| format!("{v}\n")).collect())
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn checkpoint(
+    State(s): State<Arc<WitnessService>>,
+    Path(server): Path<String>,
+) -> Result<String, StatusCode> {
+    let id: [u8; 16] = enclave_service::config::unhex(&server)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    s.checkpoint(&id).await.ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn equivocation(State(s): State<Arc<WitnessService>>, body: Bytes) -> StatusCode {
+    s.equivocation(&body).await.unwrap_or_else(|e| e)
+}
+
+async fn equivocation_of(
+    State(s): State<Arc<WitnessService>>,
+    Path(server): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
+    let id: [u8; 16] = enclave_service::config::unhex(&server)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    s.equivocation_of(&id).await.ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn cosign(State(s): State<Arc<WitnessService>>, body: Bytes) -> Result<Vec<u8>, StatusCode> {

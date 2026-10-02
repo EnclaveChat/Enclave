@@ -42,6 +42,8 @@ pub struct Policy {
     pub effort_blob: u32,
     /// Equi-X effort for a username claim.
     pub effort_username: u32,
+    /// Equi-X effort for creating an inbox.
+    pub effort_inbox: u32,
     /// Stored envelopes per inbox.
     pub inbox_quota: u32,
     /// Pending requests per request inbox.
@@ -110,6 +112,7 @@ impl ServerDescriptor {
             p.effort_claim,
             p.effort_blob,
             p.effort_username,
+            p.effort_inbox,
             p.inbox_quota,
             p.request_quota,
             p.token_quota,
@@ -208,7 +211,7 @@ impl ServerDescriptor {
         let family = utf8(r.bytes(MAX_NAME)?)?;
         let nym_address = utf8(r.bytes(MAX_ADDRESS)?)?;
         let onion = utf8(r.bytes(MAX_ADDRESS)?)?;
-        let mut v = [0u32; 8];
+        let mut v = [0u32; 9];
         for x in &mut v {
             *x = r.u32()?;
         }
@@ -217,10 +220,11 @@ impl ServerDescriptor {
             effort_claim: v[1],
             effort_blob: v[2],
             effort_username: v[3],
-            inbox_quota: v[4],
-            request_quota: v[5],
-            token_quota: v[6],
-            ttl_days: v[7],
+            effort_inbox: v[4],
+            inbox_quota: v[5],
+            request_quota: v[6],
+            token_quota: v[7],
+            ttl_days: v[8],
         };
         let kt = match r.u8()? {
             0 => None,

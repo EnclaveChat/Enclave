@@ -64,6 +64,7 @@ impl LocalTransport {
             effort_claim: 1,
             effort_blob: 1,
             effort_username: 1,
+            effort_inbox: 1,
             ..Default::default()
         })?;
         let policy =

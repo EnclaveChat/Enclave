@@ -17,6 +17,7 @@
 use enclave_crypto::rng::HedgedRng;
 use enclave_crypto::sig::{COMPOSITE_SEED_LEN, CompositeSigningKey};
 use enclave_federation::{FoundationPublic, ServerList, WitnessDescriptor, witness_id};
+use enclave_kt::c2sp::C2spKey;
 use enclave_kt::{KtStore, Witness};
 use enclave_service::config::{ConfigError, flag, hex};
 use enclave_service::keyfile::{create_key_dir, create_secret, read_array};
@@ -144,16 +145,22 @@ fn load_key(args: &[String]) -> Result<(FileConfig, CompositeSigningKey), String
 fn descriptor(cfg: &FileConfig, key: &CompositeSigningKey) -> Result<WitnessDescriptor, String> {
     let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
     let t = now();
-    WitnessDescriptor::sign(
+    WitnessDescriptor::sign_with_c2sp(
         key,
         &cfg.witness.operator,
         &cfg.witness.family,
         &cfg.witness.url,
+        c2sp_key(key).vkeys(),
         t,
         t + 3 * 86_400,
         &mut rng,
     )
     .map_err(|e| e.to_string())
+}
+
+/// The witness's C2SP cosigning key, derived from its composite seed.
+fn c2sp_key(key: &CompositeSigningKey) -> C2spKey {
+    C2spKey::derive(&witness_id(key.public()), key.seed().as_slice())
 }
 
 fn write_descriptor(args: &[String]) -> Result<(), String> {
@@ -196,7 +203,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     let key_copy = CompositeSigningKey::from_seed(key.seed()).map_err(|_| "key".to_string())?;
     let witness = Witness::with_store(id, &cfg.witness.operator, key_copy, store)
         .map_err(|e| e.to_string())?;
-    let svc = Arc::new(WitnessService::new(witness, d.encode()));
+    let svc = Arc::new(WitnessService::new(witness, d.encode()).with_c2sp(c2sp_key(&key)));
     let list = read_list(&cfg, 0)?.ok_or("server list is empty")?;
     let mut seq = list.seq;
     let n = svc.set_logs(&list).await;

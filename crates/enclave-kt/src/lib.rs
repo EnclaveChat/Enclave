@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod c2sp;
 pub mod config;
 pub mod head;
 pub mod log;
@@ -29,7 +30,7 @@ pub mod username;
 pub mod wire;
 
 pub use config::EnclaveKtConfig;
-pub use head::{Cosignature, SignedHead, TreeHead, WitnessPolicy};
+pub use head::{Cosignature, Equivocation, SignedHead, TreeHead, WitnessPolicy};
 pub use log::{
     AbsenceProof, KtLog, Witness, WitnessClient, verify_absence, verify_descriptor_lookup,
     verify_lookup,
@@ -50,6 +51,9 @@ pub enum KtError {
     /// The append-only proof failed: the server rewrote history.
     #[error("history is not append-only")]
     NotAppendOnly,
+    /// The log was proven to sign two trees for one epoch.
+    #[error("the log equivocated")]
+    Equivocated,
     /// A lookup proof failed.
     #[error("lookup proof failed")]
     Lookup,

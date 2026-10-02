@@ -219,6 +219,9 @@ pub struct Snapshot {
     /// The domain of a username server proven to show people different
     /// versions of its log (RT-04), or empty.
     pub kt_split: String,
+    /// How wrong the device clock is against trusted time ("3 hours
+    /// behind"), or empty when it is right (RT-23).
+    pub clock_skew: String,
     /// Names of groups we asked to join that haven't let us in yet.
     pub joining: Vec<String>,
     /// Why restoring failed.
@@ -614,6 +617,7 @@ impl Snapshot {
         put_rows(&mut w, &self.search);
         w.str(&self.username_problem)
             .str(&self.kt_split)
+            .str(&self.clock_skew)
             .strs(&self.joining)
             .str(&self.restore_error);
         w.len(self.friends.len());
@@ -772,6 +776,7 @@ impl Snapshot {
             search: get_rows(&mut r)?,
             username_problem: r.str()?,
             kt_split: r.str()?,
+            clock_skew: r.str()?,
             joining: r.strs()?,
             restore_error: r.str()?,
             friends: {

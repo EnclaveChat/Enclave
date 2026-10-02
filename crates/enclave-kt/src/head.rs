@@ -273,3 +273,95 @@ impl WitnessPolicy {
         Ok(trusted)
     }
 }
+
+/// Proof that a log's server signed two different trees for one epoch
+/// (`docs/12-servers.md` §3.8): what a client found by gossip, published
+/// to witnesses.
+///
+/// ```text
+/// u8(1) ‖ u32 len ‖ SignedHead ‖ u32 len ‖ SignedHead
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Equivocation {
+    /// One head.
+    pub a: SignedHead,
+    /// Another head, for the same server and epoch, with a different root.
+    pub b: SignedHead,
+}
+
+/// Longest encoded [`Equivocation`] (two heads with their cosignatures).
+pub const MAX_EQUIVOCATION: usize = 256 * 1024;
+
+impl Equivocation {
+    /// The server whose log it is.
+    pub fn server(&self) -> [u8; 16] {
+        self.a.head.server
+    }
+
+    /// The epoch.
+    pub fn epoch(&self) -> u64 {
+        self.a.head.epoch
+    }
+
+    /// Check it: one server and epoch, two roots, both heads signed with
+    /// `server_key`. Cosignatures don't matter (the witnesses that signed
+    /// both are [`Equivocation::colluders`]).
+    pub fn verify(&self, server_key: &CompositePublic) -> Result<()> {
+        let (a, b) = (&self.a.head, &self.b.head);
+        if a.server != b.server || a.epoch != b.epoch || a.root == b.root {
+            return Err(KtError::Malformed);
+        }
+        self.a.verify_server(server_key)?;
+        self.b.verify_server(server_key)
+    }
+
+    /// Witnesses with a cosignature on both heads.
+    pub fn colluders(&self) -> Vec<[u8; 16]> {
+        let mut v: Vec<[u8; 16]> = self
+            .a
+            .cosignatures
+            .iter()
+            .filter(|c| self.b.cosignatures.iter().any(|d| d.witness == c.witness))
+            .map(|c| c.witness)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Encode.
+    pub fn encode(&self) -> Vec<u8> {
+        let (a, b) = (self.a.encode(), self.b.encode());
+        let mut v = vec![1u8];
+        for h in [a, b] {
+            v.extend_from_slice(&u32::try_from(h.len()).unwrap_or(u32::MAX).to_be_bytes());
+            v.extend_from_slice(&h);
+        }
+        v
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        if b.len() > MAX_EQUIVOCATION || b.first() != Some(&1) {
+            return Err(KtError::Malformed);
+        }
+        let mut r = &b[1..];
+        let mut next = || -> Result<SignedHead> {
+            let n: [u8; 4] = r
+                .get(..4)
+                .and_then(|s| s.try_into().ok())
+                .ok_or(KtError::Malformed)?;
+            let n = u32::from_be_bytes(n) as usize;
+            let h = r.get(4..4 + n).ok_or(KtError::Malformed)?;
+            let sh = SignedHead::decode(h)?;
+            r = &r[4 + n..];
+            Ok(sh)
+        };
+        let a = next()?;
+        let b = next()?;
+        if !r.is_empty() {
+            return Err(KtError::Malformed);
+        }
+        Ok(Self { a, b })
+    }
+}

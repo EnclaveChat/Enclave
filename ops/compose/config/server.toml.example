@@ -20,6 +20,7 @@ nym_address = ""
 # effort_claim = 8
 # effort_blob = 1
 # effort_username = 64
+# effort_inbox = 16
 # inbox_quota = 5000
 # request_quota = 100
 # token_quota = 4096

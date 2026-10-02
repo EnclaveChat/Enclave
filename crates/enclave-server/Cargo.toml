@@ -25,6 +25,8 @@ enclave-witness = { path = "../enclave-witness" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
 thiserror = "2"
 redb = "4.3.0"
+# The optional PostgreSQL backend (`db.rs`, `pg.rs`; `docs/12-servers.md` §6).
+postgres = "0.19"
 serde = { version = "1", features = ["derive"] }
 zeroize = "1"
 

@@ -24,7 +24,7 @@ use enclave_proto::ratchet::Session;
 use enclave_proto::recovery::RecoverySecret;
 use enclave_proto::{ProtoError, manifest::MAX_DEVICES};
 use enclave_rpc::api::{
-    self, DirAction, DirKind, FLAG_CREATE, FLAG_REQUEST_INBOX, device_key, manifest_key,
+    DirAction, DirKind, FLAG_CREATE, FLAG_REQUEST_INBOX, device_key, manifest_key,
 };
 use enclave_store::{Keystore, Store};
 use enclave_wire::{Op, RequestHeader};
@@ -98,6 +98,7 @@ impl Contact {
 
 mod backup;
 mod blocks;
+pub mod clock;
 mod devices;
 mod gossip;
 mod group_edits;
@@ -239,6 +240,14 @@ pub enum Event {
         server: [u8; 16],
         /// The epoch.
         epoch: u64,
+    },
+    /// The device clock is wrong against trusted time (the witnesses'
+    /// median timestamp; RT-23), or right again (`skew` is `None`). The app
+    /// shows a notice while it is wrong: times shown and expiry checks would
+    /// be off.
+    ClockSkew {
+        /// Device time minus trusted time, in seconds.
+        skew: Option<i64>,
     },
     /// Our username no longer leads to this account in the server's log.
     UsernameProblem {
@@ -446,14 +455,8 @@ impl Client {
                 FLAG_CREATE | FLAG_REQUEST_INBOX,
             ),
         ] {
-            let h = RequestHeader {
-                op: Op::RegisterTokens,
-                flags,
-                mailbox: addr,
-                token: owner,
-            };
-            let env = api::frame(&[], &mut rng)?;
-            rpc.call_ok(&server, h, &env, now, &mut rng).await?;
+            rpc.create_inbox(&server, addr, owner, flags, now, &mut rng)
+                .await?;
         }
         let mk = manifest_key(&account.root_public.0);
         rpc.dir_put(
@@ -1120,8 +1123,13 @@ impl Client {
     /// expiry, invites.
     async fn sync_upkeep(&mut self, now: u64) -> Result<Vec<Event>> {
         let mut events = Vec::new();
-        // First: until it has switched, our own manifest check would look
-        // at the home we are leaving.
+        match self.check_clock(now).await {
+            Ok(mut e) => events.append(&mut e),
+            Err(CoreError::Net(e)) => return Err(CoreError::Net(e)),
+            Err(_) => {}
+        }
+        // Until it has switched, our own manifest check would look at the
+        // home we are leaving.
         if let Err(e) = self.push_home_move(now).await
             && matches!(e, CoreError::Net(_))
         {

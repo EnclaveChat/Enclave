@@ -168,7 +168,7 @@ impl Client {
             })?;
         let reply =
             LookupReply::decode(&reply).map_err(|_| CoreError::Federation(FedError::NotLogged))?;
-        let (digest, _) = verify_descriptor_lookup(
+        let (digest, trusted) = verify_descriptor_lookup(
             &witnesses,
             &info.head_key,
             &info.operator,
@@ -179,6 +179,7 @@ impl Client {
         )
         .map_err(|_| CoreError::Federation(FedError::NotLogged))?;
         self.record_head(&reply.head)?;
+        self.observe_trusted_time(trusted, now)?;
         if digest != enclave_crypto::hash::sha3_512(&bytes) {
             return Err(CoreError::Federation(FedError::NotLogged));
         }

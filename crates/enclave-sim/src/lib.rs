@@ -35,6 +35,9 @@ use std::collections::HashMap;
 /// Simulated clock.
 pub const T0: u64 = 1_790_000_000;
 
+/// Proof-of-work effort the simulated servers ask to create an inbox.
+pub const INBOX_EFFORT: u32 = 1;
+
 /// A set of servers addressed by id.
 pub struct Network {
     /// Servers.
@@ -62,6 +65,7 @@ impl Network {
             effort_request,
             effort_claim: 1,
             effort_blob: 1,
+            effort_inbox: INBOX_EFFORT,
             ..Default::default()
         };
         self.servers
@@ -370,7 +374,9 @@ impl SimUser {
                 mailbox: addr,
                 token: owner,
             };
-            let (s, ..) = net.call(&server, h, &api::frame(&[], rng).unwrap(), rng);
+            let ctx = api::pow_context_inbox(&addr, net.now / 86_400);
+            let proof = enclave_tokens::solve(&ctx, INBOX_EFFORT, rng).unwrap();
+            let (s, ..) = net.call(&server, h, &api::frame(&proof.0, rng).unwrap(), rng);
             assert_eq!(s, Status::Ok);
         }
         // Manifest, prekeys, vault.
@@ -550,7 +556,8 @@ impl SimUser {
             let init = eqxdh::initiate(&local, &peer, Mode::OffTheRecord, None, rng).unwrap();
             let mut session = init.session;
             let env = envelope::seal_request(&init.message, &mut session, &hello, rng).unwrap();
-            let ctx = api::pow_context_request(&card.request_inbox, &sha3_512(&env));
+            let ctx =
+                api::pow_context_request(&card.request_inbox, net.now / 86_400, &sha3_512(&env));
             let effort = net.efforts.get(&server).copied().unwrap_or(1);
             let proof = enclave_tokens::solve(&ctx, effort, rng).unwrap();
             let h = RequestHeader {

@@ -181,7 +181,7 @@ impl Client {
         let reply = match NameAnswer::decode(&bytes).map_err(|_| UsernameError::Unverified)? {
             NameAnswer::Found(r) => r,
             NameAnswer::Absent { head, proof } => {
-                verify_absence(
+                let trusted = verify_absence(
                     &policy.witnesses,
                     &info.head_key,
                     &info.operator,
@@ -193,10 +193,11 @@ impl Client {
                 )
                 .map_err(|_| UsernameError::Unverified)?;
                 self.record_head(&head)?;
+                self.observe_trusted_time(trusted, now)?;
                 return Err(UsernameError::NotFound.into());
             }
         };
-        let (value, _, _) = verify_lookup(
+        let (value, _, trusted) = verify_lookup(
             &policy.witnesses,
             &info.head_key,
             &info.operator,
@@ -212,6 +213,7 @@ impl Client {
         })?;
         // Kept for gossip with contacts (RT-04).
         self.record_head(&reply.head)?;
+        self.observe_trusted_time(trusted, now)?;
         // A bare root is a released name.
         if enclave_kt::username::as_tombstone(&value).is_some() {
             return Err(UsernameError::Withdrawn.into());

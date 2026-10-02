@@ -79,6 +79,65 @@ impl HttpWitness {
         self.descriptor.as_ref()
     }
 
+    /// The C2SP signed note of the head this witness last cosigned for
+    /// `server` (`enclave_kt::c2sp`).
+    pub async fn checkpoint(&self, server: &[u8; 16]) -> Result<String, String> {
+        self.text(&format!("/witness/v1/checkpoint/{}", hex(server)))
+            .await
+    }
+
+    /// Hand this witness a proof that a log equivocated (`docs/12-servers.md`
+    /// §3.8). `Ok(true)` if it was news to the witness.
+    pub async fn publish_equivocation(&self, e: &enclave_kt::Equivocation) -> Result<bool, String> {
+        let (status, _) = self
+            .request("POST", "/witness/v1/equivocation", Some(e.encode()))
+            .await?;
+        match status {
+            201 => Ok(true),
+            200 => Ok(false),
+            s => Err(format!("{}: equivocation: HTTP {s}", self.base)),
+        }
+    }
+
+    /// The proof this witness holds that `server`'s log equivocated, if any.
+    pub async fn equivocation(
+        &self,
+        server: &[u8; 16],
+    ) -> Result<Option<enclave_kt::Equivocation>, String> {
+        let (status, body) = self
+            .request(
+                "GET",
+                &format!("/witness/v1/equivocation/{}", hex(server)),
+                None,
+            )
+            .await?;
+        match status {
+            200 => enclave_kt::Equivocation::decode(&body)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            404 => Ok(None),
+            s => Err(format!("{}: equivocation: HTTP {s}", self.base)),
+        }
+    }
+
+    /// The verifier keys of this witness's C2SP cosignatures.
+    pub async fn c2sp_vkeys(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .text("/witness/v1/c2sp-key")
+            .await?
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    async fn text(&self, path: &str) -> Result<String, String> {
+        let (status, body) = self.request("GET", path, None).await?;
+        if status != 200 {
+            return Err(format!("{}{path}: HTTP {status}", self.base));
+        }
+        String::from_utf8(body).map_err(|e| e.to_string())
+    }
+
     async fn request(
         &self,
         method: &str,
@@ -150,6 +209,7 @@ impl WitnessClient for HttpWitness {
                 Ok(c)
             }
             409 => Err(KtError::NotAppendOnly),
+            410 => Err(KtError::Equivocated),
             403 => Err(KtError::Signature),
             s => Err(KtError::Directory(format!("witness answered HTTP {s}"))),
         }

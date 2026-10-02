@@ -195,6 +195,60 @@ impl CompositeSigningKey {
     }
 }
 
+/// ML-DSA-44 verification key length.
+pub const MLDSA44_PK_LEN: usize = 1312;
+/// ML-DSA-44 signature length.
+pub const MLDSA44_SIG_LEN: usize = 2420;
+
+/// An ML-DSA-44 key, only for the C2SP ML-DSA cosignatures witnesses publish
+/// for other transparency tools (`enclave_kt::c2sp`). Nothing in Enclave
+/// relies on it; Enclave's own signatures are composite (ML-DSA-87 + Ed448).
+pub struct MlDsa44SigningKey {
+    sk: libcrux_ml_dsa::ml_dsa_44::MLDSA44SigningKey,
+    pk: [u8; MLDSA44_PK_LEN],
+}
+
+impl MlDsa44SigningKey {
+    /// The key from a 32-byte seed (FIPS 204 key generation randomness).
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let kp = libcrux_ml_dsa::ml_dsa_44::generate_key_pair(*seed);
+        Self {
+            pk: *kp.verification_key.as_ref(),
+            sk: kp.signing_key,
+        }
+    }
+
+    /// The verification key.
+    pub fn public(&self) -> &[u8; MLDSA44_PK_LEN] {
+        &self.pk
+    }
+
+    /// Sign `msg` with an empty context (hedged randomness).
+    pub fn sign(&self, msg: &[u8], rng: &mut HedgedRng) -> Result<[u8; MLDSA44_SIG_LEN]> {
+        let r: [u8; 32] = rng.array("sig/mldsa44/sign")?;
+        let s =
+            libcrux_ml_dsa::ml_dsa_44::sign(&self.sk, msg, b"", r).map_err(|_| Error::Malformed)?;
+        Ok(*s.as_ref())
+    }
+}
+
+/// Verify an ML-DSA-44 signature with an empty context.
+pub fn mldsa44_verify(public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    let (Ok(pk), Ok(sig)) = (
+        <[u8; MLDSA44_PK_LEN]>::try_from(public),
+        <[u8; MLDSA44_SIG_LEN]>::try_from(sig),
+    ) else {
+        return false;
+    };
+    libcrux_ml_dsa::ml_dsa_44::verify(
+        &libcrux_ml_dsa::ml_dsa_44::MLDSA44VerificationKey::new(pk),
+        msg,
+        b"",
+        &libcrux_ml_dsa::ml_dsa_44::MLDSA44Signature::new(sig),
+    )
+    .is_ok()
+}
+
 /// SLH-DSA-SHAKE-256s root public key (64 bytes).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct RootPublic(pub [u8; ROOT_PK_LEN]);

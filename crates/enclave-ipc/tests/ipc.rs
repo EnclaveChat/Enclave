@@ -98,6 +98,7 @@ fn snapshot() -> Snapshot {
         search: vec![Row::default()],
         username_problem: "@robin@enclave.example".into(),
         kt_split: "enclave.example".into(),
+        clock_skew: "3 hours behind".into(),
         joining: vec!["Book club".into()],
         restore_error: "wrong words".into(),
         friends: vec![enclave_ipc::Pick {

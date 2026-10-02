@@ -72,7 +72,7 @@ open_request(held keys, newest first, bytes):
 
 A request that fails to open gets 16,384 random bytes as its reply. An opened request is dispatched (`12-servers.md` §1) and answered with `seal(k_reply, "reply", reply header ‖ reply envelope)` plus random padding (`08-envelope.md` §3).
 
-Not implemented yet: a replay cache of request ciphertexts per key. A replayed request is processed again; ops with single-use tokens fail the second time, but others do not (`12-servers.md` Open questions).
+**Replay cache.** Every request that opens is first looked up in a replay cache, keyed by `u32(key_id) ‖ SHAKE256("enclave/v1/net/replay-id" ‖ u32(key_id) ‖ eph_pk ‖ ct)`. The ephemeral key and KEM ciphertext are fresh for every sealing, so two sealings of the same request are two requests, and the same bytes sent twice are one. A request already in the cache is answered like one that fails to open (16,384 random bytes) and counted in `Stats::replays`; nothing is applied. The cache is a redb table (`replays`, schema 4), so a replay after a restart is refused too, and its entries go with the key that opened them: when a key is deleted (`Server::install_key`), and at start for keys deleted while the server was down. Test: `a_request_is_processed_once` (`crates/enclave-server/tests/replay.rs`). A server that can't record the id refuses the request (fail closed).
 
 ## 3. Inboxes, read credentials, write tokens (D7)
 
@@ -90,7 +90,9 @@ read_credential(owner) = KMAC256(owner, "read", 256, "enclave/v1/rpc/read-creden
 credential_hash(x)     = KMAC256(x, "", 256, "enclave/v1/rpc/credential-hash")
 ```
 
-Not implemented yet: weekly address rotation from an inbox seed, daily address-bound read credentials, and an Equi-X PoW on inbox creation (PLAN §9.3; the reserved labels are in `label-registry.md` §3.3). The address and the read credential are static for the life of the inbox, and the server sees the owner secret whenever the owner creates the inbox or registers tokens.
+**Proof of work.** Creating an inbox costs an Equi-X proof over `"inbox-create" ‖ mailbox ‖ u64(day)` (`api::pow_context_inbox`) at the server's `effort_inbox` (default 16, published in the descriptor policy). The 32-byte proof is the framed payload of the creating `RegisterTokens`. The server takes today's or yesterday's day (a client near midnight) and checks it before anything else, so a missing or wrong proof is `Pow` whether or not the address exists. The client climbs the effort ladder until the server accepts (`Rpc::create_inbox`, used at account creation and when moving server). Test: `a_request_is_processed_once` (no proof, another address's proof and one from two days ago are refused; yesterday's is accepted).
+
+Weekly address rotation from an inbox seed and daily address-bound read credentials are milestone P1 (`docs/completion.md`; the reserved labels are in `label-registry.md` §3.3). Until then the address and the read credential are static for the life of the inbox, and the server sees the owner secret whenever the owner creates the inbox or registers tokens.
 
 ### 3.2 Reading
 
@@ -123,7 +125,7 @@ Not implemented yet: returning the burned token to the owner as a session hint, 
 ## 4. Request inbox
 
 - Created like an account inbox with `CREATE | REQUEST_INBOX`. Its address is in the account manifest (`request_inbox`, `03-identity.md` §3).
-- `WriteRequest` needs an Equi-X proof of work in the header's token field over `"request-inbox" ‖ mailbox ‖ SHA3-512(envelope region)` at the server's request effort (default 64; `12-servers.md` §1). Account inboxes refuse `WriteRequest` and request inboxes refuse `Write` (`Denied`).
+- `WriteRequest` needs an Equi-X proof of work in the header's token field over `"request-inbox" ‖ mailbox ‖ u64(day) ‖ SHA3-512(envelope region)` at the server's request effort (default 64; `12-servers.md` §1), for today or yesterday; each proof is accepted once. Account inboxes refuse `WriteRequest` and request inboxes refuse `Write` (`Denied`).
 - It holds at most `request_quota` pending envelopes (default 100). When full, the oldest is dropped to make room (FIFO).
 - The owner reads it with `Poll`/`Ack` and its own read credential.
 
@@ -244,7 +246,7 @@ Not implemented yet: `BLOB_ALLOC` with Privacy Pass quotas, client-side chunk se
 ## Open questions
 
 1. PLAN §9.3 polls the inbox in slot 1 and rotates groups in slot 2. The implementation alternates strictly in all profiles. In Background this puts the median text latency at about 140 s when other mailboxes are polled, above PLAN's "≤2 min"; the M0 draft proposed using the second slot on only every 4th Background tick (median ≈112 s). The scheduler needs that change, or PLAN's Background latency figure needs to change.
-2. PLAN §9.2 asks for a replay cache of request ciphertext hashes per key. It is not implemented.
+2. **Resolved:** PLAN §9.2's replay cache of request ciphertexts per key is built (§2.3).
 3. PLAN §9.2 says old daily keys are deleted; the implementation keeps the previous day's key until the next rotation rather than for a short grace window. Deleting it after a grace period needs a timer in the server.
 4. Read credentials are static and inbox addresses do not rotate (§3.1). PLAN §9.3 derives weekly addresses and daily credentials from an inbox seed; the implementation intentionally starts simpler. This needs to be implemented before a server can be prevented from linking a device's polls across weeks.
 5. Every request, including writes and cover, gets a full reply unit today. Dropping write and cover replies (needed for PLAN's data budget, `math/cover-traffic.md` §2.1) leaves writes without a delivery status; delivery would then be confirmed by receipts only.

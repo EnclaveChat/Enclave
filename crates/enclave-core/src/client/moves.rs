@@ -29,9 +29,8 @@ use enclave_crypto::seal::SealKey;
 use enclave_proto::manifest::{MAX_VALIDITY_SECS, Manifest, SignedManifest};
 use enclave_proto::server_move::ServerMove;
 use enclave_rpc::api::{
-    self, DirAction, DirKind, FLAG_CREATE, FLAG_REQUEST_INBOX, Status, device_key, manifest_key,
+    DirAction, DirKind, FLAG_CREATE, FLAG_REQUEST_INBOX, Status, device_key, manifest_key,
 };
-use enclave_wire::{Op, RequestHeader};
 
 /// How long the old server's inboxes are still read after a move (the
 /// longest an envelope is kept).
@@ -197,18 +196,10 @@ impl Client {
                     FLAG_CREATE | FLAG_REQUEST_INBOX,
                 ),
             ] {
-                let h = RequestHeader {
-                    op: Op::RegisterTokens,
-                    flags,
-                    mailbox: addr,
-                    token: owner,
-                };
-                let env = api::frame(&[], &mut self.rng)?;
                 done(
                     self.rpc
-                        .call_ok(&to, h, &env, now, &mut self.rng)
-                        .await
-                        .map(|_| ()),
+                        .create_inbox(&to, addr, owner, flags, now, &mut self.rng)
+                        .await,
                 )?;
             }
             step |= M_INBOXES;

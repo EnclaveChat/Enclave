@@ -1,12 +1,16 @@
 //! A server that restarts keeps what it promised (`docs/12-servers.md` §1.3,
 //! §1.4): its id and request keys, inboxes, unspent tokens and stored
 //! envelopes; and a token spent before the restart stays spent.
+//!
+//! Each test runs on every storage backend (`common::stores`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+use common::Store;
 
 use enclave_crypto::rng::HedgedRng;
 use enclave_rpc::api::{self, FLAG_CREATE, FLAG_FOUND, Status};
 use enclave_rpc::{ServerKey, seal_poll, seal_request};
-use enclave_server::db::Db;
 use enclave_server::keys::ServerKeys;
 use enclave_server::{Config, Server};
 use enclave_wire::{ENVELOPE_LEN, Op, RequestHeader};
@@ -22,14 +26,18 @@ fn dir(name: &str) -> PathBuf {
     d
 }
 
-fn open(d: &Path) -> (Server, ServerKeys) {
+fn open(d: &Path, store: &Store) -> (Server, ServerKeys) {
     let keys = ServerKeys::load(&d.join("keys")).unwrap();
+    // Inbox proofs of work are tested in tests/replay.rs.
     let cfg = Config {
         id: keys.id(),
+        effort_inbox: 0,
         ..Config::default()
     };
-    let db = Db::open(&d.join("server.redb")).unwrap();
-    (Server::open(cfg, db, keys.chain.keys()).unwrap(), keys)
+    (
+        Server::open(cfg, store.open(), keys.chain.keys()).unwrap(),
+        keys,
+    )
 }
 
 /// One request through the server; the reply status and envelope.
@@ -53,6 +61,15 @@ fn call(
 #[test]
 fn state_survives_a_restart() {
     let d = dir("state");
+    for store in common::stores("state_survives_a_restart", &d) {
+        state_survives_a_restart_on(&d, &store);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn state_survives_a_restart_on(d: &Path, store: &Store) {
+    eprintln!("state_survives_a_restart on {}", store.name());
+    let _ = std::fs::remove_dir_all(d.join("keys"));
     let keys = ServerKeys::init(&d.join("keys"), DAY).unwrap();
     let id = keys.id();
     drop(keys);
@@ -63,7 +80,7 @@ fn state_survives_a_restart() {
     let envelope = vec![0x5a; ENVELOPE_LEN];
 
     let pinned_key = {
-        let (mut s, _) = open(&d);
+        let (mut s, _) = open(d, store);
         let key = s.public_key().unwrap();
         let create = RequestHeader {
             op: Op::RegisterTokens,
@@ -93,7 +110,7 @@ fn state_survives_a_restart() {
         // The server is dropped here: as good as a crash after the reply.
     };
 
-    let (mut s, keys) = open(&d);
+    let (mut s, keys) = open(d, store);
     assert_eq!(keys.id(), id, "same id after a restart");
     let key = s.public_key().unwrap();
     assert_eq!(
@@ -133,7 +150,6 @@ fn state_survives_a_restart() {
         token: tokens[1],
     };
     assert_eq!(call(&mut s, &key, fresh, &envelope, &mut rng).0, Status::Ok);
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]

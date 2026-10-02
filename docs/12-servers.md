@@ -22,10 +22,11 @@ Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be over
 | | `public_dir` | `/var/lib/enclave/public` | Files the front serves (KT pins, descriptor) |
 | | `nym_address` | empty | The ingress's Nym address, published in the descriptor |
 | | `server_list` | none | A copy of the foundation's signed list to serve (`DirKind::ServerList`), re-read when it changes |
-| `[policy]` | `effort_request`, `effort_claim`, `effort_blob`, `effort_username`, `inbox_quota`, `request_quota`, `token_quota`, `ttl_days` | as `Config` below | Abuse controls |
+| `[policy]` | `effort_request`, `effort_claim`, `effort_blob`, `effort_username`, `effort_inbox`, `inbox_quota`, `request_quota`, `token_quota`, `ttl_days` | as `Config` below | Abuse controls |
 | `[kt]` | `enabled` | `true` | Username log (`data_dir/kt.redb`, §3.1) |
 | `[push]` | `forward` | none | Push egress address for due wakes |
 | `[backup]` | `dir`, `interval_hours`, `keep` | none, 24, 7 | Snapshots (§1.5) |
+| `[database]` | `url`, `url_file` | empty (redb in `data_dir`) | PostgreSQL instead (§6) |
 
 `FileConfig::policy(id)` gives the in-process `Config`:
 
@@ -35,6 +36,8 @@ Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be over
 | `effort_request` | 64 | Equi-X effort for `WriteRequest` |
 | `effort_claim` | 8 | Equi-X effort for a bundle claim |
 | `effort_blob` | 1 | Equi-X effort for `BlobPut` |
+| `effort_username` | 64 | Equi-X effort for a username claim (§3.5) |
+| `effort_inbox` | 16 | Equi-X effort for creating an inbox; 0 turns the check off (tests) |
 | `inbox_quota` | 5,000 | Stored envelopes per account inbox |
 | `request_quota` | 100 | Pending envelopes per request inbox |
 | `token_quota` | 4,096 | Registered unspent token hashes per inbox |
@@ -44,16 +47,21 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 
 | Action | Context | Proof carried in |
 |---|---|---|
-| Request-inbox write | `"request-inbox" ‖ mailbox (32) ‖ SHA3-512(envelope region)` | header token field |
+| Request-inbox write | `"request-inbox" ‖ mailbox (32) ‖ u64(day) ‖ SHA3-512(envelope region)` | header token field |
+| Report | `"report" ‖ mailbox (32) ‖ u64(day) ‖ SHA3-512(envelope region)` | header token field |
+| Username claim | `"claim-username" ‖ key (32) ‖ u64(day)` | `DirRequest.proof` |
 | Bundle claim | `"claim-bundle" ‖ key (32) ‖ u64(day)`, `day = floor(now / 86,400)` | `DirRequest.proof` |
 | Blob upload | `"blob-put" ‖ chunk ID (32) ‖ SHA3-512(chunk)` | header token field |
+| Inbox creation | `"inbox-create" ‖ mailbox (32) ‖ u64(day)`, today or yesterday | framed payload of `RegisterTokens` + `CREATE` |
+
+**Every proof is single-use.** A day-bound proof (all but the blob upload) is accepted for today or yesterday (`day = floor(now / 86,400)`, so a client near midnight isn't refused) and only once: the server records `u32(day) ‖ proof` in the redb table `pow-spent` (schema 5) in the same step it accepts the proof, and drops a day's records once that day can no longer be proven for (`Server::expire`). A spent proof gets `Pow`, and a client simply solves a new one. So one solution claims one one-time prekey (RT-06, test `rt06_opk_claim_requires_pow`) and writes one request (RT-25, test `rt25_request_requires_pow_or_capability`). A blob proof is bound to the chunk ID, and an ID is stored once (`Denied` after), so it needs no record.
 
 ### 1.2 Operations
 
 | Op | Server behavior |
 |---|---|
 | `Cover` | Count it; reply `Ok`. |
-| `RegisterTokens` + `CREATE` | If the address exists: `Denied`. Otherwise create the inbox with `owner = credential_hash(token)`, `read = credential_hash(read_credential(token))`, request flag from `REQUEST_INBOX`, sequence numbers starting at 1. |
+| `RegisterTokens` + `CREATE` | Verify the PoW (`Pow`). If the address exists: `Denied`. Otherwise create the inbox with `owner = credential_hash(token)`, `read = credential_hash(read_credential(token))`, request flag from `REQUEST_INBOX`, sequence numbers starting at 1. |
 | `RegisterTokens` | Inbox must exist (`NotFound`) and `credential_hash(token)` must equal `owner` (`Denied`). The payload must be a multiple of 32 B (`Malformed`); the unspent total must stay ≤ `token_quota` (`Quota`). Insert the hashes; with `REVOKE` (0x08), remove them instead (cancelled invite links). On a request inbox the hashes are invite capabilities. |
 | `Write` | Inbox must exist and not be a request inbox (`Denied`). Burn `token_hash(token)` or reply `Denied`. Store the envelope under the next sequence number, or `Quota` if the inbox holds `inbox_quota` envelopes. |
 | `WriteRequest` | Inbox must be a request inbox (`Denied`). With `INVITE` (0x08), burn `token_hash(token)` (an invite capability, `03-identity.md` §9.2) or reply `Denied`; otherwise verify the PoW (`Pow`). Store; when `request_quota` envelopes are pending, drop the oldest first (FIFO). |
@@ -63,7 +71,7 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | `BlobGet` | Return the chunk, or `NotFound`. No credential. |
 | `Directory` | §2. A payload that does not parse gets `Malformed`. |
 | `KeyTransparency` | Not wired to `enclave-kt` yet: `NotFound`. |
-| `Report` | The mailbox must be one of this server's request inboxes (`NotFound`). Verify the PoW over `"report" ‖ mailbox ‖ SHA3-512(envelope)` at the request effort (`Pow`); the payload must parse as a `ReportBody` (`Malformed`). Queue it for the operator with the day it arrived; at most 1,000 are kept, oldest dropped first. `Server::take_reports()` hands them to the operator and `Server::disable_request_inbox()` closes a reported account's request inbox. |
+| `Report` | The mailbox must be one of this server's request inboxes (`NotFound`). Verify and spend the PoW at the request effort (`Pow`); the payload must parse as a `ReportBody` (`Malformed`). Queue it for the operator with the day it arrived; at most 1,000 are kept, oldest dropped first. `Server::take_reports()` hands them to the operator and `Server::disable_request_inbox()` closes a reported account's request inbox. |
 
 A storage failure answers `Unavailable` (status 7) and applies nothing; the client tries again later.
 
@@ -83,7 +91,7 @@ A storage failure answers `Unavailable` (status 7) and applies nothing; the clie
 
 Nothing in this table is an IP address, a Nym identity or an account identifier. Receive times are stored only to expire envelopes.
 
-**Persistence (`db.rs`).** Everything above except claims and unfinished uploads (both short-lived) is kept in redb tables: inboxes, tokens (keyed `mailbox ‖ hash`), envelopes (keyed `mailbox ‖ seq`), manifests, devices seen, attestations, migrations, moved records, server moves (§4.4), device owners, bundles, vaults, blobs, push registrations, usernames, names by root, reports and a `meta` table holding the schema version (2). Each request runs in one write transaction that commits before its reply is sealed, so a server killed at any point either did all of a request or none of it: a burned token stays burned, and an envelope that was acknowledged as stored survives (`tests/restart.rs`). Key-transparency replies, push wakes and bundle claims are held in memory and expire within minutes; losing them in a restart costs a client one retry.
+**Persistence (`db.rs`).** Everything above except claims and unfinished uploads (both short-lived) is kept in redb tables: inboxes, tokens (keyed `mailbox ‖ hash`), envelopes (keyed `mailbox ‖ seq`), manifests, devices seen, attestations, migrations, moved records, server moves (§4.4), tombstones (§3.5), the request replay cache (`replays`, `09-transport.md` §2.3), spent proofs of work (`pow-spent`, §1.1), device owners, bundles, vaults, blobs, push registrations, usernames, names by root, reports and a `meta` table holding the schema version (5; each version only added tables, and older files gain them on open). Each request runs in one write transaction that commits before its reply is sealed, so a server killed at any point either did all of a request or none of it: a burned token stays burned, and an envelope that was acknowledged as stored survives (`tests/restart.rs`). Key-transparency replies, push wakes and bundle claims are held in memory and expire within minutes; losing them in a restart costs a client one retry.
 
 ### 1.4 Identity and daily request keys
 
@@ -127,6 +135,11 @@ enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
 | 4 `Username` | The name's bytes, zero-padded to 32 (`name_key`) on put and on the first get; the reply ID on later gets | `UsernameClaim` on put; `LookupReply` on get (§3.7) | A device of the account | Anyone who knows the name |
 | 5 `Attest` | Like the manifest | Device attestations (co-sign or veto, `03-identity.md` §8.1) | A listed device | Contacts and our own devices |
 | 6 `Migration` | The **old** root's `manifest_key` | `Migration` record (`03-identity.md` §8.2) | The account, after changing its recovery words | Anyone holding an old code |
+| 7 `Descriptor` | Ignored | The server's signed `ServerDescriptor` (§4.3); never uploaded | The operator | Clients |
+| 8 `ServerList` | Ignored | The foundation's signed list as mirrored (§4.1); never uploaded | The operator | Clients |
+| 9 `Moved` | Like the manifest | Root-signed `ServerMove` (§4.4) | The account, leaving | Contacts |
+| 10 `Tombstone` | Like the manifest | Root-signed `Tombstone` (§3.5) | The account, deleting itself | Anyone |
+| 11 `Equivocation` | The log's server id, zero-padded | Two heads of one epoch (§3.8) | A client that found them | Anyone |
 
 Objects travel in `DirRequest`/`DirReply` payloads as chunks of at most 14,000 B (`08-envelope.md` §9.3).
 
@@ -201,6 +214,21 @@ A witness never cosigns two inconsistent heads for one server, because step 2 re
 
 **As a service** (`enclave-witness`, test `crates/enclave-witness/tests/witness.rs`): a witness runs as `enclave-witness run` with a composite cosigning key (`init`; the witness id is `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`), remembers what it cosigned in redb (`Witness::with_store`), and witnesses only the logs in the foundation's server list, under the head key the list pins for each server, re-reading the list when its file changes. It serves `GET /witness/v1/descriptor`, `GET /witness/v1/last/<server id>` and `POST /witness/v1/cosign` (body `u8(1) ‖ u32(n) ‖ n × (u32 len ‖ SignedHead) ‖ u8(has proof) [‖ u32 len ‖ AppendOnlyProof as akd protobuf]`, answer the cosignature; 403 for an unlisted log or a bad signature, 409 for a head that doesn't extend the last cosigned one). It serves HTTPS with the Enclave TLS profile when given a certificate (`tls_cert`, `tls_key`), plain HTTP otherwise for a front on the same network. A log's server reaches witnesses through `enclave_kt::WitnessClient`: `Witness` in process, `enclave_witness::HttpWitness` over HTTPS (`[kt] witnesses = [URLs]`, `witness_ca` for a private CA). A witness that refuses is asked for its last head, and the next round sends the heads and append-only proof from there. The test runs a log against two witness services and checks that a lookup verifies at threshold 2 under pins derived from the list, that a fork of the log is refused (409), and that a log the list doesn't name is refused (403).
 
+### 3.3a C2SP checkpoints and cosignatures
+
+Each witness also publishes what it cosigned in the formats of the transparency-log ecosystem, so tools built for it (monitors, other witness networks) can follow Enclave's logs (`enclave_kt::c2sp`; [c2sp.org/tlog-checkpoint](https://c2sp.org/tlog-checkpoint), [tlog-cosignature](https://c2sp.org/tlog-cosignature), [signed-note](https://c2sp.org/signed-note)):
+
+```
+checkpoint = "enclave-kt/" hex(server id) "\n" decimal(epoch) "\n" base64(root) "\n"
+key name   = "enclave-witness/" hex(witness id)
+key id     = SHA-256(key name ‖ "\n" ‖ type ‖ public key)[0..4]           type 0x04 Ed25519, 0x06 ML-DSA-44
+Ed25519    signs "cosignature/v1\ntime " decimal(time) "\n" ‖ checkpoint
+ML-DSA-44  signs "subtree/v1\n\0" ‖ u8 len ‖ key name ‖ u64(time) ‖ u8 len ‖ origin ‖ u64(0) ‖ u64(epoch) ‖ root
+note       = checkpoint "\n" + one "— key name base64(key id ‖ u64(time) ‖ signature)" line per key
+```
+
+The checkpoint's tree size is the akd epoch and its hash the akd root. Both keys are derived from the witness's composite seed (KMAC label `enclave/v1/kt/c2sp-key`, data `ed25519` or `ml-dsa-44`), so they need no new key file, and the witness descriptor (signed by the composite key) lists their verifier keys (`c2sp_vkeys`). The witness signs both at the moment it makes its composite cosignature, with the same time, and serves the note at `GET /witness/v1/checkpoint/<server hex>` and the verifier keys at `GET /witness/v1/c2sp-key` (`HttpWitness::checkpoint`, `c2sp_vkeys`). Clients never rely on these: their check (§3.4) is the composite cosignature, ML-DSA-87 + Ed448. Test: `two_remote_witnesses_meet_threshold_two` checks the note under both keys; in CI (job `tls-interop`) the same note is verified by the reference Go implementation (`ci/c2sp`, `golang.org/x/mod/sumdb/note` with `github.com/transparency-dev/formats/note`), which also parses the checkpoint.
+
 ### 3.4 Client policy and lookups
 
 `WitnessPolicy { witnesses: [(id, key, operator)], threshold }`. `check(signed_head, server_key, server_operator, now)`:
@@ -229,8 +257,8 @@ PLAN's quorum values (≥3 independent witnesses, ≥2 during beta) are policy i
 `username::skeleton(name)` maps look-alikes to one form:
 1. Take the UTS #39 skeleton: every character goes to its prototype in Unicode's confusables table, so an all-Cyrillic `раul` and `paul` share one.
 2. Lowercase it.
-3. Replace `rn` → `m`, `vv` → `w`, `cl` → `d`, and remove `_`.
-4. Map the characters Unicode's table leaves apart in lowercase Latin text: `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`.
+3. Remove `_`, and map the characters Unicode's table leaves apart in lowercase Latin text: `0` → `o`; `1`, `i`, `j` → `l`; `3` → `e`; `4` → `a`; `5` → `s`; `6`, `8` → `b`; `7` → `t`; `9` → `g`; `u`, `y` → `v`.
+4. Then replace the pairs: `rn` → `m`, `vv` → `w`, `cl` → `d` (after step 3, so `uu` and `w`, or `c1` and `d`, collide too).
 
 `KtLog::publish` refuses a new name whose skeleton equals that of a different registered name (RT-26). The index is rebuilt from the stored names at every start, so a log is held to the current rules.
 
@@ -242,9 +270,9 @@ A name held by a root that has a stored migration (§2.2) moves to the new root 
 
 Test `withdrawn_usernames`. Releasing a name when its owner takes another (a bare root as its value, kept for the same account) is unchanged.
 
-### 3.6 Not implemented yet
+### 3.6 The device clock (RT-23)
 
-The device-clock warning based on trusted time; C2SP cosignature interoperability.
+Trusted time (§3.4) checks the device clock (`client/clock.rs`). Every head a client verifies gives one: username lookups and absence proofs, descriptor lookups, and every 6 hours (`CHECK_EVERY_SECS`, and whenever the clock went back past the last check) a fresh head of the home server's log, fetched like a descriptor lookup and checked for its server signature and witness quorum but not its freshness, which is what's in question. Witnesses sign at the time they cosign, so a device clock more than 10 minutes behind trusted time (`BEHIND_SECS`) is wrong. A log's heads can be up to a day old (a heartbeat every hour, refused as stale past 25 hours), so a clock ahead is only certainly wrong past 25 hours (`AHEAD_SECS`); a clock between is indistinguishable from a quiet log. The client keeps the last judgment (`Client::clock_skew`, device time minus trusted time) and raises `Event::ClockSkew { skew: Some(s) }` when the clock becomes wrong and `{ skew: None }` when it's right again, once each. The app shows "This device's clock is wrong", with how far off it is, until then. Test `rt23_clock_skew_warning_shown` (`crates/enclave-core/tests/federation.rs`: right, two hours behind, right again, days ahead). Disappearing timers already run from receipt on the device (RT-23's second test, milestone Q1).
 
 ### 3.7 Claims and lookups
 
@@ -287,7 +315,8 @@ A server whose witnesses collude can show different people different logs, each 
 - A received head is checked against the pinned server key and the witness quorum (signatures only, not freshness). If it verifies and its root differs from the held head of the same epoch, the server has **provably equivocated**: both heads are stored as proof, `Event::KtSplitView { server, epoch }` is raised, and the receiver sends its own head back so the other side holds the proof too. A verified head for an epoch not held is kept like any other.
 - The app shows a persistent notice ("A username server showed people different lists … check security codes, ideally in person").
 - Test `rt04_split_view_detected_by_gossip`: twin logs under one server key and one set of (colluding) witnesses (`KtService::start_dev_twins`, server test hooks `enable_kt_fork`, `kt_fork_force`, `kt_serve_fork`); Ada sees the real binding of a name, Ben the forked one, each view verifies alone, and one message from Ada to Ben leaves both holding the proof. Honest views raise nothing.
-- Limits: gossip only compares heads of logs the client pins, the fork is found only if two people who talk saw different heads for the same epoch, and group messages carry no gossip yet. Publishing proofs to the witnesses or a public place is not built.
+- **Publication.** A client holding a proof publishes it (`enclave_kt::Equivocation`: `u8(1) ‖ u32 len ‖ SignedHead ‖ u32 len ‖ SignedHead`) as `DirKind::Equivocation` (11), keyed by the log's server id, to a server other than the one that equivocated: its home server, or another the list names. The server takes it only for its own log or one its server list names (`NotFound` otherwise), checks that both heads are signed with that log's head key for one epoch with two roots (`Invalid`), keeps the first per log (redb table `equivocations`, schema 6; anyone can get it), and its process hands it to every witness it knows (`[kt] witnesses` and the list's witness URLs) at the next minute's tick. A witness takes it at `POST /witness/v1/equivocation` for a log it witnesses, under the head key the list pins, keeps it (`kt-equivocations`, KT store schema 2), serves it at `GET /witness/v1/equivocation/<server hex>`, and **never cosigns that log again** (`410 Gone`, `KtError::Equivocated`), so the log stops meeting any client's quorum and every lookup in it fails as unverified. `Equivocation::colluders` names the witnesses that cosigned both heads. Tests: `rt04_split_view_detected_by_gossip` (Ben's home server receives the proof), `two_remote_witnesses_meet_threshold_two` (a witness takes it once, serves it and refuses the log; two copies of one head are refused).
+- Limits: gossip only compares heads of logs the client pins, the fork is found only if two people who talk saw different heads for the same epoch, and group messages carry no gossip yet (P2).
 ## 4. Discovery and migration
 
 `enclave-federation` holds the signed objects (all in the canonical encoding of `enclave_proto::codec`: one byte string per value, trailing bytes refused, every signature over every byte before it; test `crates/enclave-federation/tests/federation.rs` flips bytes across each object and requires every one to be refused).
@@ -431,7 +460,7 @@ The image has no shell and runs as nonroot.
 - Backups and restore are in §1 and the deployment guide.
 - Metrics are local aggregates only.
 - `enclave-server dev` (TCP, random keys, nothing kept) remains for development and is **not for production**: production servers are reachable only through Nym (N1).
-- Postgres for large operators is S5.
+- **PostgreSQL.** An operator can keep the server's state in PostgreSQL instead of the redb file: `[database] url` (or `url_file`, a Docker secret) in `server.toml`, and `compose.postgres.yml` adds a pinned `postgres:17-alpine` on the internal network with its password and URL as secrets. Every table becomes rows of one relation `enclave_kv (tbl text, k bytea, v bytea, PRIMARY KEY (tbl, k))`, in the same per-request transactions; `bytea` compares bytewise, so key order and prefix scans match redb's (`db.rs`, `pg.rs`). The blocking client runs under `block_in_place` in the server's runtime, and its connection is closed the same way. Backups are redb snapshots whatever the backend (one read transaction, taken while the server runs), and `restore` loads one into PostgreSQL in one transaction (`Db::copy_from`). The key-transparency log stays a redb file in `data_dir` (it is per-server and small). The same tests run on both backends (`tests/backends.rs`, `restart.rs`, `replay.rs`, through `tests/common`: each test gets a fresh database), in CI job `postgres` against a PostgreSQL service, and stack c of `federation-e2e-tcp` runs on PostgreSQL.
 - A Nix flake arrives with R2.
 
 ## 7. Scale estimate (100k accounts)
@@ -462,11 +491,11 @@ As implemented, every request (including writes and cover) gets a reply unit, wh
 
 ## Open questions
 
-1. **Proofs of work are not single-use.** The server keeps no replay set of solutions. A bundle-claim proof is bound only to the device key and the day, so one solution can claim every one-time prekey of a device for a whole day (RT-06). A request-inbox proof is bound to the envelope hash, so one solution lets the same envelope be written repeatedly, which can push every legitimate pending request out of the 100-entry FIFO. PLAN §9.3 and §12.1 need a per-solution replay set, or a claim context that includes a per-claim nonce.
+1. **Resolved:** proofs of work are single-use and day-bound (§1.1, table `pow-spent`), so one solution can't drain a device's one-time prekeys or rewrite the same request.
 2. **Directory uploads are unauthenticated until complete.** Anyone can send chunks for any `(kind, key)`: a chunk with a different `total` discards an upload in progress, and partial uploads are kept in memory without expiry.
 3. **Bundle publication is authorized by device ID alone.** The server accepts a publication signed by the key of any stored manifest that lists the device ID. A second account whose manifest reuses another account's device ID could replace that device's publication; initiators then reject the bundle (they verify it against the right manifest), so the effect is denial of first contact. Binding the bundle key to the root (as for manifests) would close this.
-4. **Inbox creation has no cost.** PLAN §9.3 and the M0 draft require an Equi-X proof for a new inbox address; `RegisterTokens` with `CREATE` needs none.
+4. **Resolved:** inbox creation costs an Equi-X proof for the address and the day at `effort_inbox` (§1.1; `09-transport.md` §3.1).
 5. PLAN §12.1 says "hourly epochs" and §12.2 "10-minute to 1-hour epochs". The implementation makes one epoch per publish; a batching interval is open.
-6. PLAN §12.2 describes witness cosignatures as C2SP format "with an added ML-DSA-87 cosignature". The implementation uses a composite cosignature over the 64 B head and the witness time, not the C2SP text format.
+6. **Resolved:** PLAN §12.2's "C2SP format with an added ML-DSA cosignature": witnesses publish C2SP checkpoints with an Ed25519 `cosignature/v1` and an ML-DSA-44 cosignature (§3.3a), checked against the Go reference implementation in CI, beside the composite cosignature clients rely on.
 7. Whether the KT value should carry the vault-key locator, given that the KT operator is usually the same server as the directory and could then link vault-key fetches to usernames.
-8. The KT skeleton map (§3.5) is ASCII-only and small; for example `vv` is replaced before `u` → `v`, so `uu` and `w` do not collide. A reviewed confusables table is needed before Unicode names.
+8. **Resolved:** the skeleton is Unicode's UTS #39 confusables skeleton plus the lowercase-Latin rules (§3.5), so Unicode names are allowed.

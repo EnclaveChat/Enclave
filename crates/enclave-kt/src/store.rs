@@ -37,14 +37,26 @@ const HEADS: Bytes = TableDefinition::new("kt-heads");
 const SKELETONS: Bytes = TableDefinition::new("kt-skeletons");
 /// Local witnesses: `witness id ‖ server id` → the 64-byte head it last cosigned.
 const WITNESSED: Bytes = TableDefinition::new("kt-witnessed");
+/// Proofs that a log equivocated (`Equivocation`), kept by witnesses:
+/// server id → encoded proof.
+const EQUIVOCATIONS: Bytes = TableDefinition::new("kt-equivocations");
 /// Schema version.
 const META: Bytes = TableDefinition::new("kt-meta");
 
 /// The schema this code writes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Every table; `META` last (it is open while the others are created).
-const ALL: [Bytes; 6] = [RECORDS, VALUES, HEADS, SKELETONS, WITNESSED, META];
+/// 1 → 2 added `kt-equivocations`.
+const ALL: [Bytes; 7] = [
+    RECORDS,
+    VALUES,
+    HEADS,
+    SKELETONS,
+    WITNESSED,
+    EQUIVOCATIONS,
+    META,
+];
 
 /// Key-transparency storage. Cloning shares the database.
 #[derive(Clone)]
@@ -189,6 +201,24 @@ impl KtStore {
             }
             let h = TreeHead::decode(&v)?;
             out.insert(h.server, h);
+        }
+        Ok(out)
+    }
+
+    /// Keep the proof that a log equivocated (the first one per log).
+    pub fn put_equivocation(&self, e: &crate::Equivocation) -> Result<()> {
+        if self.equivocations()?.contains_key(&e.server()) {
+            return Ok(());
+        }
+        self.put(EQUIVOCATIONS, &e.server(), &e.encode())
+    }
+
+    /// The proofs kept, per log.
+    pub fn equivocations(&self) -> Result<HashMap<[u8; 16], crate::Equivocation>> {
+        let mut out = HashMap::new();
+        for (_, v) in self.all(EQUIVOCATIONS)? {
+            let e = crate::Equivocation::decode(&v)?;
+            out.insert(e.server(), e);
         }
         Ok(out)
     }

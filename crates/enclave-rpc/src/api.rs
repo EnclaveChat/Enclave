@@ -129,6 +129,11 @@ pub enum DirKind {
     /// An account's root-signed deletion (`03-identity.md` §8.5), keyed like
     /// the manifest: put to delete the account here, get to see it was.
     Tombstone = 10,
+    /// Proof that a key-transparency log signed two trees for one epoch
+    /// (`12-servers.md` §3.8), keyed by that log's server id (zero-padded):
+    /// put by a client that found it, kept and passed on to the witnesses;
+    /// get to see it.
+    Equivocation = 11,
 }
 
 /// Directory action.
@@ -193,6 +198,7 @@ impl DirRequest {
             8 => DirKind::ServerList,
             9 => DirKind::Moved,
             10 => DirKind::Tombstone,
+            11 => DirKind::Equivocation,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {
@@ -269,13 +275,25 @@ pub fn chunks(data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Context string for a request-inbox proof of work.
-pub fn pow_context_request(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> {
-    [b"request-inbox".as_slice(), mailbox, envelope_hash].concat()
+pub fn pow_context_request(mailbox: &[u8; 32], day: u64, envelope_hash: &[u8]) -> Vec<u8> {
+    [
+        b"request-inbox".as_slice(),
+        mailbox,
+        &day.to_be_bytes(),
+        envelope_hash,
+    ]
+    .concat()
 }
 
 /// Context string for a report's proof of work.
-pub fn pow_context_report(mailbox: &[u8; 32], envelope_hash: &[u8]) -> Vec<u8> {
-    [b"report".as_slice(), mailbox, envelope_hash].concat()
+pub fn pow_context_report(mailbox: &[u8; 32], day: u64, envelope_hash: &[u8]) -> Vec<u8> {
+    [
+        b"report".as_slice(),
+        mailbox,
+        &day.to_be_bytes(),
+        envelope_hash,
+    ]
+    .concat()
 }
 
 /// Most messages one report may quote.
@@ -361,6 +379,13 @@ impl ReportBody {
             quotes,
         })
     }
+}
+
+/// Context for the proof of work that creates an inbox (`09-transport.md`
+/// §3.1): `"inbox-create" ‖ mailbox ‖ u64 day`. The proof is the payload of
+/// the creating `RegisterTokens`.
+pub fn pow_context_inbox(mailbox: &[u8; 32], day: u64) -> Vec<u8> {
+    [b"inbox-create".as_slice(), mailbox, &day.to_be_bytes()].concat()
 }
 
 /// Context string for a bundle-claim proof of work.

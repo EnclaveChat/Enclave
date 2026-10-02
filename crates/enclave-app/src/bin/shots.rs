@@ -206,6 +206,7 @@ fn fixture() -> Snapshot {
         search: Vec::new(),
         username_problem: String::new(),
         kt_split: String::new(),
+        clock_skew: String::new(),
         joining: Vec::new(),
         restore_error: String::new(),
         friends: Vec::new(),
@@ -867,6 +868,11 @@ fn main() -> Result<(), slint::PlatformError> {
         split.kt_split = "enclave.example".into();
         view::apply(&ui, &split);
         shot("28-kt-split-phone", phone);
+        let mut clock = split.clone();
+        clock.kt_split = String::new();
+        clock.clock_skew = "3 hours behind".into();
+        view::apply(&ui, &clock);
+        shot("29-clock-skew-phone", phone);
 
         // Recovery with friends: choosing, holding, restoring.
         let mut friends = data.clone();

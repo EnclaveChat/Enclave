@@ -1133,9 +1133,12 @@ async fn rt04_split_view_detected_by_gossip() {
         s.enable_kt_fork(fork);
     })
     .unwrap();
+    // Ben's home is another server, which takes proofs about S1's log.
+    let s1_key = policy.by_server(&S1).unwrap().head_key.clone();
+    net.with_server(&S2, |s| s.pin_log(S1, s1_key)).unwrap();
     let mut clients = Vec::new();
-    for name in ["Ada", "Ben", "Cy", "Mallory"] {
-        let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), S1, name)
+    for (name, home) in [("Ada", S1), ("Ben", S2), ("Cy", S1), ("Mallory", S1)] {
+        let (mut c, _) = Client::create(memory(), Arc::new(net.clone()), home, name)
             .await
             .unwrap();
         c.set_kt_policy(policy.clone());
@@ -1180,6 +1183,15 @@ async fn rt04_split_view_detected_by_gossip() {
     let b = ben.kt_alert().expect("Ben holds the proof");
     assert_eq!(a, b);
     assert_eq!(a.server, S1);
+    // Ben published the proof to his home server, which checked it and
+    // queued it for the witnesses; anyone can fetch it there.
+    let held = net.with_server(&S2, |s| s.take_equivocations()).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!((held[0].server(), held[0].epoch()), (S1, a.epoch));
+    assert!(
+        held[0].colluders().len() >= 2,
+        "the colluding witnesses signed both"
+    );
 
     // Honest views raise nothing: Cy and Ada agree.
     connect(&mut cy, &mut ada).await;

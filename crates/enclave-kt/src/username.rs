@@ -79,17 +79,17 @@ pub fn normalize(name: &str) -> Result<String> {
 
 /// Confusable skeleton: the UTS #39 skeleton (every character mapped to its
 /// prototype in Unicode's confusables table), lowercased, then the
-/// look-alikes Unicode's table leaves apart in lowercase Latin text.
+/// look-alikes Unicode's table leaves apart in lowercase Latin text: single
+/// characters, then pairs.
 pub fn skeleton(name: &str) -> String {
     let uts: String = unicode_security::skeleton(name)
         .flat_map(char::to_lowercase)
         .collect();
-    let s = uts
-        .replace("rn", "m")
-        .replace("vv", "w")
-        .replace("cl", "d")
-        .replace('_', "");
-    s.chars()
+    // Single characters first, so a pair they make is caught too (`uu`
+    // becomes `vv`, then `w`).
+    let s: String = uts
+        .chars()
+        .filter(|c| *c != '_')
         .map(|c| match c {
             '0' => 'o',
             '1' | 'i' | 'j' => 'l',
@@ -104,7 +104,8 @@ pub fn skeleton(name: &str) -> String {
             'y' => 'v',
             other => other,
         })
-        .collect()
+        .collect();
+    s.replace("rn", "m").replace("vv", "w").replace("cl", "d")
 }
 
 #[cfg(test)]
@@ -126,6 +127,8 @@ mod tests {
         );
         assert_eq!(skeleton("pau1"), skeleton("paul"));
         assert_eq!(skeleton("rnary"), skeleton("mary"));
+        assert_eq!(skeleton("uuendy"), skeleton("wendy"));
+        assert_eq!(skeleton("c1aire"), skeleton("daire"));
         assert_ne!(skeleton("anna"), skeleton("hanna"));
     }
 

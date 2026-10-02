@@ -15,7 +15,8 @@
 # (server reachable on 127.0.0.1) and the e2e override (witnesses on a shared
 # network). The foundation key is made here; the list is built from the
 # descriptors the stacks sign, the way the foundation builds it. Every log
-# is witnessed by the other two stacks' witnesses, threshold 2.
+# is witnessed by the other two stacks' witnesses, threshold 2. Stack c keeps
+# its server state in PostgreSQL (compose.postgres.yml).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -27,10 +28,12 @@ STACKS=(a b c)
 PUSH_PORT=${PUSH_PORT:-8099}
 
 dc() {
-  local s=$1
+  local s=$1 extra=()
   shift
+  [ -f "$WORK/$s/compose.postgres.yml" ] && extra=(-f "$WORK/$s/compose.postgres.yml")
   docker compose -p "e2e-$s" --project-directory "$WORK/$s" \
-    -f "$WORK/$s/compose.yml" -f "$WORK/$s/compose.dev.yml" -f "$WORK/$s/compose.e2e.yml" "$@"
+    -f "$WORK/$s/compose.yml" -f "$WORK/$s/compose.dev.yml" -f "$WORK/$s/compose.e2e.yml" \
+    "${extra[@]}" "$@"
 }
 
 n_of() { case $1 in a) echo 1 ;; b) echo 2 ;; c) echo 3 ;; esac; }
@@ -104,6 +107,14 @@ RELAY_PORT=5182$n
 SERVER_PORT=744$n
 EOF
     cp "$WORK/foundation/foundation.pub" "$d/foundation/"
+    if [ "$s" = c ]; then
+      cp "$ROOT"/ops/compose/compose.postgres.yml "$d/"
+      mkdir -p "$d/secrets"
+      pw=$(openssl rand -hex 24)
+      printf '%s' "$pw" > "$d/secrets/postgres_password"
+      printf 'postgres://enclave:%s@postgres/enclave' "$pw" > "$d/secrets/database_url"
+      chmod 0444 "$d/secrets/postgres_password" "$d/secrets/database_url"
+    fi
 
     echo "== stack $s: keys and descriptors"
     dc "$s" run --rm -T server init | tail -1 > "$d/server.id"

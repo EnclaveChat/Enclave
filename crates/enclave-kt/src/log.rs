@@ -1,7 +1,9 @@
 //! The server-side log (`KtLog`), witnesses, and client lookup verification.
 
 use crate::config::EnclaveKtConfig;
-use crate::head::{CTX_COSIGN, Cosignature, SignedHead, TreeHead, WitnessPolicy, cosign_message};
+use crate::head::{
+    CTX_COSIGN, Cosignature, Equivocation, SignedHead, TreeHead, WitnessPolicy, cosign_message,
+};
 use crate::store::KtStore;
 use crate::username::{normalize, skeleton};
 use crate::{KtError, Result};
@@ -511,6 +513,8 @@ pub struct Witness {
     pub operator: String,
     signing: CompositeSigningKey,
     last: HashMap<[u8; 16], TreeHead>,
+    /// Logs proven to have equivocated: never cosigned again.
+    equivocated: HashMap<[u8; 16], Equivocation>,
     store: Option<KtStore>,
 }
 
@@ -522,6 +526,7 @@ impl Witness {
             operator: operator.to_string(),
             signing,
             last: HashMap::new(),
+            equivocated: HashMap::new(),
             store: None,
         }
     }
@@ -540,6 +545,7 @@ impl Witness {
             operator: operator.to_string(),
             signing,
             last: store.witnessed(&id)?,
+            equivocated: store.equivocations()?,
             store: Some(store),
         })
     }
@@ -559,6 +565,30 @@ impl Witness {
         self.signing.public()
     }
 
+    /// Take a proof that `server_key`'s log signed two trees for one epoch
+    /// (`docs/12-servers.md` §3.8): keep it (the first per log), and never
+    /// cosign that log again. Returns whether it was new.
+    pub fn record_equivocation(
+        &mut self,
+        server_key: &CompositePublic,
+        e: &Equivocation,
+    ) -> Result<bool> {
+        e.verify(server_key)?;
+        if self.equivocated.contains_key(&e.server()) {
+            return Ok(false);
+        }
+        if let Some(store) = &self.store {
+            store.put_equivocation(e)?;
+        }
+        self.equivocated.insert(e.server(), e.clone());
+        Ok(true)
+    }
+
+    /// The proof held that `server`'s log equivocated.
+    pub fn equivocation(&self, server: &[u8; 16]) -> Option<&Equivocation> {
+        self.equivocated.get(server)
+    }
+
     /// Cosign the newest of `heads` (consecutive epochs following the last head
     /// this witness cosigned for that server). `proof` is the append-only proof
     /// from the last cosigned epoch to the newest. The first time a witness sees
@@ -572,6 +602,9 @@ impl Witness {
         rng: &mut HedgedRng,
     ) -> Result<Cosignature> {
         let newest = heads.last().ok_or(KtError::Stale)?;
+        if self.equivocated.contains_key(&newest.head.server) {
+            return Err(KtError::Equivocated);
+        }
         for h in heads {
             h.verify_server(server_key)?;
             if h.head.server != newest.head.server {
