@@ -37,6 +37,69 @@ impl LocalTransport {
         Ok(())
     }
 
+    /// Start a server with its own identity (so its id is derived from it,
+    /// as in production) and a key-transparency log under `domain` with
+    /// three in-process witnesses. Returns its entry for a server list and
+    /// the witnesses for one.
+    pub fn add_federated_server(
+        &self,
+        domain: &str,
+        weight: u32,
+    ) -> Result<
+        (
+            enclave_federation::ListedServer,
+            Vec<enclave_federation::ListedWitness>,
+        ),
+        enclave_server::ServerError,
+    > {
+        let mut rng = enclave_crypto::rng::HedgedRng::new()?;
+        let identity = enclave_crypto::sig::CompositeSigningKey::generate(&mut rng)?;
+        let id = enclave_federation::server_id(identity.public());
+        self.add_server(enclave_server::Config {
+            id,
+            effort_request: 4,
+            effort_claim: 1,
+            effort_blob: 1,
+            effort_username: 1,
+            ..Default::default()
+        })?;
+        let policy =
+            self.enable_usernames(&id, domain)
+                .ok_or(enclave_server::ServerError::Crypto(
+                    enclave_crypto::Error::Rng,
+                ))?;
+        let info = policy
+            .by_server(&id)
+            .cloned()
+            .ok_or(enclave_server::ServerError::Crypto(
+                enclave_crypto::Error::Rng,
+            ))?;
+        let listed = enclave_federation::ListedServer {
+            identity: identity.public().clone(),
+            domain: domain.into(),
+            operator: info.operator.clone(),
+            family: format!("family-{domain}"),
+            nym_address: String::new(),
+            weight,
+            kt: Some(enclave_federation::KtKeys {
+                head_key: info.head_key,
+                vrf_public: info.vrf_public,
+            }),
+        };
+        let witnesses = policy
+            .witnesses
+            .witnesses
+            .into_iter()
+            .map(|(_, key, operator)| enclave_federation::ListedWitness {
+                key,
+                operator: format!("{operator}@{domain}"),
+                family: format!("witness-family-{domain}"),
+                url: String::new(),
+            })
+            .collect();
+        Ok((listed, witnesses))
+    }
+
     /// Turn on usernames for server `id` under `domain`, with a development
     /// key-transparency log and in-process witnesses. Returns what clients pin.
     pub fn enable_usernames(&self, id: &ServerId, domain: &str) -> Option<enclave_kt::KtPolicy> {

@@ -35,8 +35,9 @@ The milestones are the ones in `completion-plan.md`. Each closes the items that 
 | Milestone | Area | Status |
 |---|---|---|
 | G0 | This tracker, `xtask done`, registry reconciled | Done |
-| R0 | CI runs on every push, on Linux, macOS and Windows; actions pinned | In progress |
-| S1–S5 | Federated servers: identity, persistence, descriptors, TLS, witnesses, compose, GHCR, server completeness | Open |
+| R0 | CI runs on every push, on Linux, macOS and Windows; actions pinned | Done (first fully green run: commit 6907c2d) |
+| S1 | Server identity, keys, redb state (server, key transparency, relays), restart | Done |
+| S2–S5 | Federation (descriptors, server list, TLS, witnesses), compose, GHCR, server completeness | In progress |
 | N0–N4 | Full Nym integration, credentials, fallback, M4 gate report | Open |
 | P1–P7 | Protocol completion | Open |
 | D1, R1 | Desktop shippable; release pipeline | Open |

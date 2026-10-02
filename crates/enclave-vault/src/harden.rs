@@ -13,9 +13,15 @@ pub fn paths_for(mode: &crate::Mode) -> (Vec<PathBuf>, Vec<PathBuf>) {
         .collect();
     let mut rw = Vec::new();
     if let crate::Mode::Server {
-        profile, kt_pins, ..
+        profile,
+        kt_pins,
+        foundation,
+        server_list,
+        ..
     } = mode
     {
+        ro.extend(foundation.iter().cloned());
+        ro.extend(server_list.iter().cloned());
         // The engine creates the profile directory if it's missing.
         let _ = std::fs::create_dir_all(profile);
         rw.push(profile.clone());

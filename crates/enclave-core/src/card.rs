@@ -16,6 +16,11 @@ pub const MAX_NAME: usize = 64;
 const CARD_VERSION: u8 = 1;
 /// A card with an invite (§9.2): version 1 fields, then the invite.
 const CARD_VERSION_INVITE: u8 = 2;
+/// Version 3: version 1 fields, the home server's domain, then an
+/// optional invite. What this version writes; 1 and 2 are still read.
+const CARD_VERSION_DOMAIN: u8 = 3;
+/// Longest server domain.
+pub const MAX_DOMAIN: usize = 253;
 /// Most people one invite link can bring.
 pub const MAX_INVITE_USES: u8 = 20;
 
@@ -61,6 +66,10 @@ pub struct ContactCard {
     pub vault_key: [u8; 32],
     /// Display name the owner chose (unverified; shown as a suggestion).
     pub name: String,
+    /// The home server's domain (empty if unknown): how a client that
+    /// doesn't know the server id finds the server (the server list, or
+    /// the server's own descriptor at `https://<domain>/.well-known/enclave`).
+    pub server_domain: String,
     /// Present in invite links, absent from the plain QR code.
     pub invite: Option<Invite>,
 }
@@ -79,20 +88,21 @@ impl ContactCard {
     /// Binary form.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        let version = if self.invite.is_some() {
-            CARD_VERSION_INVITE
-        } else {
-            CARD_VERSION
-        };
-        w.u8(version)
+        w.u8(CARD_VERSION_DOMAIN)
             .fixed(&self.root)
             .fixed(&self.server)
             .fixed(&self.request_inbox)
             .fixed(&self.vault_locator)
             .fixed(&self.vault_key)
-            .bytes(self.name.as_bytes());
-        if let Some(i) = &self.invite {
-            w.fixed(&i.secret).u8(i.uses);
+            .bytes(self.name.as_bytes())
+            .bytes(self.server_domain.as_bytes());
+        match &self.invite {
+            Some(i) => {
+                w.u8(1).fixed(&i.secret).u8(i.uses);
+            }
+            None => {
+                w.u8(0);
+            }
         }
         w.finish()
     }
@@ -102,7 +112,10 @@ impl ContactCard {
         let mut r = Reader::new(b);
         let m = |_| LinkError::Malformed;
         let version = r.u8().map_err(m)?;
-        if version != CARD_VERSION && version != CARD_VERSION_INVITE {
+        if !matches!(
+            version,
+            CARD_VERSION | CARD_VERSION_INVITE | CARD_VERSION_DOMAIN
+        ) {
             return Err(LinkError::Malformed);
         }
         let mut card = Self {
@@ -113,9 +126,22 @@ impl ContactCard {
             vault_key: r.array().map_err(m)?,
             name: String::from_utf8(r.bytes(MAX_NAME).map_err(m)?.to_vec())
                 .map_err(|_| LinkError::Malformed)?,
+            server_domain: String::new(),
             invite: None,
         };
-        if version == CARD_VERSION_INVITE {
+        let has_invite = match version {
+            CARD_VERSION_DOMAIN => {
+                card.server_domain = String::from_utf8(r.bytes(MAX_DOMAIN).map_err(m)?.to_vec())
+                    .map_err(|_| LinkError::Malformed)?;
+                match r.u8().map_err(m)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(LinkError::Malformed),
+                }
+            }
+            v => v == CARD_VERSION_INVITE,
+        };
+        if has_invite {
             let secret = r.array().map_err(m)?;
             let uses = r.u8().map_err(m)?;
             if uses == 0 || uses > MAX_INVITE_USES {
@@ -225,6 +251,7 @@ mod tests {
             vault_locator: [4; 32],
             vault_key: [5; 32],
             name: "Sam".into(),
+            server_domain: "a.example".into(),
             invite: None,
         };
         let link = card.to_link();
@@ -256,5 +283,34 @@ mod tests {
         let mut bad = link.clone();
         bad.push('A');
         assert!(ContactCard::from_link(&bad).is_err());
+
+        // Cards from before domains (versions 1 and 2) still read, with no
+        // domain.
+        let v1 = [
+            &[CARD_VERSION][..],
+            &card.root,
+            &card.server,
+            &card.request_inbox,
+            &card.vault_locator,
+            &card.vault_key,
+            &3u32.to_be_bytes(),
+            b"Sam",
+        ]
+        .concat();
+        let old = ContactCard::decode(&v1).unwrap();
+        assert_eq!(old.server_domain, "");
+        assert_eq!(old.root, card.root);
+        let mut v2 = v1.clone();
+        v2[0] = CARD_VERSION_INVITE;
+        v2.extend_from_slice(&[6; 32]);
+        v2.push(3);
+        assert_eq!(ContactCard::decode(&v2).unwrap().invite.unwrap().uses, 3);
+        // A bad invite flag, and a version from the future, are refused.
+        let mut b = card.encode();
+        *b.last_mut().unwrap() = 2;
+        assert_eq!(ContactCard::decode(&b), Err(LinkError::Malformed));
+        let mut b = card.encode();
+        b[0] = 4;
+        assert_eq!(ContactCard::decode(&b), Err(LinkError::Malformed));
     }
 }

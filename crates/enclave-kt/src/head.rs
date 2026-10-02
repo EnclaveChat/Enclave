@@ -81,6 +81,33 @@ pub struct SignedHead {
     pub cosignatures: Vec<Cosignature>,
 }
 
+impl Cosignature {
+    /// `witness (16) ‖ u64(time) ‖ u32 len ‖ signature`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = self.witness.to_vec();
+        v.extend_from_slice(&self.time.to_be_bytes());
+        v.extend_from_slice(&(self.signature.len() as u32).to_be_bytes());
+        v.extend_from_slice(&self.signature);
+        v
+    }
+
+    /// Decode [`Cosignature::encode`].
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let mut r = Cursor(b);
+        let witness = arr(r.take(16)?)?;
+        let time = u64::from_be_bytes(arr(r.take(8)?)?);
+        let signature = r.sig()?;
+        if !r.0.is_empty() {
+            return Err(KtError::Malformed);
+        }
+        Ok(Self {
+            witness,
+            time,
+            signature,
+        })
+    }
+}
+
 impl SignedHead {
     /// Server signs a head.
     pub fn sign(head: TreeHead, key: &CompositeSigningKey, rng: &mut HedgedRng) -> Result<Self> {

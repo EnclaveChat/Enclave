@@ -395,6 +395,15 @@ URI scheme `enclave:` followed by `c/` and base32 of:
 
 201 B. Scanning resolves the contact by fetching the manifest (by `root_hash` at `server_id`), bundles, and the vault-key blob in bulk mode while the UI shows "Adding Sam…".
 
+**As implemented** (`enclave-core/src/card.rs`): `enclave:add#` + base64url of the card, version 3:
+
+```
+u8(3) ‖ root_pk (64) ‖ server_id (16) ‖ request_inbox (32) ‖ vault_locator (32) ‖ vault_key (32)
+‖ bytes(name, ≤ 64) ‖ bytes(server_domain, ≤ 253) ‖ u8(has invite) [‖ invite_secret (32) ‖ uses (u8, 1–20)]
+```
+
+`server_domain` is the home server's domain from the server list (empty if the client holds none); a client that doesn't know the server id finds the server through it (`12-servers.md` §4). Versions 1 (no domain, no invite) and 2 (no domain, with invite) are still read. Test `card_links`.
+
 ### 9.2 Invite links
 
 `https://<invite-host>/i#<base32 payload>`, where the payload is the §9.1 fields without `s`. The secret part is only in the URL fragment, which browsers do not send to servers. Invite links:

@@ -31,10 +31,12 @@ pub(crate) fn parse_address(address: &str) -> (String, Option<String>) {
 }
 
 impl Client {
-    /// Pin key-transparency logs and witnesses (from the app's server list).
-    /// Not stored: the app supplies it at every start.
+    /// Pin key-transparency logs and witnesses beyond the server list's
+    /// (development servers). Not stored: the app supplies them at every
+    /// start. Merged with the pins of the list held.
     pub fn set_kt_policy(&mut self, policy: KtPolicy) {
-        self.kt = Some(policy);
+        self.extra_pins = Some(policy);
+        self.apply_pins();
     }
 
     /// This account's username as `name@domain`, if it has one.

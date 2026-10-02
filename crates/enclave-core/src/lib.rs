@@ -34,7 +34,7 @@ pub use client::{
     ConvPrefs, Hit, Location, MAX_PINNED_CONVERSATIONS, MAX_PINS, MeetMatch, Place, RecoveryAlert,
     words_from_shares,
 };
-pub use client::{Sending, TYPING_RESERVE, TYPING_SHOW_SECS};
+pub use client::{ListUpdate, Sending, TYPING_RESERVE, TYPING_SHOW_SECS};
 pub use enclave_kt::KtPolicy;
 
 use enclave_rpc::api::Status;
@@ -60,6 +60,9 @@ pub enum CoreError {
     /// Unknown contact or object.
     #[error("not found")]
     NotFound,
+    /// A federation object (server list, descriptor) was refused.
+    #[error("federation: {0}")]
+    Federation(enclave_federation::FedError),
     /// The contact has not accepted yet, or we have not accepted them.
     #[error("contact has not accepted the conversation yet")]
     NotAccepted,

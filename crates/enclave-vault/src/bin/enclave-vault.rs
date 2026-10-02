@@ -135,11 +135,19 @@ where
 fn start_netd(
     mode: &enclave_vault::Mode,
 ) -> Option<std::sync::Arc<dyn enclave_net::transport::Transport>> {
-    let enclave_vault::Mode::Server { server, addr, .. } = mode else {
+    let enclave_vault::Mode::Server {
+        server,
+        addr,
+        others,
+        ..
+    } = mode
+    else {
         return None;
     };
     let bin = enclave_vault::netd::netd_binary()?;
-    match enclave_vault::netd::PipeTransport::spawn(&bin, *server, &addr.to_string()) {
+    let mut servers = vec![(*server, addr.to_string())];
+    servers.extend(others.iter().map(|(id, a)| (*id, a.to_string())));
+    match enclave_vault::netd::PipeTransport::spawn(&bin, &servers) {
         Ok(t) => Some(std::sync::Arc::new(t)),
         Err(e) => {
             eprintln!("enclave-vault: netd didn't start ({e}); using the network directly");

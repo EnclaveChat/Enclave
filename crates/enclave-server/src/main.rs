@@ -304,6 +304,23 @@ async fn run(args: &[String]) -> Result<(), String> {
             return Err("set server.operator (key transparency names the operator)".into());
         }
         let store = KtStore::open(&kt_path(&cfg)).map_err(|e| e.to_string())?;
+        // Witnesses that can't be reached now are skipped: heads get their
+        // cosignatures when enough answer.
+        let mut witnesses: Vec<Box<dyn enclave_kt::WitnessClient>> = Vec::new();
+        let mut pinned = Vec::new();
+        for url in &cfg.kt.witnesses {
+            match enclave_witness::HttpWitness::connect(url, cfg.kt.witness_ca.as_deref(), now())
+                .await
+            {
+                Ok(w) => {
+                    if let Some(d) = w.descriptor() {
+                        pinned.push((d.id(), d.key.clone(), d.operator.clone()));
+                    }
+                    witnesses.push(Box::new(w));
+                }
+                Err(e) => eprintln!("witness {url}: {e}"),
+            }
+        }
         let kt = KtService::open(
             store.clone(),
             id,
@@ -311,15 +328,16 @@ async fn run(args: &[String]) -> Result<(), String> {
             &cfg.server.operator,
             keys.kt_head_copy().map_err(|e| e.to_string())?,
             *keys.kt_vrf,
-            Vec::new(),
+            witnesses,
             now(),
         )
         .map_err(|e| format!("key transparency: {e}"))?;
         let policy = enclave_kt::KtPolicy {
             servers: vec![kt.info().clone()],
+            // For development clients; real clients pin the server list.
             witnesses: enclave_kt::WitnessPolicy {
-                witnesses: Vec::new(),
-                threshold: 1,
+                threshold: pinned.len().max(1),
+                witnesses: pinned,
             },
         };
         server.enable_kt(kt);

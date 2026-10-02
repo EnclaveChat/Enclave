@@ -1,0 +1,42 @@
+[package]
+name = "enclave-witness"
+description = "Enclave's key-transparency witness as a service: cosigns the heads of the logs in the foundation's server list after checking each extends the last it cosigned, over HTTPS; and the client servers use to reach it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-witness"
+path = "src/bin/enclave-witness.rs"
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-federation = { path = "../enclave-federation" }
+enclave-kt = { path = "../enclave-kt" }
+enclave-service = { path = "../enclave-service" }
+enclave-tls = { path = "../enclave-tls" }
+akd = { version = "0.13.0", default-features = false, features = ["public_auditing", "parallel_vrf"] }
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "server", "service", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots"] }
+protobuf = "3"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

@@ -21,4 +21,5 @@ enclave-tokens = { path = "../enclave-tokens" }
 enclave-server = { path = "../enclave-server" }
 enclave-net = { path = "../enclave-net" }
 enclave-kt = { path = "../enclave-kt" }
+enclave-federation = { path = "../enclave-federation" }
 async-trait = "0.1"

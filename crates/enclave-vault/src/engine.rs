@@ -36,8 +36,15 @@ pub enum Mode {
         server: ServerId,
         /// Server address.
         addr: SocketAddr,
+        /// Other servers this build reaches directly (more `--server`
+        /// flags: development routes).
+        others: Vec<(ServerId, SocketAddr)>,
         /// Key-transparency pins for usernames (written by the dev server).
         kt_pins: Option<PathBuf>,
+        /// The foundation's public key, when not built in.
+        foundation: Option<PathBuf>,
+        /// A signed server list to offer at start, when not built in.
+        server_list: Option<PathBuf>,
         /// Shape traffic on the scheduler's clock (`--no-shaping` turns it
         /// off, for development).
         shaping: bool,
@@ -56,17 +63,26 @@ impl Mode {
                 .and_then(|i| args.get(i + 1))
                 .cloned()
         };
-        let Some(s) = arg("--server") else {
+        let mut servers = Vec::new();
+        for pair in args.windows(2).filter(|p| p[0] == "--server") {
+            servers.push(
+                enclave_net::transport::parse_server(&pair[1])
+                    .ok_or_else(|| format!("--server {}: expected SERVER_ID=HOST:PORT", pair[1]))?,
+            );
+        }
+        if servers.is_empty() {
             return Ok(Mode::Demo);
-        };
-        let (server, addr) = enclave_net::transport::parse_server(&s)
-            .ok_or_else(|| format!("--server {s}: expected SERVER_ID=HOST:PORT"))?;
+        }
+        let (server, addr) = servers.remove(0);
         let profile = arg("--profile").ok_or("--server needs --profile DIR")?;
         Ok(Mode::Server {
             profile: profile.into(),
             server,
             addr,
+            others: servers,
             kt_pins: arg("--kt-pins").map(Into::into),
+            foundation: arg("--foundation").map(Into::into),
+            server_list: arg("--server-list").map(Into::into),
             shaping: !args.iter().any(|a| a == "--no-shaping"),
         })
     }
@@ -79,19 +95,33 @@ impl Mode {
                 profile,
                 server,
                 addr,
+                others,
                 kt_pins,
+                foundation,
+                server_list,
                 shaping,
             } => {
-                let id: String = server.iter().map(|b| format!("{b:02x}")).collect();
+                let hex =
+                    |id: &ServerId| -> String { id.iter().map(|b| format!("{b:02x}")).collect() };
                 let mut v = vec![
                     "--server".into(),
-                    format!("{id}={addr}"),
+                    format!("{}={addr}", hex(server)),
                     "--profile".into(),
                     profile.display().to_string(),
                 ];
-                if let Some(k) = kt_pins {
-                    v.push("--kt-pins".into());
-                    v.push(k.display().to_string());
+                for (id, a) in others {
+                    v.push("--server".into());
+                    v.push(format!("{}={a}", hex(id)));
+                }
+                for (flag, path) in [
+                    ("--kt-pins", kt_pins),
+                    ("--foundation", foundation),
+                    ("--server-list", server_list),
+                ] {
+                    if let Some(p) = path {
+                        v.push(flag.into());
+                        v.push(p.display().to_string());
+                    }
                 }
                 if !shaping {
                     v.push("--no-shaping".into());
@@ -100,6 +130,40 @@ impl Mode {
             }
         }
     }
+}
+
+/// The foundation key and list for `mode`: the files it names, else what
+/// the build has built in. The demo uses neither.
+fn federation(
+    mode: &Mode,
+) -> (
+    Option<enclave_federation::FoundationPublic>,
+    Option<Vec<u8>>,
+) {
+    let Mode::Server {
+        foundation,
+        server_list,
+        ..
+    } = mode
+    else {
+        return (None, None);
+    };
+    let read = |p: &Option<PathBuf>, built: Option<&[u8]>| match p {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("enclave-vault: {}: {e}", p.display());
+                None
+            }
+        },
+        None => built.map(<[u8]>::to_vec),
+    };
+    let key = read(foundation, crate::built::FOUNDATION_PUB).and_then(|b| {
+        enclave_federation::FoundationPublic::decode(&b)
+            .map_err(|e| eprintln!("enclave-vault: foundation key: {e}"))
+            .ok()
+    });
+    (key, read(server_list, crate::built::SERVER_LIST))
 }
 
 const DEMO_SERVER: ServerId = [0x5e; 16];
@@ -161,6 +225,13 @@ struct Engine {
     add_error: String,
     username_error: String,
     kt: Option<enclave_core::KtPolicy>,
+    /// The foundation's key (built in, or `--foundation`).
+    foundation: Option<enclave_federation::FoundationPublic>,
+    /// A server list to offer the account at start (built in, or
+    /// `--server-list`).
+    list: Option<Vec<u8>>,
+    /// The day the server list was last refreshed from the home server.
+    list_day: u64,
     /// This device, while it is being linked to an existing account.
     joining: Option<enclave_core::LinkingDevice>,
     join_code: String,
@@ -518,6 +589,7 @@ pub async fn run_with(
         Mode::Server {
             server,
             addr,
+            others,
             kt_pins,
             shaping,
             ..
@@ -529,7 +601,11 @@ pub async fn run_with(
                 .and_then(|b| enclave_core::KtPolicy::decode(&b).ok());
             let t: Arc<dyn Transport> = match helpers.net {
                 Some(t) => t,
-                None => Arc::new(TcpTransport::new(HashMap::from([(id, *addr)]))),
+                None => {
+                    let mut routes = HashMap::from([(id, *addr)]);
+                    routes.extend(others.iter().copied());
+                    Arc::new(TcpTransport::new(routes))
+                }
             };
             // Shaped on the scheduler's clock: the Standard profile until
             // the profile's own setting is read.
@@ -543,6 +619,7 @@ pub async fn run_with(
             (t, id, kt)
         }
     };
+    let (foundation, list) = federation(&mode);
     let mut e = Engine {
         mode,
         media: helpers
@@ -566,6 +643,9 @@ pub async fn run_with(
         add_error: String::new(),
         username_error: String::new(),
         kt,
+        foundation,
+        list,
+        list_day: 0,
         joining: None,
         join_code: String::new(),
         join_words: String::new(),
@@ -595,9 +675,7 @@ pub async fn run_with(
     {
         match Client::open(e.options(None), Arc::clone(&e.transport)) {
             Ok(mut c) => {
-                if let Some(p) = e.kt.clone() {
-                    c.set_kt_policy(p);
-                }
+                e.configure(&mut c);
                 e.client = Some(c);
             }
             // Protected by a passphrase: ask for it.
@@ -901,9 +979,7 @@ impl Engine {
                 .await
                 {
                     Ok((mut c, _words)) => {
-                        if let Some(p) = self.kt.clone() {
-                            c.set_kt_policy(p);
-                        }
+                        self.configure(&mut c);
                         self.client = Some(c);
                         self.passphrase_set = protect;
                         if matches!(self.mode, Mode::Demo) {
@@ -957,9 +1033,7 @@ impl Engine {
                 };
                 match restored {
                     Ok(mut c) => {
-                        if let Some(p) = self.kt.clone() {
-                            c.set_kt_policy(p);
-                        }
+                        self.configure(&mut c);
                         self.client = Some(c);
                         self.status = "Your account is back on this device. Contacts will accept it after 72 hours unless one of your other devices stops it.".into();
                     }
@@ -1751,9 +1825,7 @@ impl Engine {
                 self.push();
                 match Client::open(self.options(Some(&passphrase)), Arc::clone(&self.transport)) {
                     Ok(mut c) => {
-                        if let Some(p) = self.kt.clone() {
-                            c.set_kt_policy(p);
-                        }
+                        self.configure(&mut c);
                         self.client = Some(c);
                         self.locked = false;
                         self.passphrase_set = true;
@@ -2118,9 +2190,7 @@ impl Engine {
                 self.status = "Bringing over your contacts…".into();
                 match l.finish().await {
                     Ok(mut c) => {
-                        if let Some(p) = self.kt.clone() {
-                            c.set_kt_policy(p);
-                        }
+                        self.configure(&mut c);
                         self.client = Some(c);
                         self.join_code.clear();
                         self.join_words.clear();
@@ -2177,6 +2247,24 @@ impl Engine {
         }));
     }
 
+    /// Give a client what this build knows about the federation: the
+    /// foundation key, a server list to offer, and extra pins.
+    fn configure(&self, c: &mut Client) {
+        if let Some(k) = &self.foundation {
+            if let Err(e) = c.set_foundation(k.clone()) {
+                eprintln!("enclave-vault: foundation key: {e}");
+            }
+            if let Some(b) = &self.list
+                && let Err(e) = c.offer_server_list(b)
+            {
+                eprintln!("enclave-vault: server list: {e}");
+            }
+        }
+        if let Some(p) = self.kt.clone() {
+            c.set_kt_policy(p);
+        }
+    }
+
     /// Start or end a bulk transfer (files, account setup, previews): the
     /// shaper may then skip its clock, except in Maximum.
     fn bulk(&self, on: bool) {
@@ -2184,6 +2272,18 @@ impl Engine {
     }
 
     async fn sync(&mut self) {
+        // Once a day: a newer server list from the home server, if any.
+        let day = self.transport.now() / 86_400;
+        if self.foundation.is_some()
+            && day != self.list_day
+            && let Some(c) = self.client.as_mut()
+        {
+            self.list_day = day;
+            match c.refresh_server_list().await {
+                Ok(_) | Err(CoreError::Server(enclave_rpc::api::Status::NotFound)) => {}
+                Err(e) => eprintln!("enclave-vault: server list: {e}"),
+            }
+        }
         let shaped = self.shaper.is_some();
         let round = self.round;
         self.round = self.round.wrapping_add(1);
@@ -2279,7 +2379,7 @@ impl Engine {
             add_error: self.add_error.clone(),
             username_error: self.username_error.clone(),
             username_problem: self.username_problem.clone(),
-            usernames: self.kt.is_some(),
+            usernames: self.kt.is_some() || self.foundation.is_some(),
             can_join: matches!(self.mode, Mode::Server { .. }),
             join_code: self.join_code.clone(),
             join_words: self.join_words.clone(),

@@ -217,9 +217,11 @@ Residuals: the sequence of real requests in a bulk window is visible as a burst 
 - Censorship: obfs4 bridges in process; Snowflake and WebTunnel as declared exceptions, only in censorship mode.
 - Nym's post-quantum Sphinx is adopted when nym-sdk exposes it.
 
-## 8. TLS 1.3 (not yet implemented; never on the message path)
+## 8. TLS 1.3 (never on the message path)
 
 A rustls `CryptoProvider` with SecP384r1MLKEM1024 (codepoint 0x11ED) and `TLS_AES_256_GCM_SHA384` only, for server descriptors, witness gossip, update endpoints, the relay control plane and the push relay's front door.
+
+**As implemented** (`enclave-tls`): `provider()` is rustls with `ring` for AES-256-GCM and certificate signatures, TLS 1.3 only, one cipher suite and one key exchange. The hybrid is built from two pure-Rust halves: the client share is an uncompressed P-384 point (97 B, RustCrypto `p384`) followed by an ML-KEM-1024 encapsulation key (1,568 B, `enclave-crypto`/libcrux); the server answers with its P-384 point and an ML-KEM-1024 ciphertext; the secret is the P-384 ECDH x-coordinate (48 B) followed by the ML-KEM shared secret (32 B), so a recording stays confidential if either half holds. Points not on the curve, compressed points, the identity and wrong lengths are refused. A client that offers only other groups (including X25519MLKEM768) can't connect. `compat_provider()` (rustls's defaults) is only for the outside world, such as an ACME CA. Tests: `crates/enclave-tls/tests/handshake.rs`. In use by the witness service (`12-servers.md` §3.3). Not implemented yet: the front that serves descriptors (S2), update endpoints (R2), the relay control plane (C2), the push relay's front door (N3), and an interoperability test against OpenSSL 3.5's own SecP384r1MLKEM1024 (S2).
 
 ## 9. Blobs
 

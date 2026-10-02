@@ -113,11 +113,20 @@ impl Default for PolicySection {
 pub struct KtSection {
     /// Run a key-transparency log (usernames).
     pub enabled: bool,
+    /// Witnesses to ask for cosignatures (base URLs, other operators'
+    /// `enclave-witness` services).
+    pub witnesses: Vec<String>,
+    /// Extra roots (PEM) to trust for witnesses' certificates.
+    pub witness_ca: Option<PathBuf>,
 }
 
 impl Default for KtSection {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            witnesses: Vec::new(),
+            witness_ca: None,
+        }
     }
 }
 

@@ -309,6 +309,48 @@ pub fn verify_lookup(
     Ok((r.value.0, r.version, trusted))
 }
 
+/// A witness as the log's server reaches it: in the same process
+/// ([`Witness`], development and tests) or another operator's service
+/// over HTTPS (`enclave_witness::HttpWitness`).
+#[async_trait::async_trait]
+pub trait WitnessClient: Send {
+    /// The witness id.
+    fn witness_id(&self) -> [u8; 16];
+    /// The last epoch the witness cosigned for `server`, if it knows it.
+    async fn last_epoch(&mut self, server: &[u8; 16]) -> Option<u64>;
+    /// Ask for a cosignature on the newest of `heads` (see
+    /// [`Witness::cosign`]).
+    async fn cosign(
+        &mut self,
+        server_key: &CompositePublic,
+        heads: &[SignedHead],
+        proof: Option<AppendOnlyProof>,
+        now: u64,
+    ) -> Result<Cosignature>;
+}
+
+#[async_trait::async_trait]
+impl WitnessClient for Witness {
+    fn witness_id(&self) -> [u8; 16] {
+        self.id
+    }
+
+    async fn last_epoch(&mut self, server: &[u8; 16]) -> Option<u64> {
+        Witness::last_epoch(self, server)
+    }
+
+    async fn cosign(
+        &mut self,
+        server_key: &CompositePublic,
+        heads: &[SignedHead],
+        proof: Option<AppendOnlyProof>,
+        now: u64,
+    ) -> Result<Cosignature> {
+        let mut rng = HedgedRng::new().map_err(|_| KtError::Directory("rng".into()))?;
+        Witness::cosign(self, server_key, heads, proof, now, &mut rng).await
+    }
+}
+
 /// A witness: cosigns heads only after checking they extend what it saw before.
 pub struct Witness {
     /// Identifier.
@@ -353,6 +395,11 @@ impl Witness {
     /// The last epoch this witness cosigned for `server`.
     pub fn last_epoch(&self, server: &[u8; 16]) -> Option<u64> {
         self.last.get(server).map(|h| h.epoch)
+    }
+
+    /// The head this witness last cosigned for `server`.
+    pub fn last_head(&self, server: &[u8; 16]) -> Option<TreeHead> {
+        self.last.get(server).copied()
     }
 
     /// Public key clients pin.

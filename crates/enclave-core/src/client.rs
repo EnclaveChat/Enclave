@@ -119,6 +119,7 @@ mod prefs;
 mod push;
 mod reports;
 mod search;
+mod servers;
 mod sharing;
 mod social;
 mod stickers;
@@ -140,6 +141,7 @@ pub use pins::MAX_PINS;
 pub use polls::{MAX_OPTIONS, PollView};
 pub use prefs::{ConvPrefs, MAX_PINNED_CONVERSATIONS};
 pub use search::{Hit, Place};
+pub use servers::ListUpdate;
 pub use social::{MAX_HOLDERS, words_from_shares};
 pub use stickers::{InstalledPack, MAX_STICKERS, PACK_MIME, StickerPack};
 pub use typing::{TYPING_RESERVE, TYPING_SHOW_SECS};
@@ -316,6 +318,12 @@ pub struct Client {
     groups: BTreeMap<[u8; 32], groups::GroupEntry>,
     /// Pinned key-transparency logs and witnesses (from the app's server list).
     kt: Option<enclave_kt::KtPolicy>,
+    /// Pins the app adds (development servers), merged with the list's.
+    extra_pins: Option<enclave_kt::KtPolicy>,
+    /// The foundation's key, from the app's build.
+    foundation: Option<enclave_federation::FoundationPublic>,
+    /// The newest server list verified under it.
+    servers: Option<enclave_federation::ServerList>,
     /// Accounts whose device list changed (root → announced manifest
     /// version), refreshed at the end of `sync`.
     stale_manifests: BTreeMap<[u8; 64], u64>,
@@ -511,6 +519,9 @@ impl Client {
             token_pool: Vec::new(),
             groups: BTreeMap::new(),
             kt: None,
+            extra_pins: None,
+            foundation: None,
+            servers: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             pending_kt_proofs: Vec::new(),
@@ -582,6 +593,9 @@ impl Client {
             token_pool,
             groups,
             kt: None,
+            extra_pins: None,
+            foundation: None,
+            servers: None,
             stale_manifests: BTreeMap::new(),
             pending_history: Vec::new(),
             pending_kt_proofs: Vec::new(),
@@ -622,6 +636,7 @@ impl Client {
             vault_locator: self.profile.vault_locator,
             vault_key: self.profile.vault_key,
             name: self.profile.name.clone(),
+            server_domain: self.server_domain(&self.profile.server).unwrap_or_default(),
             invite: None,
         }
     }

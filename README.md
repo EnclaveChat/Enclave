@@ -85,7 +85,9 @@ binary (or with `--single-process`) the same engine runs inside the app.
 
 `SERVER_ID` is the 32-hex-digit id the dev server prints when it starts; the
 app checks that the server's request keys are signed by the identity that id
-names. In the demo, the demo contact has the username `@sam@demo.enclave`; choose
+names. More `--server ID=HOST:PORT` flags let it reach other dev servers, and
+`--foundation FILE --server-list FILE` (from `enclave-admin`) give it a signed
+server list. In the demo, the demo contact has the username `@sam@demo.enclave`; choose
 your own under Settings. `--kt-pins` is the file where the dev server writes
 its key-transparency keys and witnesses, which the app pins to check lookups.
 To add a second device to an account, start another profile against the same

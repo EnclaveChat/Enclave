@@ -47,10 +47,13 @@ pub fn netd_binary() -> Option<std::path::PathBuf> {
 }
 
 impl Link {
-    fn spawn(bin: &std::path::Path, server: ServerId, addr: &str) -> std::io::Result<Self> {
-        let hex: String = server.iter().map(|b| format!("{b:02x}")).collect();
-        let mut child = Command::new(bin)
-            .args(["--server", &format!("{hex}={addr}")])
+    fn spawn(bin: &std::path::Path, servers: &[(ServerId, String)]) -> std::io::Result<Self> {
+        let mut cmd = Command::new(bin);
+        for (id, addr) in servers {
+            let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+            cmd.args(["--server", &format!("{hex}={addr}")]);
+        }
+        let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -99,12 +102,12 @@ impl Link {
 }
 
 impl PipeTransport {
-    /// Start netd, and [`SPARES`] more, for the dev server at `addr` (the
-    /// only server in server mode for now). Must run inside a tokio
-    /// runtime, before the vault confines itself.
-    pub fn spawn(bin: &std::path::Path, server: ServerId, addr: &str) -> std::io::Result<Self> {
-        let mut links = vec![Link::spawn(bin, server, addr)?];
-        links.extend((0..SPARES).filter_map(|_| Link::spawn(bin, server, addr).ok()));
+    /// Start netd, and [`SPARES`] more, knowing `servers` (id and dev
+    /// address). Must run inside a tokio runtime, before the vault confines
+    /// itself.
+    pub fn spawn(bin: &std::path::Path, servers: &[(ServerId, String)]) -> std::io::Result<Self> {
+        let mut links = vec![Link::spawn(bin, servers)?];
+        links.extend((0..SPARES).filter_map(|_| Link::spawn(bin, servers).ok()));
         Ok(Self { links })
     }
 

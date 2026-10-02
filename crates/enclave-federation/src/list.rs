@@ -12,7 +12,7 @@
 //!         ‖ u32(n) ‖ n × relay    ‖ u32(n) ‖ n × push relay
 //!         ‖ SLH-DSA-SHAKE-256s signature (29,792) ‖ composite signature (4,741)
 //! server  = identity pk (2,649) ‖ bytes(domain) ‖ bytes(operator) ‖ bytes(family)
-//!         ‖ u32(weight) ‖ u8(has kt) [‖ head key (2,649) ‖ bytes(VRF public key)]
+//!         ‖ bytes(Nym address) ‖ u32(weight) ‖ u8(has kt) [‖ head key (2,649) ‖ bytes(VRF public key)]
 //! witness = key (2,649) ‖ bytes(operator) ‖ bytes(family) ‖ bytes(url)
 //! relay   = identity pk (2,649) ‖ bytes(operator) ‖ bytes(family) ‖ bytes(addr) ‖ link key (56)
 //! push    = bytes(Nym address) ‖ u8(n) ‖ n × (u32 epoch ‖ X448 (56) ‖ ML-KEM-1024 (1,568))
@@ -54,6 +54,10 @@ pub struct ListedServer {
     pub operator: String,
     /// Operator family.
     pub family: String,
+    /// Nym address of the server's ingress (stable: a persistent identity
+    /// on a fixed gateway; a server that moves publishes the new one in
+    /// its descriptor).
+    pub nym_address: String,
     /// Relative weight for new accounts (0: listed but not offered).
     pub weight: u32,
     /// Its key-transparency log.
@@ -246,6 +250,7 @@ impl ServerList {
                 || s.domain.len() > MAX_DOMAIN
                 || s.operator.len() > MAX_NAME
                 || s.family.len() > MAX_NAME
+                || s.nym_address.len() > MAX_ADDRESS
             {
                 return Err(FedError::Malformed);
             }
@@ -253,6 +258,7 @@ impl ServerList {
                 .bytes(s.domain.as_bytes())
                 .bytes(s.operator.as_bytes())
                 .bytes(s.family.as_bytes())
+                .bytes(s.nym_address.as_bytes())
                 .u32(s.weight);
             match &s.kt {
                 Some(k) => {
@@ -340,6 +346,7 @@ impl ServerList {
                 domain: utf8(r.bytes(MAX_DOMAIN)?)?,
                 operator: utf8(r.bytes(MAX_NAME)?)?,
                 family: utf8(r.bytes(MAX_NAME)?)?,
+                nym_address: utf8(r.bytes(MAX_ADDRESS)?)?,
                 weight: r.u32()?,
                 kt: match r.u8()? {
                     0 => None,

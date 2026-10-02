@@ -99,7 +99,7 @@ fn service(
         "server-operator",
         CompositeSigningKey::from_seed(head).unwrap(),
         VRF,
-        vec![w],
+        vec![Box::new(w)],
         now,
     )
 }

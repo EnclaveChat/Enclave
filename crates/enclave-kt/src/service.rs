@@ -12,7 +12,7 @@
 //! can run the whole cosigning flow in one process.
 
 use crate::head::WitnessPolicy;
-use crate::log::{KtLog, Witness};
+use crate::log::{KtLog, Witness, WitnessClient};
 use crate::store::KtStore;
 use crate::wire::{KtInfo, KtPolicy, LookupReply};
 use crate::{KtError, Result};
@@ -72,6 +72,10 @@ impl KtService {
         vrf_secret: [u8; 32],
         witnesses: Vec<Witness>,
     ) -> Result<Self> {
+        let witnesses = witnesses
+            .into_iter()
+            .map(|w| Box::new(w) as Box<dyn WitnessClient>)
+            .collect();
         Self::open(
             KtStore::memory()?,
             server,
@@ -95,7 +99,7 @@ impl KtService {
         operator: &str,
         signing: CompositeSigningKey,
         vrf_secret: [u8; 32],
-        witnesses: Vec<Witness>,
+        witnesses: Vec<Box<dyn WitnessClient>>,
         now: u64,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Job>();
@@ -133,12 +137,11 @@ impl KtService {
         };
         let mut witnesses = Vec::new();
         for i in 0..3u8 {
-            let mut id = server;
-            id[15] ^= 0x80 | i;
+            let k = key(&mut rng)?;
             witnesses.push(Witness::new(
-                id,
+                enclave_federation::witness_id(k.public()),
                 &format!("dev-witness-{i}"),
-                key(&mut rng)?,
+                k,
             ));
         }
         let pins = witnesses
@@ -176,9 +179,9 @@ impl KtService {
         let key = |s: &[u8; COMPOSITE_SEED_LEN]| CompositeSigningKey::from_seed(s).map_err(err);
         let mut wseeds = Vec::new();
         for i in 0..3u8 {
-            let mut id = server;
-            id[15] ^= 0x80 | i;
-            wseeds.push((id, format!("dev-witness-{i}"), seed()?));
+            let s = seed()?;
+            let id = enclave_federation::witness_id(key(&s)?.public());
+            wseeds.push((id, format!("dev-witness-{i}"), s));
         }
         let server_seed = seed()?;
         let vrf = rng
@@ -270,7 +273,7 @@ fn run(
     server: [u8; 16],
     signing: CompositeSigningKey,
     vrf_secret: [u8; 32],
-    mut witnesses: Vec<Witness>,
+    mut witnesses: Vec<Box<dyn WitnessClient>>,
     now: u64,
     rx: mpsc::Receiver<Job>,
     init: mpsc::Sender<Result<Vec<u8>>>,
@@ -278,6 +281,8 @@ fn run(
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_name("enclave-kt-akd")
+        // Timers and sockets: remote witnesses are reached over HTTPS.
+        .enable_all()
         .build()
     {
         Ok(rt) => rt,
@@ -307,7 +312,10 @@ fn run(
     }
     // Last epoch each witness cosigned (remembered across restarts by
     // witnesses with a store).
-    let mut last: Vec<Option<u64>> = witnesses.iter().map(|w| w.last_epoch(&server)).collect();
+    let mut last: Vec<Option<u64>> = Vec::with_capacity(witnesses.len());
+    for w in witnesses.iter_mut() {
+        last.push(rt.block_on(w.last_epoch(&server)));
+    }
     // Heads signed while a witness was unreachable (or before a restart)
     // get their cosignatures now.
     rt.block_on(cosign_all(
@@ -360,16 +368,21 @@ fn run(
 
 /// Ask every witness to cosign the latest head. A witness that refuses leaves
 /// the head without its cosignature; clients then decide by their quorum.
+///
+/// A witness that refuses (it was restarted from an older state, or was
+/// down while heads passed) is asked where it stands, and the next round
+/// sends the heads and proof from there.
 async fn cosign_all(
     log: &mut KtLog,
-    witnesses: &mut [Witness],
+    witnesses: &mut [Box<dyn WitnessClient>],
     last: &mut [Option<u64>],
     now: u64,
-    rng: &mut HedgedRng,
+    _rng: &mut HedgedRng,
 ) {
     let Some(epoch) = log.latest().map(|h| h.head.epoch) else {
         return;
     };
+    let server = log.server();
     let server_key = log.public_key().clone();
     for (w, seen) in witnesses.iter_mut().zip(last.iter_mut()) {
         let (heads, proof) = match *seen {
@@ -380,11 +393,14 @@ async fn cosign_all(
             },
             None => (log.heads_after(epoch.saturating_sub(1), epoch), None),
         };
-        if let Ok(c) = w.cosign(&server_key, &heads, proof, now, rng).await {
-            *seen = Some(epoch);
-            if let Err(e) = log.add_cosignature(epoch, c) {
-                eprintln!("enclave-kt: couldn't store a cosignature: {e}");
+        match w.cosign(&server_key, &heads, proof, now).await {
+            Ok(c) => {
+                *seen = Some(epoch);
+                if let Err(e) = log.add_cosignature(epoch, c) {
+                    eprintln!("enclave-kt: couldn't store a cosignature: {e}");
+                }
             }
+            Err(_) => *seen = w.last_epoch(&server).await,
         }
     }
 }

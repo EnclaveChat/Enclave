@@ -30,7 +30,7 @@ pub mod wire;
 
 pub use config::EnclaveKtConfig;
 pub use head::{Cosignature, SignedHead, TreeHead, WitnessPolicy};
-pub use log::{KtLog, Witness, verify_lookup};
+pub use log::{KtLog, Witness, WitnessClient, verify_lookup};
 pub use service::KtService;
 pub use store::KtStore;
 pub use wire::{KtInfo, KtPolicy, LookupReply, UsernameClaim};

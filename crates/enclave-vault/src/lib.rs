@@ -11,6 +11,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// The foundation key and server list built into this build, if any.
+pub mod built {
+    include!(concat!(env!("OUT_DIR"), "/federation.rs"));
+}
 pub mod engine;
 pub mod harden;
 pub mod media;

@@ -185,6 +185,7 @@ fn build(args: &[String]) -> Result<(), String> {
             domain: d.domain.clone(),
             operator: d.operator.clone(),
             family: d.family.clone(),
+            nym_address: d.nym_address.clone(),
             weight: s.weight,
             kt: d.kt.clone(),
         });

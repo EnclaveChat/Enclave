@@ -23,6 +23,7 @@ enclave-tokens = { path = "../enclave-tokens" }
 enclave-net = { path = "../enclave-net" }
 enclave-store = { path = "../enclave-store" }
 enclave-kt = { path = "../enclave-kt" }
+enclave-federation = { path = "../enclave-federation" }
 thiserror = "2"
 zeroize = "1"
 
