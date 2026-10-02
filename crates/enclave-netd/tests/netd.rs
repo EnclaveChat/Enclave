@@ -170,9 +170,11 @@ async fn carries_requests_over_nym() {
     let mut child = tokio::process::Command::new(BIN)
         .args(["--server", &format!("{hex}=nym:ingress")])
         .args(["--nymd", nymd.to_str().unwrap()])
+        .arg("--report")
         .env("ENCLAVE_FAKE_NYMD_SERVER", addr.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -205,6 +207,41 @@ async fn carries_requests_over_nym() {
     let reversed: Vec<u8> = poll.iter().rev().copied().collect();
     assert_eq!(replies[0].result, Ok(reversed), "over the mixnet and back");
     assert_eq!(replies[1].result.as_ref().unwrap().len(), 4 + 56 + 1568);
+
+    // With only Nym routes netd has the mixnet client's pipes and no
+    // socket, and (Linux) can't open one.
+    let mut report = String::new();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut b = [0u8; 256];
+    while !report.contains('\n') {
+        let n = stderr.read(&mut b).await.unwrap();
+        assert!(n > 0, "no report: {report}");
+        report.push_str(&String::from_utf8_lossy(&b[..n]));
+    }
+    assert!(report.contains("sockets none"), "{report}");
+    #[cfg(target_os = "linux")]
+    {
+        assert!(report.contains("syscalls filtered"), "{report}");
+        let pid = child.id().unwrap();
+        let fds: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .filter_map(|e| std::fs::read_link(e.unwrap().path()).ok())
+            .map(|l| l.display().to_string())
+            .collect();
+        // Only Unix sockets (tokio's own signal pair for the child); no
+        // IP socket is open.
+        let unix = std::fs::read_to_string(format!("/proc/{pid}/net/unix")).unwrap();
+        let unix: BTreeSet<&str> = unix
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_whitespace().nth(6))
+            .collect();
+        for l in &fds {
+            if let Some(inode) = l.strip_prefix("socket:[").and_then(|r| r.strip_suffix(']')) {
+                assert!(unix.contains(inode), "an IP socket: {fds:?}");
+            }
+        }
+    }
 }
 
 /// A Nym route the vault sends later (from the server list or a

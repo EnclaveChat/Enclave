@@ -1,4 +1,4 @@
-//! `enclave-netd --server HEXID=nym:ADDRESS … --server HEXID=HOST:PORT … [--nymd PATH] [--nym-env]`
+//! `enclave-netd --server HEXID=nym:ADDRESS … --server HEXID=HOST:PORT … [--nymd PATH] [--nym-env] [--report]`
 //!
 //! Started by the vault, never by hand. Holds no keys: it carries sealed
 //! requests from the vault (stdin) to servers and their sealed replies back
@@ -11,7 +11,7 @@
 //! Nym route needs the mixnet client, which netd starts only when a Nym
 //! route is given at start. It confines itself first: no core dumps, not
 //! dumpable, `no_new_privs`, and (Linux) no filesystem access at all, after
-//! starting nymd.
+//! starting nymd; with only Nym routes it can't open a socket at all.
 
 #![forbid(unsafe_code)]
 
@@ -50,6 +50,9 @@ fn parse_servers(
 /// Each server over the transport its route names.
 struct Routed {
     tcp: TcpTransport,
+    /// Whether this netd may open TCP connections: only when it was given
+    /// TCP routes at start (development). Over Nym it needs no socket.
+    tcp_allowed: bool,
     nym: Option<NymTransport>,
     over_nym: std::sync::RwLock<HashSet<ServerId>>,
 }
@@ -82,7 +85,7 @@ impl Transport for Routed {
         let nym = matches!(route, Route::Nym(_));
         // A Nym route without the mixnet client can't be used: the
         // server stays on the route it had.
-        if nym && self.nym.is_none() {
+        if (nym && self.nym.is_none()) || (!nym && !self.tcp_allowed) {
             return;
         }
         if let Ok(mut s) = self.over_nym.write() {
@@ -159,10 +162,21 @@ fn main() -> ExitCode {
             None => None,
         }
     };
-    // Nothing on disk is needed from here on.
-    let _ = enclave_sandbox::filesystem(&[], &[], false);
-    // IPv4 and IPv6 sockets only; no programs, no debugging.
-    let _ = enclave_sandbox::syscalls(enclave_sandbox::Profile::Netd, false);
+    // Nothing on disk is needed from here on, and over Nym (no TCP route)
+    // no socket either: nymd has the network.
+    let tcp_allowed = !tcp.is_empty() || nymd.is_none();
+    let fs = enclave_sandbox::filesystem(&[], &[], !tcp_allowed);
+    // IPv4 and IPv6 sockets only (or none); no programs, no debugging.
+    let profile = if tcp_allowed {
+        enclave_sandbox::Profile::Netd
+    } else {
+        enclave_sandbox::Profile::Vault
+    };
+    let sc = enclave_sandbox::syscalls(profile, false);
+    if args.iter().any(|a| a == "--report") {
+        let sockets = if tcp_allowed { "ip" } else { "none" };
+        eprintln!("enclave-netd: filesystem {fs}, syscalls {sc}, sockets {sockets}");
+    }
     let (nym, _child) = match nymd {
         Some((driver, child)) => {
             let n = rt.block_on(async {
@@ -174,6 +188,7 @@ fn main() -> ExitCode {
     };
     let transport = Arc::new(Routed {
         tcp: TcpTransport::new(tcp),
+        tcp_allowed,
         over_nym: std::sync::RwLock::new(match nym {
             Some(_) => over_nym.keys().copied().collect(),
             None => HashSet::new(),

@@ -1,4 +1,4 @@
-//! `enclave-nymd [--env] [--gateway ID]`
+//! `enclave-nymd [--env] [--gateway ID] [--report]`
 //!
 //! A device's mixnet client. Started by `enclave-netd`, never by hand: it
 //! connects to the mixnet with a fresh identity and serves
@@ -7,15 +7,53 @@
 //! arti, `docs/09-transport.md` §1). It holds no Enclave keys and sees only
 //! sealed requests. `--env` takes the network from `NYM_*` variables (a
 //! local mixnet, the sandbox) instead of mainnet.
+//!
+//! It confines itself before connecting (Linux): its identity lives in
+//! memory, so it reads only what name resolution and TLS need (resolver
+//! configuration, CA certificates) and writes nothing; IPv4 and IPv6
+//! sockets only; no programs, no debugging.
 
 use enclave_nym::MixnetDriver;
 use enclave_nym_sdk::{NymDriver, Options, Role};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// What name resolution and TLS read; only those present are allowed (a
+/// missing path would make the whole rule set fail).
+const READ_ONLY: &[&str] = &[
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/host.conf",
+    "/etc/gai.conf",
+    "/etc/localtime",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/usr/share/ca-certificates",
+    "/usr/lib/ssl",
+    "/run/systemd/resolve",
+];
+
 fn main() -> ExitCode {
     // No core dumps, not dumpable, no new privileges.
     let _ = enclave_sandbox::process();
+    // Certificates named by the environment are read too.
+    let ro: Vec<std::path::PathBuf> = READ_ONLY
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(
+            ["SSL_CERT_FILE", "SSL_CERT_DIR"]
+                .iter()
+                .filter_map(|v| std::env::var_os(v).map(std::path::PathBuf::from)),
+        )
+        .filter(|p| p.exists())
+        .collect();
+    let fs = enclave_sandbox::filesystem(&[], &ro, false);
+    let sc = enclave_sandbox::syscalls(enclave_sandbox::Profile::Netd, false);
+    if std::env::args().any(|a| a == "--report") {
+        eprintln!("enclave-nymd: filesystem {fs}, syscalls {sc}");
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let gateway = args
         .iter()
