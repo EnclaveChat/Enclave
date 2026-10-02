@@ -2569,6 +2569,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-ingress"
+version = "0.1.0"
+dependencies = [
+ "enclave-crypto",
+ "enclave-federation",
+ "enclave-net",
+ "enclave-nym",
+ "enclave-rpc",
+ "enclave-server",
+ "enclave-tokens",
+ "enclave-wire",
+ "tokio",
+]
+
+[[package]]
 name = "enclave-ipc"
 version = "0.1.0"
 dependencies = [
@@ -2631,6 +2646,7 @@ dependencies = [
  "async-trait",
  "enclave-crypto",
  "enclave-federation",
+ "enclave-nym",
  "enclave-rpc",
  "enclave-server",
  "enclave-wire",
@@ -2649,6 +2665,16 @@ dependencies = [
  "enclave-net",
  "enclave-rpc",
  "enclave-sandbox",
+ "tokio",
+]
+
+[[package]]
+name = "enclave-nym"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "enclave-wire",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

@@ -23,7 +23,7 @@ exchanged.** Everything below is build-level evidence plus in-process tests.
 | `arti-client` 0.46 (tokio + rustls + onion-service-client + compression) | Builds in about 1.5 min | probe build and `enclave-net --features tor` |
 | Native code under `arti-client` | `zstd-sys`, `libsqlite3-sys` (and `openssl-sys` only with the default `native-tls` feature, which Enclave disables) | `cargo tree` |
 | Tor transport code | `TorTransport` implemented against arti (onion-service addressing, same framing as the dev transport); compiles | `crates/enclave-net/src/transport.rs` |
-| Nym transport code | Not written yet: needs a working SURB request/reply design on nym-sdk 1.21.5 and live gateways to test | — |
+| Nym transport code | Written (2026-10-02): `NymTransport`, `enclave-ingress`, `enclave-nym-sdk`; tested end to end over an in-process mixnet; live gateways still untested | `crates/enclave-ingress/tests/mixnet.rs` |
 | Cover-traffic scheduler | Implemented; tick timing and poll pattern independent of real traffic (KS test, α = 0.01); real and cover units identical in size and byte distribution | `crates/enclave-net/tests/shape.rs` |
 
 ## Consequences for the plan
@@ -37,6 +37,19 @@ exchanged.** Everything below is build-level evidence plus in-process tests.
    connection. Not verified; if unavailable, the Tor underlay applies only to
    the fallback transport, and the entry gateway sees the client IP. This
    stays the top open risk (Appendix B #1).
+
+## N0 answers so far (2026-10-02)
+
+| # | Question | Answer |
+|---|---|---|
+| a | Does the nym-sdk version set build? | Yes, in its own workspace (`nym/`), with every `nym-*` crate pinned to 1.21.5: nym-sdk 1.21.5 no longer resolves on its own (1.22.0 helper crates were published under it and don't compile with it), and its SQLite (`sqlx`, libsqlite3-sys 0.30) can't share a lockfile with arti's (rusqlite, libsqlite3-sys 0.34). Linux builds in CI; the other targets come with A1, I1 and D1. |
+| b | A fresh sender tag per request? | Not upstream: nym-client-core keeps one tag per recipient for the client's life. Patched (`third_party/PATCHES.md`): a fresh tag per message. |
+| c | Poisson off, loop cover on? | The configuration has both switches (`disable_main_poisson_packet_distribution`, `loop_cover_traffic_average_delay`); whether Nym supports that setting on mainnet is still to confirm live. |
+| d | A custom gateway connector (for Tor under Nym)? | nym-sdk 1.21.5 has `MixnetClientBuilder::custom_gateway_transceiver` and `connect_to_mixnet_via_socks5`; which one carries the gateway WSS over arti is N2's work. |
+| e | Can the server refuse "more SURBs" round trips? | Yes: `maximum_reply_surbs_rerequests = 0` on the ingress, and every request carries all its reply blocks. |
+| f–i | Local mixnet in Docker, packets per unit and poll, in-memory storage, sandbox credentials | Still open: need a network that allows raw TCP (CI job to come with N1's localnet). |
+
+The TLS under nym's gateway connection was on rustls 0.21; the patched copies use tungstenite 0.24 on rustls 0.23.
 
 ## Still to measure (M4 gate)
 

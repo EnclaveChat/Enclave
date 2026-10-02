@@ -1,0 +1,266 @@
+# cargo-deny configuration for the nym/ workspace: the main one
+# (../deny.toml), plus what nym-sdk 1.21.5 brings. These crates build only
+# into enclave-ingress (and the client's mixnet process), never into a
+# process holding Enclave keys. See ../third_party/PATCHES.md.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Vulnerabilities fail everywhere. "Unmaintained" notices fail for our direct
+# dependencies only; transitive ones (today proc-macro-error2 and ttf-parser,
+# both via Slint) are tracked upstream rather than blocking CI.
+unmaintained = "workspace"
+ignore = [
+    # Marvin attack on RSA private-key operations. `rsa` arrives only through
+    # arti (the `tor` feature), which uses it for public-key checks of Tor
+    # relay identities; Enclave never holds or uses an RSA private key.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operations anywhere in Enclave; public-key use via arti only" },
+    # rustls-webpki 0.101 and h2 0.3 arrive only through reqwest 0.11 in
+    # tendermint-rpc (cosmrs), nym's client for the Nyx chain, used for
+    # credentials. The gateway connection itself is on rustls 0.23 (our
+    # tungstenite 0.24 patch). Name-constraint bypasses need a misissuing
+    # constrained CA; Enclave uses no CRLs; the h2 issue lets a malicious
+    # RPC endpoint exhaust memory (denial of service only). Leaves with a
+    # nym-sdk on reqwest 0.12.
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 only in nym's Nyx RPC client; see above" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 only in nym's Nyx RPC client; see above" },
+    { id = "RUSTSEC-2026-0104", reason = "CRL parsing; no CRLs are used" },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 only in nym's Nyx RPC client; denial of service only" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# GPLv3-compatible licenses only. AGPL is never allowed (App Store §7 plan).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "OFL-1.1",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "LGPL-3.0-or-later",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    # Public-domain dedication (async_executors, via arti).
+    "Unlicense",
+    # equix and hashx (Equi-X proof of work, from the Tor Project). GPLv3
+    # compatible, but LGPL-3.0's installation-information terms are a risk
+    # for App Store builds that our section 7 permission cannot waive for
+    # third-party code. Tracked in legal/ADDITIONAL-PERMISSIONS.md.
+    "LGPL-3.0-only",
+]
+# Per-crate exceptions: allowed for that crate only.
+exceptions = [
+    # jpeg-encoder's forward DCT is ported from the IJG code (via mozjpeg).
+    # The IJG license is free and GPL-compatible; binaries must say "this
+    # software is based in part on the work of the Independent JPEG Group"
+    # (README "Acknowledgements", and LICENSES/IJG-jpeg-encoder.txt).
+    { allow = ["IJG"], crate = "jpeg-encoder" },
+    # libFuzzer's NCSA licence. Only rav1e's `cfg(fuzzing)` builds pull it
+    # in (and our own fuzz harness); never part of a shipped build.
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between our own (unpublished) workspace crates.
+allow-wildcard-paths = true
+# Crates that compile C, C++ or assembly must be listed here with a reason.
+# Test-only oracles (openssl-sys) are dev-dependencies and never shipped.
+
+# Every third-party build script must be listed (RT-14: rt14_build_rs_allowlist_enforced).
+# Those that can compile or link native code carry a reason; the rest only
+# probe the compiler (version and cfg detection) or generate Rust code.
+[bans.build]
+include-dependencies = true
+# libloading ships two Windows test DLLs in its crate archive; they are
+# test fixtures only and never linked. Pinned by checksum.
+bypass = [
+    { crate = "libloading", allow = [
+        { path = "tests/nagisa32.dll", checksum = "5c69b2bd9c8a6ad04165c221075fc9fade1dd66ca697399ace528a5a62328e36" },
+        { path = "tests/nagisa64.dll", checksum = "e20b95e3036f3289421abd100760874d4f455afd33c3b5b64fec56b191f7d477" },
+    ] },
+]
+allow-build-scripts = [
+    # nym-sdk 1.21.5 (nym/ workspace only): nym crates' build scripts set up
+    # sqlx's offline query checks and version info (vergen); aws-lc-sys is
+    # rustls's default C crypto there; blake3 and snow pick SIMD paths;
+    # the rest are platform probes and code generation.
+    "aws-lc-rs",
+    "aws-lc-sys",
+    "blake3",
+    "camino",
+    "encoding_rs",
+    "eyre",
+    "ipconfig",
+    "libcrux-aes",
+    "nym-bandwidth-fetcher",
+    "nym-bin-common",
+    "nym-client-core-gateways-storage",
+    "nym-client-core-surb-storage",
+    "nym-contracts-common",
+    "nym-credential-storage",
+    "nym-http-api-client-macro",
+    "prometheus",
+    "schemars",
+    "snow",
+    "system-configuration-sys",
+    "vergen",
+    "ahash",
+    "akd_core",
+    "android-activity",  # Android entry point (Slint backend)
+    "anyhow",
+    "ash",
+    "async-io",
+    "async_executors",
+    "av-scenechange",  # rav1e scene detection; asm off
+    "bindgen",
+    "borsh",
+    "clang-sys",
+    "classic-mceliece-rust",
+    "crabgrind",  # constant-time tests under valgrind only (cfg(valgrind_ct_test))
+    "crc32fast",
+    "crossbeam-deque",
+    "crossbeam-epoch",
+    "crossbeam-utils",
+    "crunchy",
+    "curve25519-dalek",
+    "defmt",
+    "defmt-macros",
+    "derive-deftly-macros",
+    "drm-fourcc",  # Linux KMS backend
+    "drm-sys",  # Linux KMS backend (Slint, unused on desktop)
+    "field-offset",
+    "figment",
+    "gbm-sys",  # Linux KMS backend
+    "generic-array",
+    "getrandom",
+    "glutin",
+    "glutin-winit",
+    "glutin_egl_sys",
+    "glutin_glx_sys",
+    "glutin_wgl_sys",
+    "hax-lib",
+    "httparse",
+    "i-slint-backend-linuxkms",
+    "i-slint-backend-selector",
+    "i-slint-backend-testing",
+    "i-slint-backend-winit",
+    "i-slint-compiler",
+    "i-slint-renderer-skia",
+    "iana-time-zone-haiku",  # Haiku only; never built
+    "icu_decimal_data",
+    "icu_locale_fallback_data",
+    "icu_normalizer_data",
+    "icu_plurals_data",
+    "icu_properties_data",
+    "icu_segmenter_data",
+    "indexmap",
+    "inotify-sys",
+    "input-sys",  # Linux libinput (Slint linuxkms, unused on desktop)
+    "io-lifetimes",
+    "jni",
+    "jni-macros",
+    "jni-sys",
+    "khronos_api",
+    "libc",
+    "libcrux-intrinsics",
+    "libcrux-ml-dsa",
+    "libcrux-ml-kem",
+    "libcrux-sha3",
+    "libfuzzer-sys",  # fuzzing builds only (cargo-fuzz; rav1e under cfg(fuzzing))
+    "liblzma-sys",  # arti directory compression; netd only
+    "libm",
+    "libseat",  # Linux seat management (linuxkms)
+    "libseat-sys",  # Linux seat management (linuxkms)
+    "libsqlite3-sys",  # arti/nym-sdk state storage; netd/ingress only
+    "libudev-sys",  # Linux device discovery (linuxkms)
+    "memoffset",
+    "naga",
+    "nix",
+    "ntapi",
+    "num-bigint-dig",
+    "num-traits",
+    "objc-sys",  # Apple platform glue (winit)
+    "objc2",
+    "openssl",
+    "openssl-sys",  # test oracle only (dev-dependency of enclave-crypto); never shipped
+    "orbclient",
+    "parking_lot_core",
+    "paste",
+    "portable-atomic",
+    "portable-atomic-util",
+    "prettyplease",
+    "proc-macro2",
+    "protobuf",
+    "pulldown-cmark",
+    "quote",
+    "radium",
+    "rav1d",  # AV1 decoder; asm feature off, so cc/nasm are not run (enclave-av1 exception)
+    "rav1e",  # AV1 encoder; asm feature off (default-features = false)
+    "rayon-core",
+    "redb",
+    "ref-cast",
+    "ring",  # rustls via arti (tor feature) and nym-sdk; netd/ingress only, no long-term keys
+    "rspolib",
+    "rustix",
+    "rustls",
+    "rustversion",
+    "serde",
+    "serde_core",
+    "serde_json",
+    "skia-bindings",  # Slint renderer on iOS/Android only (PLAN §22 exception: Skia)
+    "slotmap",
+    "smithay-client-toolkit",  # Linux windowing
+    "sqlite-wasm-rs",  # pulled by rusqlite feature graph; not built for native targets
+    "syn",
+    "thiserror",
+    "tiny-xlib",  # Linux X11 fallback
+    "uncased",
+    "valuable",
+    "wasm-bindgen",
+    "wasm-bindgen-shared",
+    "wayland-backend",  # Linux windowing
+    "wayland-client",
+    "wayland-sys",  # Linux windowing (dlopen)
+    "wgpu",
+    "wgpu-core",
+    "wgpu-hal",
+    "winapi",
+    "winapi-i686-pc-windows-gnu",
+    "winapi-x86_64-pc-windows-gnu",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    "winit",
+    "wit-bindgen",
+    "x11-dl",  # Linux X11 fallback (dlopen)
+    "yeslogic-fontconfig-sys",  # Linux font discovery for Slint (system library, linked)
+    "zerocopy",
+    "zmij",
+    "zstd-safe",
+    "zstd-sys",  # arti directory compression; netd only
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

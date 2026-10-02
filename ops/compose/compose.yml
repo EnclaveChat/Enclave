@@ -114,6 +114,28 @@ services:
       timeout: 10s
       retries: 3
 
+  # The stack's Nym client in front of the server (docs/09-transport.md §1):
+  # it takes requests off the mixnet and hands them to the server on the
+  # internal network. Its Nym address goes into the server's descriptor
+  # (through the shared public volume). Profile `nym` until production
+  # stacks are Nym-only (milestone S4).
+  ingress:
+    <<: *service
+    profiles: [nym]
+    image: ${ENCLAVE_NYM_IMAGE:-ghcr.io/enclavechat/enclave-nym}:${ENCLAVE_VERSION:-latest}
+    entrypoint: ["/usr/local/bin/enclave-ingress"]
+    command: ["run", "--server", "server:7443"]
+    volumes:
+      - ingress-data:/var/lib/enclave/ingress
+      - public:/var/lib/enclave/public
+    networks: [backend, egress]
+    depends_on: [server]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/enclave-ingress", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Only for operators who run a push relay for the foundation's list.
   push-relay:
     <<: *service
@@ -151,3 +173,4 @@ volumes:
   relay-keys:
   relay-data:
   push-keys:
+  ingress-data:

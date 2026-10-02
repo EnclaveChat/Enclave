@@ -1,0 +1,26 @@
+[package]
+name = "enclave-ingress"
+description = "The Nym ingress of an Enclave stack: takes mixframes off the mixnet, hands them to the server over the stack's internal network, and answers over the sender's reply blocks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-nym = { path = "../enclave-nym" }
+enclave-wire = { path = "../enclave-wire" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+
+[dev-dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-rpc = { path = "../enclave-rpc" }
+enclave-server = { path = "../enclave-server" }
+enclave-federation = { path = "../enclave-federation" }
+enclave-net = { path = "../enclave-net", features = ["nym"] }
+enclave-tokens = { path = "../enclave-tokens" }

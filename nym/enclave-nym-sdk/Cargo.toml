@@ -1,0 +1,22 @@
+[package]
+name = "enclave-nym-sdk"
+description = "The nym-sdk mixnet driver for Enclave (enclave_nym::MixnetDriver)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-nym = { path = "../../crates/enclave-nym" }
+# Exactly 1.21.5: 1.21.6 doesn't resolve on crates.io, and 1.21.5 resolves
+# only with its storage crate pinned too (docs/spikes/m4-network.md).
+nym-sdk = "=1.21.5"
+nym-client-core-gateways-storage = "=1.21.5"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }

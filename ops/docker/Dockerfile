@@ -3,6 +3,7 @@
 # Enclave's service images (docs/13-operators.md, ops/compose).
 #
 #   docker build -f ops/docker/Dockerfile --target server -t enclave-server .
+#   docker build -f ops/docker/Dockerfile --target nym -t enclave-nym .
 #
 # `server` holds every service an operator's stack runs except the Nym
 # sidecar: enclave-server, enclave-witness, enclave-front, enclave-relay,
@@ -60,3 +61,34 @@ USER nonroot:nonroot
 WORKDIR /var/lib/enclave
 ENTRYPOINT ["/usr/local/bin/enclave-server"]
 CMD ["run", "--config", "/etc/enclave/server.toml"]
+
+# The Nym sidecar, from the separate nym/ workspace (its own Cargo.lock:
+# nym-sdk and arti can't share one).
+FROM ${RUST_IMAGE} AS build-nym
+ENV CARGO_HOME=/cargo \
+    CARGO_INCREMENTAL=0 \
+    CARGO_TERM_COLOR=never \
+    SOURCE_DATE_EPOCH=1700000000 \
+    RUSTUP_TOOLCHAIN=1.94.1 \
+    RUSTFLAGS="--remap-path-prefix=/cargo=/cargo --remap-path-prefix=/src=/src"
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/cargo/registry \
+    --mount=type=cache,target=/src/nym/target \
+    cd nym && cargo build --release --locked -p enclave-ingress-bin \
+ && mkdir -p /out && cp target/release/enclave-ingress /out/
+RUN mkdir -p /var/lib/enclave/ingress /var/lib/enclave/public \
+ && chmod 0700 /var/lib/enclave/ingress \
+ && chown -R 65532:65532 /var/lib/enclave
+
+FROM ${RUNTIME_IMAGE} AS nym
+LABEL org.opencontainers.image.title="enclave-nym" \
+      org.opencontainers.image.description="Enclave's Nym ingress: a stack's mixnet client in front of its server" \
+      org.opencontainers.image.source="https://github.com/EnclaveChat/Enclave" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+COPY --from=build-nym /out/ /usr/local/bin/
+COPY --from=build-nym --chown=65532:65532 /var/lib/enclave/ /var/lib/enclave/
+USER nonroot:nonroot
+WORKDIR /var/lib/enclave
+ENTRYPOINT ["/usr/local/bin/enclave-ingress"]
+CMD ["run"]

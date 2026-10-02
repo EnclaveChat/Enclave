@@ -396,6 +396,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         let server = Arc::clone(&server);
         let keys = Arc::clone(&keys);
         let cfg = cfg.clone();
+        let mut published_nym = ingress_address(&cfg);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -419,6 +420,15 @@ async fn run(args: &[String]) -> Result<(), String> {
                     }
                     Ok(false) => {}
                     Err(e) => eprintln!("request-key rotation failed: {e}"),
+                }
+                // The ingress connected (or moved): a descriptor naming it.
+                let nym = ingress_address(&cfg);
+                if nym != published_nym {
+                    let mut s = server.lock().await;
+                    match publish_descriptor(&cfg, &k, &mut s) {
+                        Ok(()) => published_nym = nym,
+                        Err(e) => eprintln!("descriptor failed: {e}"),
+                    }
                 }
                 drop(k);
                 let mut s = server.lock().await;
@@ -506,6 +516,18 @@ fn publish_descriptor(
     Ok(())
 }
 
+/// The Nym address clients reach this server at: `[server] nym_address`,
+/// or what the stack's ingress wrote to `public_dir/ingress.addr` once it
+/// connected; empty before either.
+fn ingress_address(cfg: &FileConfig) -> String {
+    if !cfg.server.nym_address.is_empty() {
+        return cfg.server.nym_address.clone();
+    }
+    std::fs::read_to_string(cfg.server.public_dir.join("ingress.addr"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Today's descriptor: valid two days, today's and tomorrow's request keys.
 fn sign_descriptor(
     cfg: &FileConfig,
@@ -519,7 +541,7 @@ fn sign_descriptor(
         &cfg.server.domain,
         &cfg.server.operator,
         &cfg.server.family,
-        &cfg.server.nym_address,
+        &ingress_address(cfg),
         "",
         cfg.published_policy(),
         kt,

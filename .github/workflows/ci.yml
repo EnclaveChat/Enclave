@@ -142,6 +142,25 @@ jobs:
       # checklist step; this keeps the example working.
       - run: cargo run --release -p enclave-server --example scale -- --accounts 2000 --samples 500 | tee -a "$GITHUB_STEP_SUMMARY"
 
+  nym:
+    name: nym/ workspace (nym-sdk driver, enclave-ingress)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: nym
+      - name: fmt, clippy, test
+        working-directory: nym
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: nym/Cargo.toml
+          arguments: --config nym/deny.toml
+
   tls-interop:
     name: TLS interop (OpenSSL 3.5), ACME (pebble), C2SP cosignatures (Go)
     runs-on: ubuntu-24.04

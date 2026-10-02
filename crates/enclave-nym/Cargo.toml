@@ -1,0 +1,22 @@
+[package]
+name = "enclave-nym"
+description = "Enclave over the Nym mixnet: the mixframe codec, the mixnet driver interface and an in-process fake mixnet. The nym-sdk driver is in the separate nym/ workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-wire = { path = "../enclave-wire" }
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

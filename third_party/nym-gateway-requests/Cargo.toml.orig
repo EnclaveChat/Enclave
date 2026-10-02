@@ -1,0 +1,57 @@
+# Copyright 2020 - Nym Technologies SA <contact@nymtech.net>
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nym-gateway-requests"
+description = "Request and response definitions for Nym Gateway <> client communication"
+version.workspace = true
+authors = ["Jedrzej Stuczynski <andrew@nymtech.net>"]
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+publish = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bs58 = { workspace = true }
+futures = { workspace = true }
+generic-array = { workspace = true, features = ["serde"] }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+time = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+nym-crypto = { workspace = true, features = ["aead", "hashing"] }
+nym-pemstore = { workspace = true }
+nym-sphinx = { workspace = true }
+nym-serde-helpers = { workspace = true, features = ["base64"] }
+nym-statistics-common = { workspace = true }
+nym-task = { workspace = true }
+
+nym-credentials = { workspace = true }
+nym-credentials-interface = { workspace = true }
+
+[target."cfg(not(target_arch = \"wasm32\"))".dependencies.tokio]
+workspace = true
+features = ["time"]
+
+[target."cfg(target_arch = \"wasm32\")".dependencies.wasmtimer]
+workspace = true
+features = ["tokio"]
+
+[dependencies.tungstenite]
+workspace = true
+default-features = false
+
+[lints]
+workspace = true

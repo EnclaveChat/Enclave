@@ -22,7 +22,14 @@ All transports implement one trait, `enclave_net::transport::Transport`: `exchan
 |---|---|
 | `TcpTransport` | Implemented. Development only: frames `u32(len) ‖ bytes` over TCP to the `enclave-server` dev binary. A zero-length frame asks for the server's current request key, returned as `u32(key_id) ‖ X448 (56) ‖ ML-KEM ek (1,568)`. |
 | `TorTransport` | Implemented behind the `tor` feature (arti 0.46, embedded): same framing to a server's onion service. Compiles; not exercised against the live network. |
-| `NymTransport` | Not implemented (placeholder behind the `nym` feature). See `spikes/m4-network.md`. |
+| `NymTransport` | Implemented behind the `nym` feature over any `enclave_nym::MixnetDriver` (below). |
+
+**Over Nym, as implemented** (`enclave-nym`, `enclave-ingress`, `nym/`):
+- A request crosses the mixnet as a mixframe: `u8(1) ‖ u8 kind ‖ req_id (16) ‖ body`, where kind 1 carries a sealed unit (16,384 B), kind 2 a sealed poll (2,048 B), kind 3 asks for the key bundle and is padded like a poll, so it can't be told from one. The reply is `u8(1) ‖ u8 status ‖ req_id ‖ u32 len ‖ data`, zero-padded to 16,406 B whatever it carries. `req_id` is random per request and only matches the reply at the client.
+- `NymTransport` sends each request to the server's Nym address (its descriptor's `nym_address`) with enough single-use reply blocks for the whole reply (11 regular packets' worth), waits for the reply with that id (60 s by default), and otherwise fails as unreachable; the caller seals anew to retry. Replies arriving out of order reach their requests.
+- Each server's stack runs `enclave-ingress`, a Nym client with a persistent identity that writes its address to `public/ingress.addr` (the server then publishes it in its descriptor), hands each request to the server over the internal network with the server's own framing, and answers over the reply blocks. It drops anything that doesn't parse or has no reply blocks, and keeps only aggregate counters.
+- nym-sdk keeps one sender tag per recipient for a client's lifetime, which would let a server link every request a device sends it; Enclave's copy of nym-client-core (`third_party/PATCHES.md`) uses a fresh tag per message, and the ingress never asks for more reply blocks (`maximum_reply_surbs_rerequests = 0`). Clients turn off Nym's Poisson stream (Enclave's scheduler paces) and send loop cover every 10 s.
+- nym-sdk and arti need different SQLite versions, so they can't be in one Cargo lockfile: the nym-sdk driver (`enclave-nym-sdk`) and the `enclave-ingress` binary live in the separate `nym/` workspace, with every `nym-*` crate pinned to 1.21.5. Tests: `through_the_mixnet_to_a_server` and `a_dead_server_is_reported` run a client, the in-process fake mixnet (loss, delay, reordering) and the ingress against a real server.
 
 ## 2. Sealed requests
 

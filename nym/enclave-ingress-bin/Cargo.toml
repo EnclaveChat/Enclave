@@ -1,0 +1,23 @@
+[package]
+name = "enclave-ingress-bin"
+description = "The enclave-ingress binary: the stack's Nym client in front of its server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "enclave-ingress"
+path = "src/main.rs"
+
+[dependencies]
+enclave-ingress = { path = "../../crates/enclave-ingress" }
+enclave-nym = { path = "../../crates/enclave-nym" }
+enclave-nym-sdk = { path = "../enclave-nym-sdk" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

@@ -1,0 +1,240 @@
+//! A client reaches a real server through the in-process mixnet and the
+//! ingress (`docs/09-transport.md` §1): key bundle, inbox, write and poll,
+//! replies matched to requests under delay and reordering, a lost request
+//! failing in time, garbage dropped, a dead server reported.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use enclave_federation::KeyBundle;
+use enclave_ingress::{Stats, serve};
+use enclave_net::NetError;
+use enclave_net::transport::{NymTransport, Transport};
+use enclave_nym::MixnetDriver;
+use enclave_nym::fake::{FakeMixnet, Faults};
+use enclave_rpc::api::{self, FLAG_CREATE, FLAG_FOUND, Status};
+use enclave_rpc::{seal_poll, seal_request};
+use enclave_server::{Config, Server};
+use enclave_wire::{ENVELOPE_LEN, Op, RequestHeader};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// A server with a real identity behind the stack's TCP framing.
+async fn spawn_server() -> (std::net::SocketAddr, [u8; 16]) {
+    let mut rng = HedgedRng::new().unwrap();
+    let identity = CompositeSigningKey::generate(&mut rng).unwrap();
+    let id = enclave_federation::server_id(identity.public());
+    let mut server = Server::new(
+        Config {
+            id,
+            effort_inbox: 0,
+            ..Config::default()
+        },
+        (now() / 86_400) as u32,
+    )
+    .unwrap();
+    let key = server.public_key().unwrap();
+    server.set_key_bundle(
+        KeyBundle::sign(&identity, &[key], &mut rng)
+            .unwrap()
+            .encode(),
+    );
+    let server = Arc::new(Mutex::new(server));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let server = Arc::clone(&server);
+            tokio::spawn(async move {
+                let mut len = [0u8; 4];
+                if sock.read_exact(&mut len).await.is_err() {
+                    return;
+                }
+                let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+                sock.read_exact(&mut buf).await.unwrap();
+                let reply = {
+                    let mut s = server.lock().await;
+                    if buf.is_empty() {
+                        s.key_bundle().to_vec()
+                    } else {
+                        s.handle(&buf, now())
+                    }
+                };
+                sock.write_all(&(reply.len() as u32).to_be_bytes())
+                    .await
+                    .unwrap();
+                sock.write_all(&reply).await.unwrap();
+            });
+        }
+    });
+    (addr, id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn through_the_mixnet_to_a_server() {
+    let (addr, id) = spawn_server().await;
+    let net = FakeMixnet::new(
+        Faults {
+            loss: 0.0,
+            max_delay: Duration::from_millis(30),
+        },
+        42,
+    );
+    let ingress: Arc<dyn MixnetDriver> = Arc::new(net.client("ingress-a"));
+    let stats = Arc::new(Stats::default());
+    tokio::spawn(serve(Arc::clone(&ingress), addr, Arc::clone(&stats)));
+    let t = Arc::new(NymTransport::new(
+        Arc::new(net.client("phone")),
+        HashMap::from([(id, "ingress-a".to_string())]),
+        Duration::from_secs(10),
+    ));
+
+    // The key bundle, checked against the server's id.
+    let key = t.server_key(&id).await.unwrap();
+    let mut rng = HedgedRng::new().unwrap();
+
+    // Create an inbox, write to it, read it back.
+    let owner = [3u8; 32];
+    let mailbox = [4u8; 32];
+    let call = |h: RequestHeader, env: Vec<u8>, rng: &mut HedgedRng| {
+        let (bytes, ex) = if matches!(h.op, Op::Poll) {
+            seal_poll(&key, &h, rng).unwrap()
+        } else {
+            seal_request(&key, &h, &env, rng).unwrap()
+        };
+        let t = Arc::clone(&t);
+        async move {
+            let reply = t.exchange(&id, bytes).await.unwrap();
+            ex.open_reply(&reply).unwrap()
+        }
+    };
+    let create = RequestHeader {
+        op: Op::RegisterTokens,
+        flags: FLAG_CREATE,
+        mailbox,
+        token: owner,
+    };
+    let (rh, _) = call(create, api::frame(&[], &mut rng).unwrap(), &mut rng).await;
+    assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+    let token = [5u8; 32];
+    let reg = RequestHeader {
+        op: Op::RegisterTokens,
+        flags: 0,
+        mailbox,
+        token: owner,
+    };
+    let hashes = enclave_tokens::token_hash(&token).to_vec();
+    let (rh, _) = call(reg, api::frame(&hashes, &mut rng).unwrap(), &mut rng).await;
+    assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+    let envelope = vec![0x42; ENVELOPE_LEN];
+    let write = RequestHeader {
+        op: Op::Write,
+        flags: 0,
+        mailbox,
+        token,
+    };
+    let (rh, _) = call(write, envelope.clone(), &mut rng).await;
+    assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+
+    // Twenty polls at once over a network that reorders: each reply
+    // reaches the request it answers.
+    let mut cred = [0u8; 32];
+    cred[..24].copy_from_slice(&api::read_credential(&owner));
+    let poll = RequestHeader {
+        op: Op::Poll,
+        flags: 0,
+        mailbox,
+        token: cred,
+    };
+    let mut polls = Vec::new();
+    for _ in 0..20 {
+        polls.push(call(poll, Vec::new(), &mut rng));
+    }
+    for (rh, env) in futures_join_all(polls).await {
+        assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+        assert!(rh.flags & FLAG_FOUND != 0);
+        assert_eq!(env, envelope);
+    }
+    assert_eq!(t.in_flight(), 0);
+    assert_eq!(stats.answered.load(Ordering::Relaxed), 24);
+
+    // Garbage, or a frame without reply blocks, is dropped.
+    let other = net.client("prober");
+    other.send("ingress-a", vec![1, 2, 3], 1000).await.unwrap();
+    other.send("ingress-a", vec![0; 2066], 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(stats.dropped.load(Ordering::Relaxed), 2);
+
+    // A network that loses everything: the request fails in time, and
+    // nothing is left waiting.
+    net.set_faults(Faults {
+        loss: 1.0,
+        ..Faults::default()
+    });
+    let lossy = NymTransport::new(
+        Arc::new(net.client("phone-2")),
+        HashMap::from([(id, "ingress-a".to_string())]),
+        Duration::from_millis(300),
+    );
+    assert!(matches!(
+        lossy.server_key(&id).await,
+        Err(NetError::Unreachable(_))
+    ));
+    assert_eq!(lossy.in_flight(), 0);
+    net.set_faults(Faults::default());
+
+    // No route, no request.
+    assert!(matches!(
+        t.server_key(&[9; 16]).await,
+        Err(NetError::Unreachable(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_server_is_reported() {
+    let net = FakeMixnet::default();
+    let ingress: Arc<dyn MixnetDriver> = Arc::new(net.client("ingress-b"));
+    // Nothing listens there.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let stats = Arc::new(Stats::default());
+    tokio::spawn(serve(ingress, dead, Arc::clone(&stats)));
+    let t = NymTransport::new(
+        Arc::new(net.client("phone")),
+        HashMap::from([([1; 16], "ingress-b".to_string())]),
+        Duration::from_secs(5),
+    );
+    let err = t.exchange(&[1; 16], vec![0; enclave_wire::POLL_LEN]).await;
+    assert!(matches!(err, Err(NetError::Unreachable(m)) if m.contains("couldn't reach")));
+    assert_eq!(stats.failed.load(Ordering::Relaxed), 1);
+}
+
+/// Await futures concurrently (no extra dependency).
+async fn futures_join_all<F>(fs: Vec<F>) -> Vec<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let handles: Vec<_> = fs.into_iter().map(tokio::spawn).collect();
+    let mut out = Vec::new();
+    for h in handles {
+        out.push(h.await.unwrap());
+    }
+    out
+}

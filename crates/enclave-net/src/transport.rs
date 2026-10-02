@@ -180,7 +180,137 @@ impl Transport for TorTransport {
     }
 }
 
-/// Nym transport (nym-sdk mixnet client with SURB replies). Requires the
-/// `nym` feature.
+/// The Nym transport (`docs/09-transport.md` §1): each sealed request goes
+/// to its server's Nym address (its ingress) as a mixframe
+/// (`enclave_nym::frame`) with fresh reply blocks for one reply, under a
+/// fresh request id that matches the reply. Works over any
+/// [`enclave_nym::MixnetDriver`]: nym-sdk in production, the in-process
+/// fake mixnet in tests. A request that gets no reply in time fails as
+/// unreachable; its caller seals it anew to retry.
 #[cfg(feature = "nym")]
-pub struct NymTransport;
+pub struct NymTransport {
+    driver: std::sync::Arc<dyn enclave_nym::MixnetDriver>,
+    routes: std::sync::RwLock<HashMap<ServerId, String>>,
+    pending: std::sync::Arc<std::sync::Mutex<HashMap<[u8; 16], PendingReply>>>,
+    timeout: std::time::Duration,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "nym")]
+type PendingReply = tokio::sync::oneshot::Sender<Option<Vec<u8>>>;
+
+#[cfg(feature = "nym")]
+impl NymTransport {
+    /// How long a request waits for its reply by default.
+    pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// A transport over `driver`, reaching each server at its Nym address
+    /// in `routes` (from the servers' descriptors).
+    pub fn new(
+        driver: std::sync::Arc<dyn enclave_nym::MixnetDriver>,
+        routes: HashMap<ServerId, String>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        let pending: std::sync::Arc<std::sync::Mutex<HashMap<[u8; 16], PendingReply>>> =
+            std::sync::Arc::default();
+        let reader = {
+            let driver = std::sync::Arc::clone(&driver);
+            let pending = std::sync::Arc::clone(&pending);
+            tokio::spawn(async move {
+                while let Some(m) = driver.recv().await {
+                    // Anything that isn't a reply to a request we're
+                    // waiting for is dropped.
+                    let Ok(r) = enclave_nym::frame::Reply::decode(&m.data) else {
+                        continue;
+                    };
+                    let tx = pending.lock().ok().and_then(|mut p| p.remove(&r.id));
+                    if let Some(tx) = tx {
+                        let _ = tx.send(r.data);
+                    }
+                }
+            })
+        };
+        Self {
+            driver,
+            routes: std::sync::RwLock::new(routes),
+            pending,
+            timeout,
+            reader,
+        }
+    }
+
+    /// Reach `server` at Nym address `address` from now on.
+    pub fn set_route(&self, server: ServerId, address: String) {
+        if let Ok(mut r) = self.routes.write() {
+            r.insert(server, address);
+        }
+    }
+
+    /// Requests waiting for a reply.
+    pub fn in_flight(&self) -> usize {
+        self.pending.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    async fn roundtrip(&self, server: &ServerId, sealed: Vec<u8>) -> Result<Vec<u8>> {
+        let to = self
+            .routes
+            .read()
+            .ok()
+            .and_then(|r| r.get(server).cloned())
+            .ok_or_else(|| NetError::Unreachable("no Nym address for that server".into()))?;
+        let mut id = [0u8; 16];
+        enclave_crypto::rng::HedgedRng::new()
+            .and_then(|mut r| r.fill("net/nym-request-id", &mut id))
+            .map_err(|_| NetError::Unavailable("randomness"))?;
+        let frame = enclave_nym::frame::Request::for_sealed(id, sealed)
+            .map_err(|_| NetError::BadReply)?
+            .encode();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut p) = self.pending.lock() {
+            p.insert(id, tx);
+        }
+        let forget = || {
+            if let Ok(mut p) = self.pending.lock() {
+                p.remove(&id);
+            }
+        };
+        if let Err(e) = self
+            .driver
+            .send(&to, frame, enclave_nym::frame::REPLY_LEN)
+            .await
+        {
+            forget();
+            return Err(NetError::Unreachable(e.to_string()));
+        }
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(Some(data))) => Ok(data),
+            Ok(Ok(None)) => Err(NetError::Unreachable(
+                "the ingress couldn't reach its server".into(),
+            )),
+            _ => {
+                forget();
+                Err(NetError::Unreachable("no reply over the mixnet".into()))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "nym")]
+impl Drop for NymTransport {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+#[cfg(feature = "nym")]
+#[async_trait::async_trait]
+impl Transport for NymTransport {
+    async fn exchange(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
+        self.roundtrip(server, request).await
+    }
+
+    async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
+        let bundle = self.roundtrip(server, Vec::new()).await?;
+        verify_key_bundle(server, &bundle, self.now())
+    }
+}
