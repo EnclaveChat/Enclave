@@ -23,4 +23,7 @@ enclave-sandbox = { path = "../enclave-sandbox" }
 tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std"] }
 
 [dev-dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-federation = { path = "../enclave-federation" }
+enclave-rpc = { path = "../enclave-rpc" }
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "process", "time"] }

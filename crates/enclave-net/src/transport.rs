@@ -32,7 +32,9 @@ pub trait Transport: Send + Sync {
     /// send without waiting for the clock (a large file, catch-up, account
     /// setup), where its profile allows. Calls nest.
     fn set_bulk(&self, _on: bool) {}
-    /// Fetch the server's current request key (from its descriptor).
+    /// The server's current request key, authenticated as `server`'s: a
+    /// network transport checks the signed key bundle against the id
+    /// ([`verify_key_bundle`]).
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey>;
     /// Current time, Unix seconds. The system clock, except in simulations
     /// that move time forward.
@@ -52,6 +54,28 @@ pub fn encode_server_key(k: &ServerKey) -> Vec<u8> {
 /// Decode `key_id ‖ x448 ‖ mlkem` as served by the dev transport.
 pub fn decode_server_key(b: &[u8]) -> Result<ServerKey> {
     ServerKey::from_bytes(b).map_err(|_| NetError::BadReply)
+}
+
+/// Parse `HEXID=HOST:PORT` (a 32-hex-digit server id and its address), the
+/// form `--server` takes in the app, the vault and netd.
+pub fn parse_server(s: &str) -> Option<(ServerId, SocketAddr)> {
+    let (hex, addr) = s.split_once('=')?;
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut id = [0u8; 16];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some((id, addr.parse().ok()?))
+}
+
+/// Check a key bundle (the reply to a zero-length request) against the id
+/// the client expects and return the request key valid at `now`.
+pub fn verify_key_bundle(server: &ServerId, bundle: &[u8], now: u64) -> Result<ServerKey> {
+    enclave_federation::KeyBundle::decode(bundle)
+        .and_then(|b| b.verify(server, now))
+        .map_err(NetError::Untrusted)
 }
 
 /// Development transport: length-prefixed frames over TCP.
@@ -92,7 +116,8 @@ impl Transport for TcpTransport {
     }
 
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
-        decode_server_key(&self.roundtrip(server, &[]).await?)
+        let bundle = self.roundtrip(server, &[]).await?;
+        verify_key_bundle(server, &bundle, self.now())
     }
 }
 
@@ -150,7 +175,8 @@ impl Transport for TorTransport {
     }
 
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
-        decode_server_key(&self.roundtrip(server, &[]).await?)
+        let bundle = self.roundtrip(server, &[]).await?;
+        verify_key_bundle(server, &bundle, self.now())
     }
 }
 

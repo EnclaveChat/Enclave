@@ -1,8 +1,12 @@
 //! netd carries requests and replies, and holds nothing else.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use enclave_federation::KeyBundle;
 use enclave_ipc::frame;
 use enclave_ipc::net::{NetReply, NetRequest};
+use enclave_rpc::ServerSecret;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Stdio;
@@ -50,13 +54,23 @@ fn rt14_netd_has_no_key_material() {
     }
 }
 
-/// A server that answers the dev framing: an empty request gets a key
-/// (`key_id ‖ x448 ‖ mlkem`), anything else comes back reversed.
-async fn fake_server() -> std::net::SocketAddr {
+/// A server that answers the dev framing: an empty request gets a signed
+/// key bundle for `identity`, anything else comes back reversed.
+async fn fake_server(identity: CompositeSigningKey) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let day = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 86_400) as u32;
+    let key = ServerSecret::from_seed(day, &[3; 32]).public().clone();
+    let bundle = KeyBundle::sign(&identity, &[key], &mut HedgedRng::new().unwrap())
+        .unwrap()
+        .encode();
     tokio::spawn(async move {
         while let Ok((mut s, _)) = listener.accept().await {
+            let bundle = bundle.clone();
             tokio::spawn(async move {
                 loop {
                     let mut len = [0u8; 4];
@@ -66,7 +80,7 @@ async fn fake_server() -> std::net::SocketAddr {
                     let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
                     s.read_exact(&mut buf).await.unwrap();
                     let reply = if buf.is_empty() {
-                        [&7u32.to_be_bytes()[..], &[1u8; 56], &[2u8; 1568]].concat()
+                        bundle.clone()
                     } else {
                         buf.iter().rev().copied().collect()
                     };
@@ -83,8 +97,9 @@ async fn fake_server() -> std::net::SocketAddr {
 
 #[tokio::test]
 async fn carries_requests_and_keys() {
-    let addr = fake_server().await;
-    let server = [0xab; 16];
+    let identity = CompositeSigningKey::generate(&mut HedgedRng::new().unwrap()).unwrap();
+    let server = enclave_federation::server_id(identity.public());
+    let addr = fake_server(identity).await;
     let hex: String = server.iter().map(|b| format!("{b:02x}")).collect();
     let mut child = tokio::process::Command::new(BIN)
         .args(["--server", &format!("{hex}={addr}")])
@@ -119,9 +134,9 @@ async fn carries_requests_and_keys() {
     }
     replies.sort_by_key(|r| r.id);
     assert_eq!(replies[0].result, Ok(vec![3, 2, 1]));
+    // netd checked the bundle against the id and hands over the key.
     let key = replies[1].result.as_ref().unwrap();
     assert_eq!(key.len(), 4 + 56 + 1568);
-    assert_eq!(&key[..4], &7u32.to_be_bytes());
     assert!(replies[2].result.is_err());
 
     // Garbage from the vault ends netd rather than confusing it.

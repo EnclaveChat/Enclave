@@ -27,6 +27,7 @@ members = [
     "crates/enclave-calls",
     "crates/enclave-relay",
     "crates/enclave-service",
+    "crates/enclave-federation",
     "crates/enclave-fuzz",
     "xtask",
 ]

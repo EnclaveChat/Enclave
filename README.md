@@ -75,15 +75,17 @@ via the `jpeg-encoder` crate).
 ```sh
 cargo build --release -p enclave-app -p enclave-vault      # the UI and the vault process that holds the keys
 target/release/enclave                                     # offline demo: local server and a demo contact
-cargo run --release -p enclave-server -- 127.0.0.1:7443 --kt-pins /tmp/kt-pins   # or a dev server…
-target/release/enclave --server 127.0.0.1:7443 --profile ~/.enclave-dev --kt-pins /tmp/kt-pins
+cargo run --release -p enclave-server -- 127.0.0.1:7443 --kt-pins /tmp/kt-pins   # or a dev server: prints its id…
+target/release/enclave --server SERVER_ID=127.0.0.1:7443 --profile ~/.enclave-dev --kt-pins /tmp/kt-pins
 ```
 
 The app starts `enclave-vault` from next to its own binary and keeps every
 key there; the window only receives what it displays. Without the vault
 binary (or with `--single-process`) the same engine runs inside the app.
 
-In the demo, the demo contact has the username `@sam@demo.enclave`; choose
+`SERVER_ID` is the 32-hex-digit id the dev server prints when it starts; the
+app checks that the server's request keys are signed by the identity that id
+names. In the demo, the demo contact has the username `@sam@demo.enclave`; choose
 your own under Settings. `--kt-pins` is the file where the dev server writes
 its key-transparency keys and witnesses, which the app pins to check lookups.
 To add a second device to an account, start another profile against the same

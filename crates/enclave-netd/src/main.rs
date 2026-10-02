@@ -16,28 +16,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 fn parse_servers(args: &[String]) -> HashMap<[u8; 16], std::net::SocketAddr> {
-    let mut map = HashMap::new();
-    for pair in args.windows(2) {
-        if pair[0] != "--server" {
-            continue;
-        }
-        let Some((hex, addr)) = pair[1].split_once('=') else {
-            continue;
-        };
-        let (Ok(addr), true) = (addr.parse(), hex.len() == 32) else {
-            continue;
-        };
-        let mut id = [0u8; 16];
-        let ok = (0..16).all(|i| {
-            u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
-                .map(|b| id[i] = b)
-                .is_ok()
-        });
-        if ok {
-            map.insert(id, addr);
-        }
-    }
-    map
+    args.windows(2)
+        .filter(|p| p[0] == "--server")
+        .filter_map(|p| enclave_net::transport::parse_server(&p[1]))
+        .collect()
 }
 
 fn main() -> ExitCode {

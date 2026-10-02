@@ -16,9 +16,8 @@
 //! Files are created by `enclave-server init` in a 0700 directory with
 //! mode 0600 and replaced atomically (`enclave_service::keyfile`).
 
-use enclave_crypto::hash::shake256;
 use enclave_crypto::rng::HedgedRng;
-use enclave_crypto::sig::{COMPOSITE_SEED_LEN, CompositePublic, CompositeSigningKey};
+use enclave_crypto::sig::{COMPOSITE_SEED_LEN, CompositeSigningKey};
 use enclave_rpc::ServerSecret;
 use enclave_service::SeedChain;
 use enclave_service::keyfile::{create_key_dir, create_secret, read_array};
@@ -27,22 +26,12 @@ use zeroize::Zeroizing;
 
 pub use enclave_service::KeyError;
 
-/// Label of the server id (`docs/label-registry.md`).
-pub const SERVER_ID_LABEL: &str = "enclave/v1/net/server-id";
+pub use enclave_federation::{SERVER_ID_LABEL, server_id};
 
 const IDENTITY_FILE: &str = "identity.key";
 const CHAIN_FILE: &str = "request-chain.key";
 const KT_HEAD_FILE: &str = "kt-head.key";
 const KT_VRF_FILE: &str = "kt-vrf.key";
-
-/// The server id: the first 16 bytes of
-/// `SHAKE256("enclave/v1/net/server-id" ‖ identity public key)`.
-pub fn server_id(identity: &CompositePublic) -> [u8; 16] {
-    let h: [u8; 32] = shake256(&[SERVER_ID_LABEL.as_bytes(), &identity.to_bytes()].concat());
-    let mut id = [0u8; 16];
-    id.copy_from_slice(&h[..16]);
-    id
-}
 
 /// The request-key chain: a [`SeedChain`] with one period per day.
 pub struct RequestChain(SeedChain);

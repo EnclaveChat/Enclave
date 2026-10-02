@@ -23,6 +23,7 @@ nym = []
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-wire = { path = "../enclave-wire" }
 enclave-rpc = { path = "../enclave-rpc" }
+enclave-federation = { path = "../enclave-federation" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 thiserror = "2"
@@ -31,4 +32,5 @@ tor-rtcompat = { version = "0.46.0", default-features = false, features = ["toki
 
 [dev-dependencies]
 enclave-server = { path = "../enclave-server" }
+enclave-federation = { path = "../enclave-federation" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

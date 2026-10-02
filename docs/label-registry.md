@@ -109,7 +109,20 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | Label | Kind | Output | Where | Purpose |
 |---|---|---|---|---|
 | `enclave/v1/dir/manifest` | HASH | 256 | `lib.rs` `manifest_key` | Directory key of a manifest: `SHAKE256(label ‖ root_pk)` |
-| `enclave/v1/net/server-id` | HASH | 256 (first 128 bits used) | `keys.rs` `server_id` | 16 B server id: `SHAKE256(label ‖ identity composite pk)` (12 §1.4) |
+
+### 2.5a Federation (`enclave-federation`)
+
+| Label | Kind | Output | Where | Purpose |
+|---|---|---|---|---|
+| `enclave/v1/net/server-id` | HASH | 256 (first 128 bits used) | `lib.rs` `server_id` | 16 B server id: `SHAKE256(label ‖ identity composite pk)` (12 §1.4) |
+| `enclave/v1/net/request-key-cert` | CTX-C | — | `keycert.rs` | Identity signature on a daily request key (12 §4.2) |
+| `enclave/v1/net/server-descriptor` | CTX-C | — | `descriptor.rs` | Server descriptor self-signature (12 §4.3) |
+| `enclave/v1/kt/witness-descriptor` | CTX-C | — | `witness.rs` | Witness descriptor self-signature (12 §3.3) |
+| `enclave/v1/kt/witness-id` | HASH | 256 (first 128 bits used) | `witness.rs` `witness_id` | 16 B witness id from its cosigning key |
+| `enclave/v1/calls/relay-descriptor` | CTX-C | — | `relay.rs` | Relay descriptor self-signature (declares operator family) (12 §5) |
+| `enclave/v1/calls/relay-id` | HASH | 256 (first 128 bits used) | `relay.rs` `relay_id` | 16 B relay id from its identity key |
+| `enclave/v1/update/server-list` | CTX-R + CTX-C | — | `list.rs` | Foundation's server list: both an SLH-DSA and a composite signature, each required (12 §4.1) |
+| `enclave/v1/update/foundation-keygen` | KMAC | 768 | `list.rs` `FoundationKey` | SLH-DSA seeds of the foundation's list key from its 32-byte secret |
 
 ### 2.6 Key transparency (`enclave-kt`)
 
@@ -224,7 +237,6 @@ These labels belong to features that are specified but not in code. They are res
 
 | Label | Kind | Output | Purpose | Defined in |
 |---|---|---|---|---|
-| `enclave/v1/net/server-descriptor` | CTX-C | — | Server descriptor self-signature | 12 §4 |
 | `enclave/v1/net/replay-id` | HASH | 256 | Server replay-cache key for sealed requests | 09 §2 |
 | `enclave/v1/net/inbox-addr` | KMAC | 256 | Weekly account-inbox address | 09 §3 |
 | `enclave/v1/net/inbox-read-key` | KMAC | 256 | Inbox read key from the inbox seed | 09 §3 |
@@ -244,16 +256,13 @@ These labels belong to features that are specified but not in code. They are res
 | Label | Kind | Output | Purpose | Defined in |
 |---|---|---|---|---|
 | `enclave/v1/kt/leaf` | HASH | 512 | KT leaf value commitment | 12 §3 |
-| `enclave/v1/kt/witness-descriptor` | CTX-C | — | Witness descriptor self-signature | 12 §3.2 |
 | `enclave/v1/update/release` | CTX-R | — | Maintainer co-signature on a release | 19 §1 |
-| `enclave/v1/update/server-list` | CTX-R | — | Foundation's signed server, relay and witness list | 12 §4 |
 | `enclave/v1/store/search-key` | KMAC | 256 | Search-token key | 14 §2 |
 | `enclave/v1/store/search-token` | KMAC | 256 (first 128 used) | Blinded full-text search token | 14 §2 |
 | `enclave/v1/store/root-wrap` | KMAC | 256 | Root (recovery-secret) wrap key: hardware + PIN | 14 §1.2 |
 | `enclave/v1/store/backup-blob-id` | KMAC | 256 | Blob secret for server-stored backup archives | 14 §4 |
 | `enclave/v1/store/ad-root` | AD | — | Wrapped recovery secret AD prefix | 14 §1.2 |
 | `enclave/v1/calls/link-cap` | KMAC | 256 | Call-link capability | 11 §8 |
-| `enclave/v1/calls/relay-descriptor` | CTX-C | — | Relay descriptor (declares operator family) | 12 §5 |
 
 ## 4. Retired draft labels
 
@@ -338,7 +347,7 @@ The M0 draft named these labels. The implementation replaced them, so they are r
 
 Purpose strings are framed inputs to `enclave/v1/rng/hedge`, not labels. They are listed so that reviewers can check that no purpose is reused for a different kind of value. Purposes used by the code today:
 
-`api/padding`, `app/vault-dir`, `app/vault-token`, `blob/padding`, `blob/secret`, `calls/id`, `core/group-msg-id`, `core/inbox`, `core/inbox-owner`, `core/invite`, `core/meet`, `core/msg-id`, `core/poll-id`, `core/request-inbox`, `core/request-owner`, `core/slip39`, `core/vault-key`, `core/vault-locator`, `core/vault-owner`, `core/write-token`, `device/id`, `envelope/body-key`, `envelope/capsule`, `envelope/dummy-pq`, `envelope/dummy-slot`, `envelope/padding`, `envelope/shuffle`, `group/capsule`, `group/chain-seed`, `group/epoch-secret`, `group/id`, `group/mac-fill`, `group/mac-key`, `group/nonce`, `group/padding`, `group/rekey-fill`, `group/rekey-kb`, `group/rekey-padding`, `group/shuffle`, `kt/dev-twin-seed`, `kt/dev-vrf`, `link/choice`, `link/decoy`, `link/mailbox`, `link/owner`, `link/secret`, `mlkem/encaps`, `mlkem/keygen`, `push/relay-chain`, `rand_core`, `recovery/secret`, `relay/id`, `relay/link-key`, `relay/session`, `relay/ticket-chain`, `rpc/poll-padding`, `rpc/reply-padding`, `rpc/unit-padding`, `schedule/delay`, `seal/key`, `seal/nonce`, `server/claim-id`, `server/garbage-reply`, `server/kt-reply-id`, `server/kt-vrf`, `server/push-jitter`, `server/request-chain`, `sig/composite/keygen`, `sig/composite/sign`, `sig/root/sign`, `store/device-secret`, `store/pw-salt`, `store/salt`, `store/shred-key`, `store/shred-wrap`, `tokens/contact-key`, `tokens/dummy`, `tokens/pow-nonce`, `tokens/shuffle`, `x448/keygen`. (`rand_core` is McEliece key generation and encapsulation through the `rand_core` adapter.) The simulator (`enclave-sim`) uses `sim` for test-only values.
+`api/padding`, `app/vault-dir`, `app/vault-token`, `blob/padding`, `blob/secret`, `calls/id`, `core/group-msg-id`, `core/inbox`, `core/inbox-owner`, `core/invite`, `core/meet`, `core/msg-id`, `core/poll-id`, `core/request-inbox`, `core/request-owner`, `core/slip39`, `core/vault-key`, `core/vault-locator`, `core/vault-owner`, `core/write-token`, `device/id`, `envelope/body-key`, `envelope/capsule`, `envelope/dummy-pq`, `envelope/dummy-slot`, `envelope/padding`, `envelope/shuffle`, `group/capsule`, `group/chain-seed`, `group/epoch-secret`, `group/id`, `group/mac-fill`, `group/mac-key`, `group/nonce`, `group/padding`, `group/rekey-fill`, `group/rekey-kb`, `group/rekey-padding`, `group/shuffle`, `kt/dev-twin-seed`, `kt/dev-vrf`, `link/choice`, `link/decoy`, `link/mailbox`, `link/owner`, `link/secret`, `mlkem/encaps`, `mlkem/keygen`, `push/relay-chain`, `rand_core`, `recovery/secret`, `relay/id`, `relay/link-key`, `relay/session`, `relay/ticket-chain`, `rpc/poll-padding`, `rpc/reply-padding`, `rpc/unit-padding`, `schedule/delay`, `seal/key`, `seal/nonce`, `server/claim-id`, `server/garbage-reply`, `server/kt-reply-id`, `server/kt-vrf`, `server/push-jitter`, `server/request-chain`, `sig/composite/keygen`, `sig/composite/sign`, `sig/root/sign`, `store/device-secret`, `store/pw-salt`, `store/salt`, `store/shred-key`, `store/shred-wrap`, `tokens/contact-key`, `tokens/dummy`, `tokens/pow-nonce`, `tokens/shuffle`, `update/foundation-key`, `x448/keygen`. (`rand_core` is McEliece key generation and encapsulation through the `rand_core` adapter.) The simulator (`enclave-sim`) uses `sim` for test-only values.
 
 ## Open questions
 

@@ -31,6 +31,9 @@ pub enum Mode {
     Server {
         /// Profile directory.
         profile: PathBuf,
+        /// The home server's id: its key bundle must be signed by the
+        /// identity this id is derived from.
+        server: ServerId,
         /// Server address.
         addr: SocketAddr,
         /// Key-transparency pins for usernames (written by the dev server).
@@ -42,27 +45,30 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Parse `--server HOST:PORT --profile DIR [--kt-pins FILE]`; anything
-    /// else is the demo.
-    pub fn from_args(args: &[String]) -> Self {
+    /// Parse `--server HEXID=HOST:PORT --profile DIR [--kt-pins FILE]`
+    /// (`enclave-server show-id` prints the id); without `--server` it is
+    /// the demo. A `--server` that doesn't parse, or one without
+    /// `--profile`, is an error rather than a quiet fall back to the demo.
+    pub fn from_args(args: &[String]) -> Result<Self, String> {
         let arg = |k: &str| {
             args.iter()
                 .position(|a| a == k)
                 .and_then(|i| args.get(i + 1))
                 .cloned()
         };
-        match (
-            arg("--server").and_then(|s| s.parse().ok()),
-            arg("--profile"),
-        ) {
-            (Some(addr), Some(p)) => Mode::Server {
-                profile: p.into(),
-                addr,
-                kt_pins: arg("--kt-pins").map(Into::into),
-                shaping: !args.iter().any(|a| a == "--no-shaping"),
-            },
-            _ => Mode::Demo,
-        }
+        let Some(s) = arg("--server") else {
+            return Ok(Mode::Demo);
+        };
+        let (server, addr) = enclave_net::transport::parse_server(&s)
+            .ok_or_else(|| format!("--server {s}: expected SERVER_ID=HOST:PORT"))?;
+        let profile = arg("--profile").ok_or("--server needs --profile DIR")?;
+        Ok(Mode::Server {
+            profile: profile.into(),
+            server,
+            addr,
+            kt_pins: arg("--kt-pins").map(Into::into),
+            shaping: !args.iter().any(|a| a == "--no-shaping"),
+        })
     }
 
     /// Inverse of [`Mode::from_args`].
@@ -71,13 +77,15 @@ impl Mode {
             Mode::Demo => vec!["--demo".into()],
             Mode::Server {
                 profile,
+                server,
                 addr,
                 kt_pins,
                 shaping,
             } => {
+                let id: String = server.iter().map(|b| format!("{b:02x}")).collect();
                 let mut v = vec![
                     "--server".into(),
-                    addr.to_string(),
+                    format!("{id}={addr}"),
                     "--profile".into(),
                     profile.display().to_string(),
                 ];
@@ -508,12 +516,13 @@ pub async fn run_with(
             (Arc::new(t), DEMO_SERVER, kt)
         }
         Mode::Server {
+            server,
             addr,
             kt_pins,
             shaping,
             ..
         } => {
-            let id = enclave_server::Config::default().id;
+            let id = *server;
             let kt = kt_pins
                 .as_ref()
                 .and_then(|p| std::fs::read(p).ok())

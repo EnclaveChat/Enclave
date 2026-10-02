@@ -1,0 +1,19 @@
+[package]
+name = "enclave-federation"
+description = "Signed objects that tie Enclave's federation together: request-key certificates, server, witness and relay descriptors, and the foundation's server list."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-crypto = { path = "../enclave-crypto" }
+enclave-rpc = { path = "../enclave-rpc" }
+thiserror = "2"
+zeroize = "1"

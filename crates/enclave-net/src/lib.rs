@@ -32,6 +32,10 @@ pub enum NetError {
     /// A droppable request found no free slot in time (`shaped`).
     #[error("dropped: no free slot")]
     Dropped,
+    /// The server's request key isn't certified by the identity its id
+    /// names (`enclave_federation::KeyBundle`): someone else answered.
+    #[error("server key not certified: {0}")]
+    Untrusted(enclave_federation::FedError),
 }
 
 /// Result alias.

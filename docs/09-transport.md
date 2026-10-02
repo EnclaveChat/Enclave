@@ -32,7 +32,7 @@ Every request (wire unit or poll object) is sealed end to end to the destination
 
 - The server generates one key pair per day; `key_id` is the Unix day number (`u32`).
 - `Server::rotate(day)` adds the new key and keeps at most two: the new one and the previous one. Older keys are deleted, which gives forward secrecy for request metadata. The previous day's key therefore stays until the next rotation.
-- Clients learn the current public key from the server (the dev transport's zero-length frame; server descriptors, `12-servers.md` §4, are not implemented).
+- Clients learn the current public key from the server: a zero-length request returns a `KeyBundle`, the server's identity key and certificates for today's and tomorrow's keys, which the client checks against the server id it expects (`12-servers.md` §4.2).
 
 ### 2.2 Client side
 

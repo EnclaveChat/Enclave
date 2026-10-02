@@ -1,4 +1,4 @@
-//! `enclave-vault --connect SOCKET|PIPE [--server HOST:PORT --profile DIR
+//! `enclave-vault --connect SOCKET|PIPE [--server SERVER_ID=HOST:PORT --profile DIR
 //! [--kt-pins FILE] | --demo] [--report]`
 //!
 //! Started by the Enclave UI, never by hand. Hardens itself (no core dumps,
@@ -32,7 +32,13 @@ fn main() -> ExitCode {
     let Some(token) = enclave_ipc::frame::token_from_hex(&line) else {
         return ExitCode::from(2);
     };
-    let mode = enclave_vault::Mode::from_args(&args);
+    let mode = match enclave_vault::Mode::from_args(&args) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("enclave-vault: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // McEliece key generation needs a deep stack.
     let worker = std::thread::Builder::new()
         .name("enclave-vault".into())
@@ -129,12 +135,11 @@ where
 fn start_netd(
     mode: &enclave_vault::Mode,
 ) -> Option<std::sync::Arc<dyn enclave_net::transport::Transport>> {
-    let enclave_vault::Mode::Server { addr, .. } = mode else {
+    let enclave_vault::Mode::Server { server, addr, .. } = mode else {
         return None;
     };
     let bin = enclave_vault::netd::netd_binary()?;
-    let id = enclave_server::Config::default().id;
-    match enclave_vault::netd::PipeTransport::spawn(&bin, id, &addr.to_string()) {
+    match enclave_vault::netd::PipeTransport::spawn(&bin, *server, &addr.to_string()) {
         Ok(t) => Some(std::sync::Arc::new(t)),
         Err(e) => {
             eprintln!("enclave-vault: netd didn't start ({e}); using the network directly");

@@ -3,7 +3,7 @@
 //! `enclave` runs a self-contained demo (local server, demo contact, nothing
 //! leaves the computer). Keys live in a separate `enclave-vault` process when
 //! it is installed next to this binary (`--single-process` keeps them in a
-//! thread instead). `enclave --server HOST:PORT --profile DIR` talks to
+//! thread instead). `enclave --server SERVER_ID=HOST:PORT --profile DIR` talks to
 //! a dev server (`enclave-server`) over TCP (add `--kt-pins FILE`, written by
 //! the server, to use usernames); the Tor and Nym transports are
 //! wired in by M4's gate.
@@ -64,7 +64,13 @@ fn save_download(name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf
 
 fn main() -> Result<(), slint::PlatformError> {
     let args: Vec<String> = std::env::args().collect();
-    let mode = Mode::from_args(&args);
+    let mode = match Mode::from_args(&args) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("enclave: {e}");
+            std::process::exit(2);
+        }
+    };
     let single_process = args.iter().any(|a| a == "--single-process");
 
     let ui = AppWindow::new()?;

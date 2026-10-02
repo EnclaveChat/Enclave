@@ -274,6 +274,8 @@ pub struct Server {
     stats: Stats,
     /// Every object ever stored, by length, for invariant checks in tests.
     stored_lengths: HashSet<usize>,
+    /// The signed key bundle served to a zero-length request.
+    key_bundle: Vec<u8>,
     rng: HedgedRng,
 }
 
@@ -340,8 +342,21 @@ impl Server {
             kt_replies: HashMap::new(),
             stats: Stats::default(),
             stored_lengths: HashSet::new(),
+            key_bundle: Vec::new(),
             rng,
         })
+    }
+
+    /// Set the signed key bundle (`enclave_federation::KeyBundle`) answered
+    /// to a zero-length request: the identity key and certificates for
+    /// today's and tomorrow's request keys. Replaced at every rotation.
+    pub fn set_key_bundle(&mut self, bundle: Vec<u8>) {
+        self.key_bundle = bundle;
+    }
+
+    /// The signed key bundle (empty until one is set).
+    pub fn key_bundle(&self) -> &[u8] {
+        &self.key_bundle
     }
 
     /// The database (backups, operator tools).

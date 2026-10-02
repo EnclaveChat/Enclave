@@ -2,6 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use enclave_federation::KeyBundle;
 use enclave_net::transport::{TcpTransport, Transport};
 use enclave_rpc::api::{self, FLAG_CREATE, Status};
 use enclave_server::{Config, Server};
@@ -12,10 +14,41 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-async fn spawn_server() -> std::net::SocketAddr {
-    let server = Arc::new(Mutex::new(Server::new(Config::default(), 20_000).unwrap()));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+/// A server with a real identity, answering a zero-length request with its
+/// signed key bundle. Returns its address and id.
+async fn spawn_server() -> (std::net::SocketAddr, [u8; 16]) {
+    let mut rng = HedgedRng::new().unwrap();
+    let identity = CompositeSigningKey::generate(&mut rng).unwrap();
+    let id = enclave_federation::server_id(identity.public());
+    let day = (now() / 86_400) as u32;
+    let mut server = Server::new(
+        Config {
+            id,
+            ..Config::default()
+        },
+        day,
+    )
+    .unwrap();
+    let key = server.public_key().unwrap();
+    server.set_key_bundle(
+        KeyBundle::sign(&identity, &[key], &mut rng)
+            .unwrap()
+            .encode(),
+    );
+    serve(server).await.map(|a| (a, id)).unwrap()
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+async fn serve(server: Server) -> std::io::Result<std::net::SocketAddr> {
+    let server = Arc::new(Mutex::new(server));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -31,13 +64,9 @@ async fn spawn_server() -> std::net::SocketAddr {
                 let reply = {
                     let mut s = server.lock().await;
                     if n == 0 {
-                        let k = s.public_key().unwrap();
-                        let mut v = k.key_id.to_be_bytes().to_vec();
-                        v.extend_from_slice(&k.x448.0);
-                        v.extend_from_slice(&k.mlkem.0[..]);
-                        v
+                        s.key_bundle().to_vec()
                     } else {
-                        s.handle(&buf, 1_790_000_000)
+                        s.handle(&buf, now())
                     }
                 };
                 sock.write_all(&(reply.len() as u32).to_be_bytes())
@@ -47,13 +76,26 @@ async fn spawn_server() -> std::net::SocketAddr {
             });
         }
     });
-    addr
+    Ok(addr)
+}
+
+/// A server whose key bundle is signed by some other identity than the id
+/// the client dials (a man in the middle, or the wrong address) is refused.
+#[tokio::test]
+async fn a_key_from_the_wrong_identity_is_refused() {
+    let (addr, real) = spawn_server().await;
+    let wrong = [0x77u8; 16];
+    let t = TcpTransport::new(HashMap::from([(wrong, addr), (real, addr)]));
+    assert!(matches!(
+        t.server_key(&wrong).await,
+        Err(enclave_net::NetError::Untrusted(_))
+    ));
+    assert!(t.server_key(&real).await.is_ok());
 }
 
 #[tokio::test]
 async fn tcp_roundtrip_creates_inbox_and_polls() {
-    let addr = spawn_server().await;
-    let id = [5u8; 16];
+    let (addr, id) = spawn_server().await;
     let t = TcpTransport::new(HashMap::from([(id, addr)]));
     let key = t.server_key(&id).await.unwrap();
     let mut rng = HedgedRng::new().unwrap();

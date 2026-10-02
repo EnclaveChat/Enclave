@@ -222,8 +222,16 @@ impl RootSigningKey {
     /// Derive the root key from the 256-bit recovery secret:
     /// `SK.seed ‖ SK.prf ‖ PK.seed = KMAC256(recovery, "", 768, "enclave/v1/root/keygen")`.
     pub fn from_recovery_secret(recovery: &[u8; 32]) -> Self {
+        Self::derive(recovery, labels::ROOT_KEYGEN)
+    }
+
+    /// Derive an SLH-DSA-SHAKE-256s key from a 256-bit secret under
+    /// `label` (`SK.seed ‖ SK.prf ‖ PK.seed = KMAC256(secret, "", 768,
+    /// label)`). Account roots use `enclave/v1/root/keygen`; the
+    /// foundation's list key uses its own label.
+    pub fn derive(secret: &[u8; 32], label: &str) -> Self {
         let mut seeds = Zeroizing::new([0u8; 96]);
-        Kmac256::new(recovery, labels::ROOT_KEYGEN.as_bytes()).finalize_into(&mut seeds[..]);
+        Kmac256::new(secret, label.as_bytes()).finalize_into(&mut seeds[..]);
         let sk = SlhSigningKey::<Shake256s>::slh_keygen_internal(
             &seeds[..32],
             &seeds[32..64],

@@ -262,11 +262,35 @@ A server whose witnesses collude can show different people different logs, each 
 - The app shows a persistent notice ("A username server showed people different lists … check security codes, ideally in person").
 - Test `rt04_split_view_detected_by_gossip`: twin logs under one server key and one set of (colluding) witnesses (`KtService::start_dev_twins`, server test hooks `enable_kt_fork`, `kt_fork_force`, `kt_serve_fork`); Ada sees the real binding of a name, Ben the forked one, each view verifies alone, and one message from Ada to Ben leaves both holding the proof. Honest views raise nothing.
 - Limits: gossip only compares heads of logs the client pins, the fork is found only if two people who talk saw different heads for the same epoch, and group messages carry no gossip yet. Publishing proofs to the witnesses or a public place is not built.
-## 4. Discovery and migration (not yet implemented)
+## 4. Discovery and migration
 
-- **Server list.** The foundation publishes a signed list of vetted servers, relays, witnesses and push relays, shipped in the app and updated through TUF, with an SLH-DSA signature under ctx `enclave/v1/update/server-list`.
-- **Server descriptors** at `https://<domain>/.well-known/enclave`, self-signed (`enclave/v1/net/server-descriptor`), pinned on first use and logged in KT: the server composite key, `server_id`, operator family, Nym address, current and next daily request keys, PoW efforts, quotas, and the KT head-signing key. Today a client learns a server's request key from the dev transport.
-- **Moving an account:** a root-signed `Moved` record (ctx `enclave/v1/proto/moved`).
+`enclave-federation` holds the signed objects (all in the canonical encoding of `enclave_proto::codec`: one byte string per value, trailing bytes refused, every signature over every byte before it; test `crates/enclave-federation/tests/federation.rs` flips bytes across each object and requires every one to be refused).
+
+### 4.1 Server list
+
+The foundation's list of vetted servers, witnesses, call relays and push relays (`list.rs`, format in its module docs). It carries what changes rarely and what the foundation vouches for: identity keys, domains, operators and families, weights for new accounts, the key-transparency keys clients pin (head key and VRF key per server), the witness threshold, witnesses' cosigning keys and URLs, relays' link keys, and push relays' Nym addresses with their current and next keys. Short-lived keys are not in it: they come from the services, signed by the identity keys it lists.
+
+The list is signed twice under ctx `enclave/v1/update/server-list`: SLH-DSA-SHAKE-256s (the foundation key's SLH-DSA half is derived from a 32-byte secret under `enclave/v1/update/foundation-keygen`) and composite Ed448 + ML-DSA-87. `ServerList::verify` requires both, an unexpired list, and a sequence number higher than the one the client holds. `pick(draw)` chooses a server for a new account by weight. Not implemented yet (S2): shipping the list in the app, refreshing it over the mixnet (`DirKind::ServerList`), deriving `KtPolicy` from it, and `enclave-admin` to build and sign it; moving it under TUF is R2.
+
+### 4.2 Request-key certificates
+
+A server's daily request key is certified by its identity key (`keycert.rs`):
+
+```
+KeyCert   = u8(1) ‖ server_id (16) ‖ ServerKey (1,628) ‖ u64(not_before) ‖ u64(not_after)
+            ‖ CompositeSign(identity, "enclave/v1/net/request-key-cert", all of the above)
+KeyBundle = u8(1) ‖ identity public key (2,649) ‖ u8(n) ‖ n × KeyCert
+```
+
+Day `d`'s key is valid from the start of day `d` to the end of day `d + 1`. A zero-length request is answered with a `KeyBundle` of today's and tomorrow's certificates (`Server::key_bundle`, set by the binary at start and at every rotation). A client checks the bundle against the server id it expects: the id must be derived from the bundle's identity key and every certificate must verify (`KeyBundle::verify`); a bundle signed by any other identity is refused (`NetError::Untrusted`, tests `a_key_from_the_wrong_identity_is_refused` in `enclave-net` and `carries_requests_and_keys` in `enclave-netd`). TCP and Tor transports and netd verify bundles; the in-process simulator transport hands keys over directly. Clients name their home server as `--server SERVER_ID=HOST:PORT` (`enclave-server show-id` prints the id; `enclave-server dev` prints its fresh id at start).
+
+### 4.3 Server descriptors
+
+`ServerDescriptor` (`descriptor.rs`) is what a server says about itself, self-signed under `enclave/v1/net/server-descriptor`: identity key, domain, operator, family, Nym address, onion address, policy (efforts, quotas, retention), key-transparency keys, request-key certificates for today and tomorrow, and a validity window of at most 3 days. Witnesses and call relays have the same kind of self-signed descriptor (`WitnessDescriptor` under `enclave/v1/kt/witness-descriptor`, id `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`; `RelayDescriptor` under `enclave/v1/calls/relay-descriptor`, id `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)`). Not implemented yet (S2): publishing descriptors at `https://<domain>/.well-known/enclave` and over the mixnet (`DirKind::Descriptor`), and committing each descriptor's digest to the key-transparency log.
+
+### 4.4 Moving an account
+
+A root-signed `Moved` record (ctx `enclave/v1/proto/moved`) is not implemented yet (S2).
 
 ## 5. Relays
 

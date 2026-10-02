@@ -11,13 +11,16 @@
 //!
 //! `run` listens on `server.listen` with the length-prefixed frame
 //! transport (`u32 BE length ‖ bytes`; a zero-length frame asks for the
-//! current request key). In production that port is reachable only from
+//! signed key bundle, `enclave_federation::KeyBundle`). In production that port is reachable only from
 //! the Nym ingress on the stack's internal network, never from outside.
 //!
 //! `dev` is the old all-in-memory development server: random keys every
-//! start, nothing persisted. It is what a bare `enclave-server [ADDR]`
+//! start (it prints its server id), nothing persisted. It is what a bare `enclave-server [ADDR]`
 //! runs, for local development and the test suites.
 
+use enclave_crypto::rng::HedgedRng;
+use enclave_crypto::sig::CompositeSigningKey;
+use enclave_federation::{KeyBundle, server_id};
 use enclave_kt::{KtService, KtStore};
 use enclave_server::config::FileConfig;
 use enclave_server::db::Db;
@@ -177,10 +180,39 @@ async fn healthcheck(args: &[String]) -> Result<(), String> {
         .await
         .map_err(|_| "timeout".to_string())?
         .map_err(|e| e.to_string())?;
-    if u32::from_be_bytes(len) == 0 {
-        return Err("no request key".into());
+    let n = u32::from_be_bytes(len) as usize;
+    if n == 0 || n > enclave_wire::UNIT_LEN {
+        return Err("no key bundle".into());
     }
+    let mut b = vec![0u8; n];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut b))
+        .await
+        .map_err(|_| "timeout".to_string())?
+        .map_err(|e| e.to_string())?;
+    // The bundle must be well formed and current for the identity it names.
+    let bundle = KeyBundle::decode(&b).map_err(|e| format!("key bundle: {e}"))?;
+    bundle
+        .verify(&server_id(&bundle.identity), now())
+        .map_err(|e| format!("key bundle: {e}"))?;
     Ok(())
+}
+
+/// Request keys certified by the identity key.
+fn key_bundle(
+    identity: &CompositeSigningKey,
+    keys: &[enclave_rpc::ServerKey],
+) -> Result<Vec<u8>, String> {
+    let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
+    KeyBundle::sign(identity, keys, &mut rng)
+        .map(|b| b.encode())
+        .map_err(|e| e.to_string())
+}
+
+/// The bundle for the chain's current state: today's key and tomorrow's.
+fn chain_bundle(keys: &ServerKeys) -> Result<Vec<u8>, String> {
+    let today = keys.chain.keys()[0].public().clone();
+    let next = keys.chain.next_key().public().clone();
+    key_bundle(&keys.identity, &[today, next])
 }
 
 async fn run(args: &[String]) -> Result<(), String> {
@@ -192,6 +224,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     let db = Db::open(&db_path(&cfg)).map_err(|e| e.to_string())?;
     let mut server =
         Server::open(cfg.policy(id), db, keys.chain.keys()).map_err(|e| e.to_string())?;
+    server.set_key_bundle(chain_bundle(&keys)?);
     // The username log: its own file, the same head key and VRF secret
     // every run, so what clients pin stays valid. Witnesses are other
     // operators' services (`docs/12-servers.md` §3.3); until they are
@@ -250,9 +283,14 @@ async fn run(args: &[String]) -> Result<(), String> {
                 let mut k = keys.lock().await;
                 match k.chain.advance_to(today()) {
                     Ok(true) => {
+                        let bundle = chain_bundle(&k);
                         let mut s = server.lock().await;
                         for key in k.chain.keys().into_iter().rev() {
                             s.install_key(key);
+                        }
+                        match bundle {
+                            Ok(b) => s.set_key_bundle(b),
+                            Err(e) => eprintln!("key bundle failed: {e}"),
                         }
                     }
                     Ok(false) => {}
@@ -357,7 +395,7 @@ async fn serve(listener: TcpListener, server: Arc<Mutex<Server>>) -> Result<(), 
                 let reply = {
                     let mut s = server.lock().await;
                     if n == 0 {
-                        s.public_key().map(|k| k.to_bytes()).unwrap_or_default()
+                        s.key_bundle().to_vec()
                     } else {
                         s.handle(&buf, now())
                     }
@@ -383,9 +421,18 @@ async fn dev(args: &[String]) -> Result<(), String> {
         .cloned()
         .unwrap_or_else(|| "127.0.0.1:7443".to_string());
     let day = today();
-    let cfg = Config::default();
-    let id = cfg.id;
+    // A fresh identity every start: nothing is kept, so neither is the id.
+    let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
+    let identity = CompositeSigningKey::generate(&mut rng).map_err(|e| e.to_string())?;
+    let id = server_id(identity.public());
+    let cfg = Config {
+        id,
+        ..Config::default()
+    };
     let mut server = Server::new(cfg, day).map_err(|e| e.to_string())?;
+    let key = server.public_key().ok_or("no request key")?;
+    server.set_key_bundle(key_bundle(&identity, &[key])?);
+    println!("{}", hex(&id));
     let domain = flag(args, "--domain").unwrap_or_else(|| "localhost".to_string());
     match enclave_kt::KtService::start_dev(id, &domain) {
         Ok((kt, policy)) => {
@@ -412,6 +459,10 @@ async fn dev(args: &[String]) -> Result<(), String> {
                         eprintln!("key rotation failed: {e}");
                     } else {
                         current = today;
+                        match s.public_key().map(|k| key_bundle(&identity, &[k])) {
+                            Some(Ok(b)) => s.set_key_bundle(b),
+                            _ => eprintln!("key bundle failed"),
+                        }
                     }
                 }
                 s.expire(now());
@@ -422,6 +473,9 @@ async fn dev(args: &[String]) -> Result<(), String> {
         spawn_push_forwarder(Arc::clone(&server), relay);
     }
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
-    eprintln!("enclave-server (dev transport, in memory) listening on {addr}");
+    eprintln!(
+        "enclave-server {} (dev transport, in memory) listening on {addr}",
+        hex(&id)
+    );
     serve(listener, server).await
 }

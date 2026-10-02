@@ -156,8 +156,9 @@ fn vault_refuses_to_start_without_a_token() {
     assert!(!status.success());
 }
 
-/// A minimal dev server over TCP (the framing `enclave-server` uses).
-async fn dev_server() -> std::net::SocketAddr {
+/// A minimal dev server over TCP (the framing `enclave-server` uses), with
+/// a real identity and key bundle. Returns its address and id.
+async fn dev_server() -> (std::net::SocketAddr, [u8; 16]) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let now = || {
         std::time::SystemTime::now()
@@ -165,8 +166,12 @@ async fn dev_server() -> std::net::SocketAddr {
             .unwrap()
             .as_secs()
     };
-    let server = enclave_server::Server::new(
+    let mut rng = enclave_crypto::rng::HedgedRng::new().unwrap();
+    let identity = enclave_crypto::sig::CompositeSigningKey::generate(&mut rng).unwrap();
+    let id = enclave_federation::server_id(identity.public());
+    let mut server = enclave_server::Server::new(
         enclave_server::Config {
+            id,
             effort_request: 4,
             effort_claim: 1,
             effort_blob: 1,
@@ -175,6 +180,12 @@ async fn dev_server() -> std::net::SocketAddr {
         (now() / 86_400) as u32,
     )
     .unwrap();
+    let key = server.public_key().unwrap();
+    server.set_key_bundle(
+        enclave_federation::KeyBundle::sign(&identity, &[key], &mut rng)
+            .unwrap()
+            .encode(),
+    );
     let server = std::sync::Arc::new(tokio::sync::Mutex::new(server));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -197,8 +208,7 @@ async fn dev_server() -> std::net::SocketAddr {
                     let reply = {
                         let mut s = server.lock().await;
                         if buf.is_empty() {
-                            let k = s.public_key().unwrap();
-                            [&k.key_id.to_be_bytes()[..], &k.x448.0, &k.mlkem.0[..]].concat()
+                            s.key_bundle().to_vec()
                         } else {
                             s.handle(&buf, now())
                         }
@@ -215,13 +225,13 @@ async fn dev_server() -> std::net::SocketAddr {
             });
         }
     });
-    addr
+    (addr, id)
 }
 
 /// Start the vault binary on `profile` against `addr` and connect to it.
 async fn start_vault(
     dir: &std::path::Path,
-    addr: std::net::SocketAddr,
+    (addr, id): (std::net::SocketAddr, [u8; 16]),
     profile: &std::path::Path,
     name: &str,
 ) -> (
@@ -235,7 +245,7 @@ async fn start_vault(
     let mut child = Command::new(BIN)
         .arg("--connect")
         .arg(&sock)
-        .args(["--server", &addr.to_string(), "--profile"])
+        .args(["--server", &format!("{}={addr}", hex(&id)), "--profile"])
         .arg(profile)
         .arg("--report")
         .stdin(Stdio::piped())
@@ -341,4 +351,8 @@ async fn sandboxed_vault_keeps_its_profile() {
     drop(wr);
     let _ = tokio::task::spawn_blocking(move || child.wait_with_output()).await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }

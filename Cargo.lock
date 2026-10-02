@@ -2404,6 +2404,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclave-federation"
+version = "0.1.0"
+dependencies = [
+ "enclave-crypto",
+ "enclave-rpc",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "enclave-fuzz"
 version = "0.1.0"
 dependencies = [
@@ -2476,6 +2486,7 @@ dependencies = [
  "arti-client",
  "async-trait",
  "enclave-crypto",
+ "enclave-federation",
  "enclave-rpc",
  "enclave-server",
  "enclave-wire",
@@ -2488,8 +2499,11 @@ dependencies = [
 name = "enclave-netd"
 version = "0.1.0"
 dependencies = [
+ "enclave-crypto",
+ "enclave-federation",
  "enclave-ipc",
  "enclave-net",
+ "enclave-rpc",
  "enclave-sandbox",
  "tokio",
 ]
@@ -2557,6 +2571,7 @@ name = "enclave-server"
 version = "0.1.0"
 dependencies = [
  "enclave-crypto",
+ "enclave-federation",
  "enclave-kt",
  "enclave-proto",
  "enclave-rpc",
@@ -2634,6 +2649,7 @@ dependencies = [
  "chrono",
  "enclave-core",
  "enclave-crypto",
+ "enclave-federation",
  "enclave-ipc",
  "enclave-media",
  "enclave-net",
