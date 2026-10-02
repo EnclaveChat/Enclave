@@ -7,6 +7,9 @@
 //!     kind 3: the server's key bundle, body 2,048 zero bytes
 //! reply   = u8(1) ‖ u8 status ‖ req_id (16) ‖ u32 len ‖ data ‖ zeros   = 16,406 B
 //!     status 0: data is the server's answer; 1: the server didn't answer
+//! wake    = u8(1) ‖ u8(4) ‖ u16 len ‖ data ‖ zeros                     = 3,074 B
+//!     a push wake from a server's push egress to the push relay's
+//!     ingress (`docs/10-push.md`), one way: no reply blocks
 //! ```
 //!
 //! Every request of a size class has the same length, and a key fetch looks
@@ -95,6 +98,42 @@ impl Request {
     }
 }
 
+/// Room in a [`Wake`] (a sealed push token of 1,952 B now, and a 1,024 B
+/// preview capsule later, `docs/10-push.md`), length prefix included.
+pub const WAKE_LEN: usize = 3_072;
+
+/// A push wake on the mixnet, one way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wake(pub Vec<u8>);
+
+impl Wake {
+    /// Encode, padded to `2 + WAKE_LEN`. Too long is refused.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let n = u16::try_from(self.0.len()).map_err(|_| NymError::Malformed)?;
+        if self.0.len() > WAKE_LEN - 2 {
+            return Err(NymError::Malformed);
+        }
+        let mut v = Vec::with_capacity(2 + WAKE_LEN);
+        v.extend_from_slice(&[VERSION, 4]);
+        v.extend_from_slice(&n.to_be_bytes());
+        v.extend_from_slice(&self.0);
+        v.resize(2 + WAKE_LEN, 0);
+        Ok(v)
+    }
+
+    /// Decode.
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        if b.len() != 2 + WAKE_LEN || b[0] != VERSION || b[1] != 4 {
+            return Err(NymError::Malformed);
+        }
+        let n = usize::from(u16::from_be_bytes([b[2], b[3]]));
+        if n > WAKE_LEN - 2 {
+            return Err(NymError::Malformed);
+        }
+        Ok(Self(b[4..4 + n].to_vec()))
+    }
+}
+
 /// A reply on the mixnet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
@@ -180,5 +219,19 @@ mod tests {
             .encode()
             .is_err()
         );
+    }
+
+    #[test]
+    fn wakes_have_one_length() {
+        let a = Wake(vec![7; 1_952]).encode().unwrap();
+        let b = Wake(vec![8; 2_976]).encode().unwrap();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(Wake::decode(&a).unwrap(), Wake(vec![7; 1_952]));
+        assert!(Wake(vec![0; WAKE_LEN - 1]).encode().is_err());
+        assert!(Wake::decode(&a[..a.len() - 1]).is_err());
+        // Not a request, and a request isn't a wake.
+        assert!(Request::decode(&a).is_err());
+        let poll = Request::for_sealed([2; 16], vec![8; POLL_LEN]).unwrap();
+        assert!(Wake::decode(&poll.encode()).is_err());
     }
 }

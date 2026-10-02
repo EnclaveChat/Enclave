@@ -7,9 +7,11 @@ as one image, `ghcr.io/enclavechat/enclave-server`, and one compose file,
 `ops/compose/compose.yml`. See `docs/12-servers.md` for what each part does.
 
 > **Status.** Production servers are reached only through the Nym mixnet,
-> by an ingress sidecar that is not built yet (milestone N1). Until then a
-> stack can be run and tested (the CI job `federation-e2e-tcp` runs three),
-> but it is not ready for users.
+> by the ingress sidecar (`ghcr.io/enclavechat/enclave-nym`, compose
+> profile `nym`). It becomes the only way in once milestone S4 makes the
+> production compose Nym-only. Until then a stack can be run and tested
+> (the CI job `federation-e2e-tcp` runs three), but it is not ready for
+> users.
 
 ## What you need
 
@@ -161,7 +163,21 @@ existing stack: stop the server, take a `backup`, switch to
   chain. Yesterday's is kept for late requests; older ones can't be
   recovered from disk.
 - **Push relay keys** rotate every 30 days with a 7-day overlap; the
-  published file is `public/push-relay-keys.bin`.
+  published file is `public/push-relay-keys.bin`. A push relay operator
+  also runs `push-ingress` (profile `push`), whose Nym address
+  (`public/push-ingress.addr`) goes into the foundation's list with the
+  keys.
+
+## Push
+
+With profile `nym`, `push-egress` carries the server's due wakes to the
+push relay over the mixnet. Set `PUSH_RELAY_NYM` in `.env` to the relay's
+Nym address from the foundation's list, and in `config/server.toml`:
+
+```toml
+[push]
+forward = "push-egress:7446"
+```
 - **Call relay ticket keys** rotate daily.
 - **Identity keys** (server, witness, relay) don't rotate: they are what
   the foundation's list names. Replacing one is leaving the list and

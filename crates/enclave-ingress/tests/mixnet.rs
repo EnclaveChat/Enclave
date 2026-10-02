@@ -238,3 +238,80 @@ where
     }
     out
 }
+
+/// Wakes go from a server's push egress to a push relay's ingress one way
+/// through the mixnet, each intact and with no reply blocks; anything else
+/// reaching the relay's ingress is dropped (`docs/10-push.md`).
+#[tokio::test(flavor = "multi_thread")]
+async fn wakes_cross_the_mixnet_one_way() {
+    use enclave_ingress::{forward, oneway};
+    // The push relay: collects what it's handed.
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = relay.accept().await.unwrap();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut len = [0u8; 4];
+                while sock.read_exact(&mut len).await.is_ok() {
+                    let mut b = vec![0u8; u32::from_be_bytes(len) as usize];
+                    sock.read_exact(&mut b).await.unwrap();
+                    tx.send(b).unwrap();
+                }
+            });
+        }
+    });
+    let net = FakeMixnet::default();
+    let ingress_stats = Arc::new(Stats::default());
+    tokio::spawn(oneway(
+        Arc::new(net.client("push-ingress")),
+        relay_addr,
+        Arc::clone(&ingress_stats),
+    ));
+    let egress = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let egress_addr = egress.local_addr().unwrap();
+    let egress_stats = Arc::new(Stats::default());
+    tokio::spawn(forward(
+        Arc::new(net.client("egress")),
+        egress,
+        Arc::new(vec!["push-ingress".into()]),
+        Arc::clone(&egress_stats),
+    ));
+
+    // The server's forwarder: two wakes on one connection.
+    let wakes = [vec![1u8; 1_952], vec![2u8; 1_952]];
+    let mut s = tokio::net::TcpStream::connect(egress_addr).await.unwrap();
+    for w in &wakes {
+        s.write_all(&(w.len() as u32).to_be_bytes()).await.unwrap();
+        s.write_all(w).await.unwrap();
+    }
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        got.push(
+            tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    got.sort();
+    assert_eq!(got, wakes.to_vec());
+    assert_eq!(egress_stats.answered.load(Ordering::Relaxed), 2);
+
+    // A request (or anything else) sent to the relay's ingress goes nowhere.
+    let stranger = net.client("stranger");
+    stranger
+        .send("push-ingress", vec![0u8; 3_074], 0)
+        .await
+        .unwrap();
+    let poll = enclave_nym::frame::Request::for_sealed([1; 16], vec![0; 2_048])
+        .unwrap()
+        .encode();
+    stranger.send("push-ingress", poll, 100).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(rx.try_recv().is_err());
+    assert_eq!(ingress_stats.dropped.load(Ordering::Relaxed), 2);
+    assert_eq!(ingress_stats.answered.load(Ordering::Relaxed), 2);
+}

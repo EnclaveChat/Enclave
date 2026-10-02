@@ -136,6 +136,26 @@ services:
       timeout: 10s
       retries: 3
 
+  # The stack's push egress (docs/10-push.md): the server hands it due
+  # wakes ([push] forward = "push-egress:7446") and it sends each one way
+  # over the mixnet to the push relay's Nym address (PUSH_RELAY_NYM, from
+  # the foundation's list), so the relay can't tell which server woke
+  # whom. A fresh mixnet identity each start.
+  push-egress:
+    <<: *service
+    profiles: [nym]
+    image: ${ENCLAVE_NYM_IMAGE:-ghcr.io/enclavechat/enclave-nym}:${ENCLAVE_VERSION:-latest}
+    entrypoint: ["/usr/local/bin/enclave-ingress"]
+    command: ["forward", "--listen", "0.0.0.0:7446", "--to", "${PUSH_RELAY_NYM:-}"]
+    volumes:
+      - push-egress-data:/var/lib/enclave/public
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/enclave-ingress", "healthcheck", "--addr-file", "push-egress.addr"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Only for operators who run a push relay for the foundation's list.
   push-relay:
     <<: *service
@@ -149,6 +169,26 @@ services:
     networks: [backend, egress]
     healthcheck:
       test: ["CMD", "/usr/local/bin/enclave-push-relay", "healthcheck", "--config", "/etc/enclave/push-relay.toml"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # The push relay's Nym client: takes wakes off the mixnet and hands them
+  # to the relay. Its address (public/push-ingress.addr) goes in the
+  # foundation's list.
+  push-ingress:
+    <<: *service
+    profiles: [push]
+    image: ${ENCLAVE_NYM_IMAGE:-ghcr.io/enclavechat/enclave-nym}:${ENCLAVE_VERSION:-latest}
+    entrypoint: ["/usr/local/bin/enclave-ingress"]
+    command: ["oneway", "--relay", "push-relay:7445"]
+    volumes:
+      - push-ingress-data:/var/lib/enclave/ingress
+      - public:/var/lib/enclave/public
+    networks: [backend, egress]
+    depends_on: [push-relay]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/enclave-ingress", "healthcheck", "--addr-file", "push-ingress.addr"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -174,3 +214,5 @@ volumes:
   relay-data:
   push-keys:
   ingress-data:
+  push-egress-data:
+  push-ingress-data:

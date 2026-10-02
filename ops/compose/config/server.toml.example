@@ -11,8 +11,14 @@ keys_dir = "/var/lib/enclave/keys"
 public_dir = "/var/lib/enclave/public"
 # The foundation's signed list, served to clients as is.
 server_list = "/etc/enclave/foundation/server-list.bin"
-# This server's Nym address, once the ingress has one (milestone N1).
+# This server's Nym address. Empty: the ingress's own, which it writes to
+# public_dir/ingress.addr and the server publishes in its descriptor.
 nym_address = ""
+
+[push]
+# Due wakes go to the push egress (compose service `push-egress`, profile
+# nym), which carries them over the mixnet to the push relay. Unset: no push.
+# forward = "push-egress:7446"
 
 [policy]
 # Proof-of-work efforts (Equi-X work factor) and quotas. The defaults:
