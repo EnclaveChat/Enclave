@@ -14,7 +14,7 @@
 //! sockets only; no programs, no debugging.
 
 use enclave_nym::MixnetDriver;
-use enclave_nym_sdk::{NymDriver, Options, Role};
+use enclave_nym_sdk::{Network, NymDriver, Options, Role};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -38,12 +38,13 @@ const READ_ONLY: &[&str] = &[
 fn main() -> ExitCode {
     // No core dumps, not dumpable, no new privileges.
     let _ = enclave_sandbox::process();
-    // Certificates named by the environment are read too.
+    // Certificates named by the environment are read too, and a local
+    // mixnet's topology file.
     let ro: Vec<std::path::PathBuf> = READ_ONLY
         .iter()
         .map(std::path::PathBuf::from)
         .chain(
-            ["SSL_CERT_FILE", "SSL_CERT_DIR"]
+            ["SSL_CERT_FILE", "SSL_CERT_DIR", "ENCLAVE_NYM_TOPOLOGY"]
                 .iter()
                 .filter_map(|v| std::env::var_os(v).map(std::path::PathBuf::from)),
         )
@@ -69,7 +70,7 @@ fn main() -> ExitCode {
         let driver = match NymDriver::connect(Options {
             role: Role::Client,
             gateway,
-            from_env: args.iter().any(|a| a == "--env"),
+            network: Network::from_env(args.iter().any(|a| a == "--env")),
         })
         .await
         {

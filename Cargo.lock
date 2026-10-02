@@ -2506,6 +2506,7 @@ dependencies = [
  "enclave-crypto",
  "enclave-federation",
  "enclave-net",
+ "enclave-nym",
  "enclave-push-relay",
  "enclave-service",
  "enclave-store",

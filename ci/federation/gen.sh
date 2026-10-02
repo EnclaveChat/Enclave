@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Three operators' stacks on one host, federated by a test foundation
-# (CI job `federation-e2e-tcp`; docs/13-operators.md).
+# (CI jobs `federation-e2e-tcp` and `federation-e2e-localnet`;
+# docs/13-operators.md).
 #
 #   ci/federation/gen.sh up      # build the federation and start it
 #   ci/federation/gen.sh e2e     # run enclave-e2e against it (restarts B midway)
@@ -17,6 +18,14 @@
 # descriptors the stacks sign, the way the foundation builds it. Every log
 # is witnessed by the other two stacks' witnesses, threshold 2. Stack c keeps
 # its server state in PostgreSQL (compose.postgres.yml).
+#
+# TRANSPORT=nym runs it over a local Nym mixnet instead
+# (ops/compose/compose.localnet.yml, image $LOCALNET_IMAGE from
+# ci/nym-localnet): every stack's ingress joins it, clients reach servers
+# only at their ingresses' Nym addresses through $NYMD (enclave-nymd from
+# the nym/ workspace), and stack b's push wakes cross the mixnet from its
+# push egress to the push relay's ingress. Needs $NYM_IMAGE (the
+# ops/docker/Dockerfile `nym` target) too.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -26,11 +35,31 @@ ADMIN=${ADMIN:-$ROOT/target/release/enclave-admin}
 E2E=${E2E:-$ROOT/target/release/enclave-e2e}
 STACKS=(a b c)
 PUSH_PORT=${PUSH_PORT:-8099}
+TRANSPORT=${TRANSPORT:-tcp}
+NYM_IMAGE=${NYM_IMAGE:-enclave-nym:ci}
+LOCALNET_IMAGE=${LOCALNET_IMAGE:-enclave-nym-localnet:ci}
+NYMD=${NYMD:-$ROOT/nym/target/release/enclave-nymd}
+LOCALNET=$WORK/localnet
+NYM_API=http://10.77.0.2:8000/
+
+ln_dc() {
+  LOCALNET_DIR=$LOCALNET LOCALNET_IMAGE=$LOCALNET_IMAGE \
+    docker compose -p nym-localnet -f "$ROOT/ops/compose/compose.localnet.yml" "$@"
+}
+
+# The profiles a stack runs with.
+profiles() {
+  local s=$1 p=()
+  [ "$s" = b ] && p+=(--profile push)
+  [ "$TRANSPORT" = nym ] && p+=(--profile nym)
+  echo "${p[@]}"
+}
 
 dc() {
   local s=$1 extra=()
   shift
   [ -f "$WORK/$s/compose.postgres.yml" ] && extra=(-f "$WORK/$s/compose.postgres.yml")
+  [ -f "$WORK/$s/compose.localnet-stack.yml" ] && extra+=(-f "$WORK/$s/compose.localnet-stack.yml")
   docker compose -p "e2e-$s" --project-directory "$WORK/$s" \
     -f "$WORK/$s/compose.yml" -f "$WORK/$s/compose.dev.yml" -f "$WORK/$s/compose.e2e.yml" \
     "${extra[@]}" "$@"
@@ -52,10 +81,33 @@ wait_healthy() {
   return 1
 }
 
+# A file from a service's volume (distroless images have no shell).
+fetch() { # stack service path dest
+  local i
+  for i in $(seq 1 150); do
+    dc "$1" cp "$2:$3" "$4" 2>/dev/null && test -s "$4" && return 0
+    sleep 2
+  done
+  dc "$1" logs --tail 50 "$2"
+  echo "no $3 in $1/$2" >&2
+  return 1
+}
+
+localnet_up() {
+  echo "== local mixnet"
+  mkdir -p "$LOCALNET"
+  chmod 0777 "$LOCALNET"
+  docker network create --subnet 10.77.0.0/24 enclave-nymnet >/dev/null 2>&1 || true
+  ln_dc up -d nym-api mix1 mix2 mix3 gateway
+  ln_dc run --rm -T topology
+  test -s "$LOCALNET/network.json"
+}
+
 up() {
   rm -rf "$WORK"
   mkdir -p "$WORK/foundation" "$WORK/tls"
   docker network create enclave-federation >/dev/null 2>&1 || true
+  [ "$TRANSPORT" = nym ] && localnet_up
 
   echo "== foundation key"
   "$ADMIN" foundation-keygen "$WORK/foundation.key" "$WORK/foundation/foundation.pub"
@@ -72,12 +124,15 @@ up() {
     chmod 0777 "$d/out"
     cp "$ROOT"/ops/compose/compose.yml "$ROOT"/ops/compose/compose.dev.yml \
        "$ROOT"/ops/compose/compose.e2e.yml "$d/"
+    [ "$TRANSPORT" = nym ] && cp "$ROOT"/ops/compose/compose.localnet-stack.yml "$d/"
     for f in "$ROOT"/ops/compose/config/*.toml.example; do
       cp "$f" "$d/config/$(basename "${f%.example}")"
     done
     for o in "${STACKS[@]}"; do [ "$o" != "$s" ] && others+=("\"http://witness-$o:7446\""); done
     sed -i "s|^witnesses = \[\]|witnesses = [$(IFS=,; echo "${others[*]}")]|" "$d/config/server.toml"
-    if [ "$s" = b ]; then
+    if [ "$s" = b ] && [ "$TRANSPORT" = nym ]; then
+      printf '\n[push]\nforward = "push-egress:7446"\n' >> "$d/config/server.toml"
+    elif [ "$s" = b ]; then
       printf '\n[push]\nforward = "push-relay:7445"\n' >> "$d/config/server.toml"
     fi
     cat >> "$d/config/front.toml" <<EOF
@@ -105,6 +160,8 @@ FRONT_HTTP_PORT=808$n
 FRONT_HTTPS_PORT=844$n
 RELAY_PORT=5182$n
 SERVER_PORT=744$n
+ENCLAVE_NYM_IMAGE=${NYM_IMAGE%:*}
+LOCALNET_DIR=$LOCALNET
 EOF
     cp "$WORK/foundation/foundation.pub" "$d/foundation/"
     if [ "$s" = c ]; then
@@ -129,6 +186,14 @@ EOF
   echo "== push relay (stack b)"
   dc b run --rm -T push-relay init >/dev/null
   dc b --profile push up -d push-relay
+  if [ "$TRANSPORT" = nym ]; then
+    # Its ingress on the mixnet; every stack's push egress sends there.
+    dc b --profile push up -d push-ingress
+    fetch b push-ingress /var/lib/enclave/public/push-ingress.addr "$WORK/push-ingress.addr"
+    for s in "${STACKS[@]}"; do
+      echo "PUSH_RELAY_NYM=$(tr -d '\n' < "$WORK/push-ingress.addr")" >> "$WORK/$s/.env"
+    done
+  fi
   for _ in $(seq 1 30); do
     dc b cp push-relay:/var/lib/enclave/public/push-relay-keys.bin "$WORK/push-relay-keys.bin" 2>/dev/null && break
     sleep 1
@@ -165,13 +230,19 @@ EOF
   echo "== start"
   for s in "${STACKS[@]}"; do
     cp "$WORK/foundation/server-list.bin" "$WORK/$s/foundation/"
-    if [ "$s" = b ]; then
-      dc "$s" --profile push up -d
-    else
-      dc "$s" up -d
-    fi
+    # Without the mixnet the push relay's ingress has nothing to join.
+    local scale=()
+    [ "$s" = b ] && [ "$TRANSPORT" != nym ] && scale=(--scale push-ingress=0)
+    # shellcheck disable=SC2046
+    dc "$s" $(profiles "$s") up -d "${scale[@]}"
   done
   for s in "${STACKS[@]}"; do wait_healthy "$s"; done
+  if [ "$TRANSPORT" = nym ]; then
+    for s in "${STACKS[@]}"; do
+      fetch "$s" ingress /var/lib/enclave/public/ingress.addr "$WORK/$s/ingress.addr"
+      echo "   $s ingress $(cat "$WORK/$s/ingress.addr")"
+    done
+  fi
 
   echo "== fronts serve their servers' descriptors over the Enclave TLS profile"
   for s in "${STACKS[@]}"; do
@@ -182,34 +253,50 @@ EOF
 
 servers_arg() {
   local s out=()
-  for s in "${STACKS[@]}"; do out+=("$(cat "$WORK/$s/server.id")=127.0.0.1:744$(n_of "$s")"); done
+  for s in "${STACKS[@]}"; do
+    if [ "$TRANSPORT" = nym ]; then
+      out+=("$(cat "$WORK/$s/server.id")=nym:$(tr -d '\n' < "$WORK/$s/ingress.addr")")
+    else
+      out+=("$(cat "$WORK/$s/server.id")=127.0.0.1:744$(n_of "$s")")
+    fi
+  done
   IFS=,; echo "${out[*]}"
 }
 
 e2e() {
   local common=(--state "$WORK/e2e" --servers "$(servers_arg)"
     --foundation "$WORK/foundation/foundation.pub" --server-list "$WORK/foundation/server-list.bin")
+  if [ "$TRANSPORT" = nym ]; then
+    common+=(--nymd "$NYMD")
+    export ENCLAVE_NYM_TOPOLOGY=$LOCALNET/network.json ENCLAVE_NYM_API=$NYM_API
+  fi
   "$E2E" setup "${common[@]}" \
     --push-relay-keys "$WORK/push-relay-keys.bin" \
     --push-listen "0.0.0.0:$PUSH_PORT" \
     --push-endpoint "http://host.docker.internal:$PUSH_PORT/up"
   echo "== restarting stack b"
-  dc b --profile push restart
+  # shellcheck disable=SC2046
+  dc b $(profiles b) restart
   wait_healthy b
   "$E2E" after-restart "${common[@]}"
 }
 
 down() {
   for s in "${STACKS[@]}"; do
-    [ -d "$WORK/$s" ] && dc "$s" --profile push down -v --remove-orphans || true
+    [ -d "$WORK/$s" ] && dc "$s" --profile push --profile nym down -v --remove-orphans || true
   done
   docker network rm enclave-federation >/dev/null 2>&1 || true
+  if [ "$TRANSPORT" = nym ]; then
+    ln_dc down -v --remove-orphans || true
+    docker network rm enclave-nymnet >/dev/null 2>&1 || true
+  fi
 }
 
 logs() {
   for s in "${STACKS[@]}"; do
-    [ -d "$WORK/$s" ] && dc "$s" --profile push logs --no-color --tail 200 || true
+    [ -d "$WORK/$s" ] && dc "$s" --profile push --profile nym logs --no-color --tail 200 || true
   done
+  [ "$TRANSPORT" = nym ] && ln_dc logs --no-color --tail 100 || true
 }
 
 case "${1:-}" in

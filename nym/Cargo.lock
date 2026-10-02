@@ -1801,9 +1801,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "enclave-nym",
+ "enclave-wire",
  "nym-client-core-gateways-storage",
  "nym-sdk",
+ "nym-topology",
  "tokio",
+ "url",
 ]
 
 [[package]]

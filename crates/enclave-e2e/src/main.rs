@@ -2,11 +2,18 @@
 //! run separately (CI job `federation-e2e-tcp`, `ci/federation/`).
 //!
 //! ```text
-//! enclave-e2e setup         --state DIR --servers A_ID=ADDR,B_ID=ADDR,C_ID=ADDR
-//!                           --foundation FILE --server-list FILE
+//! enclave-e2e setup         --state DIR --servers A_ID=ROUTE,B_ID=ROUTE,C_ID=ROUTE
+//!                           --foundation FILE --server-list FILE [--nymd PATH]
 //!                           [--push-relay-keys FILE --push-listen ADDR --push-endpoint URL]
 //! enclave-e2e after-restart --state DIR --servers … --foundation FILE --server-list FILE
 //! ```
+//!
+//! A route is `HOST:PORT` (the development TCP transport, CI job
+//! `federation-e2e-tcp`) or `nym:ADDRESS` (the stack's ingress, over the
+//! mixnet: CI job `federation-e2e-localnet`). Nym routes go through
+//! `enclave-nymd` at `--nymd PATH`, started with `--env` (so a local
+//! mixnet's `ENCLAVE_NYM_TOPOLOGY` and `ENCLAVE_NYM_API` reach it), as
+//! netd drives it on a device.
 //!
 //! Three people, one per stack (Ada on A, Ben on B, Cyrus on C). `setup`:
 //!
@@ -32,7 +39,7 @@
 use enclave_core::{Client, ContactCard, Event, Options};
 use enclave_crypto::pwhash::PwParams;
 use enclave_federation::{FoundationPublic, ServerList};
-use enclave_net::transport::{TcpTransport, Transport, parse_server};
+use enclave_net::transport::{NymTransport, Route, TcpTransport, Transport, parse_route};
 use enclave_service::config::flag;
 use enclave_store::FileKeystore;
 use std::collections::HashMap;
@@ -48,6 +55,8 @@ const PATIENCE: Duration = Duration::from_secs(180);
 struct World {
     state: PathBuf,
     transport: Arc<dyn Transport>,
+    // Kept so nymd lives as long as the transport.
+    _nymd: Option<tokio::process::Child>,
     servers: Vec<[u8; 16]>,
     foundation: FoundationPublic,
     list: Vec<u8>,
@@ -73,7 +82,7 @@ fn main() -> ExitCode {
         }
     };
     let result = rt.block_on(async {
-        let w = world(&args)?;
+        let w = world(&args).await?;
         match args.first().map(String::as_str) {
             Some("setup") => setup(&w, &args).await,
             Some("after-restart") => after_restart(&w).await,
@@ -92,16 +101,47 @@ fn main() -> ExitCode {
     }
 }
 
-fn world(args: &[String]) -> R<World> {
+/// The mixnet client, driven over its stdin and stdout.
+async fn start_nymd(bin: &str) -> R<(enclave_nym::pipe::PipeDriver, tokio::process::Child)> {
+    let mut child = tokio::process::Command::new(bin)
+        .arg("--env")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| format!("{bin}: {err}"))?;
+    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("no pipes to enclave-nymd".into());
+    };
+    // Connecting to the mixnet can take a while.
+    let driver = tokio::time::timeout(PATIENCE, enclave_nym::pipe::PipeDriver::new(stdout, stdin))
+        .await
+        .map_err(|_| "enclave-nymd didn't connect".to_string())?
+        .map_err(e)?;
+    Ok((driver, child))
+}
+
+async fn world(args: &[String]) -> R<World> {
     let need = |n: &str| flag(args, n).ok_or_else(|| format!("missing {n}"));
     let state = PathBuf::from(need("--state")?);
     std::fs::create_dir_all(&state).map_err(e)?;
-    let mut addrs = HashMap::new();
+    let mut tcp = HashMap::new();
+    let mut nym = HashMap::new();
     let mut servers = Vec::new();
     for s in need("--servers")?.split(',') {
-        let (id, addr) = parse_server(s).ok_or_else(|| format!("--servers: {s}"))?;
-        addrs.insert(id, addr);
-        servers.push(id);
+        match parse_route(s).ok_or_else(|| format!("--servers: {s}"))? {
+            (id, Route::Tcp(a)) => {
+                tcp.insert(id, a);
+                servers.push(id);
+            }
+            (id, Route::Nym(a)) => {
+                nym.insert(id, a);
+                servers.push(id);
+            }
+        }
+    }
+    if !tcp.is_empty() && !nym.is_empty() {
+        return Err("--servers: all TCP or all Nym".into());
     }
     if servers.len() != 3 {
         return Err("--servers: three stacks expected".into());
@@ -123,9 +163,27 @@ fn world(args: &[String]) -> R<World> {
                 .ok_or_else(|| "a server isn't in the list".to_string())
         })
         .collect::<R<Vec<_>>>()?;
+    let (transport, nymd): (Arc<dyn Transport>, _) = if nym.is_empty() {
+        (Arc::new(TcpTransport::new(tcp)), None)
+    } else {
+        let (driver, child) = start_nymd(&need("--nymd")?).await?;
+        eprintln!("enclave-e2e: on the mixnet as {}", {
+            use enclave_nym::MixnetDriver;
+            driver.address()
+        });
+        (
+            Arc::new(NymTransport::new(
+                Arc::new(driver),
+                nym,
+                NymTransport::TIMEOUT,
+            )),
+            Some(child),
+        )
+    };
     Ok(World {
         state,
-        transport: Arc::new(TcpTransport::new(addrs)),
+        transport,
+        _nymd: nymd,
         servers,
         foundation,
         list,

@@ -26,7 +26,7 @@
 
 use enclave_ingress::Stats;
 use enclave_nym::MixnetDriver;
-use enclave_nym_sdk::{NymDriver, Options, Role};
+use enclave_nym_sdk::{Network, NymDriver, Options, Role};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -101,7 +101,7 @@ async fn run(mode: &str, args: &[String], public: &std::path::Path) -> Result<()
     let driver = NymDriver::connect(Options {
         role,
         gateway: flag(args, "--gateway"),
-        from_env: args.iter().any(|a| a == "--env"),
+        network: Network::from_env(args.iter().any(|a| a == "--env")),
     })
     .await
     .map_err(|e| e.to_string())?;

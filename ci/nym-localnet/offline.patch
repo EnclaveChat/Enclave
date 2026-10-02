@@ -1,0 +1,68 @@
+diff --git a/nym-node/src/node/mod.rs b/nym-node/src/node/mod.rs
+index 360c815..b21a9b6 100644
+--- a/nym-node/src/node/mod.rs
++++ b/nym-node/src/node/mod.rs
+@@ -1478,7 +1478,12 @@ impl NymNode {
+         self.start_verloc_measurements();
+ 
+         // obtain the initial list of known network monitors
+-        let known_network_monitors = self.known_network_monitors().await?;
++        // (Enclave localnet: no chain, so none)
++        let known_network_monitors = if offline_localnet() {
++            Vec::new()
++        } else {
++            self.known_network_monitors().await?
++        };
+ 
+         let mut known_network_monitor_ips = HashSet::new();
+         let mut known_network_monitor_nodes: HashMap<IpAddr, Vec<NetworkMonitorAgentNode>> =
+@@ -1522,8 +1527,11 @@ impl NymNode {
+             .await?;
+ 
+         // setup nyx chain watcher (currently only used for updating the network monitors view)
+-        self.setup_nyx_chain_watcher(network_monitors_ref, noise_view.clone())
+-            .await?;
++        // (Enclave localnet: no chain to watch)
++        if !offline_localnet() {
++            self.setup_nyx_chain_watcher(network_monitors_ref, noise_view.clone())
++                .await?;
++        }
+ 
+         let active_clients_store = ActiveClientsStore::new();
+         let lp_nodes = network_refresher.lp_nodes();
+@@ -1597,3 +1605,10 @@ impl NymNode {
+         Ok(())
+     }
+ }
++
++/// Enclave localnet (`ENCLAVE_NYM_OFFLINE=1`, with `--local`): run with no
++/// nyxd and only a static nym-api mock; the topology is fixed and known to
++/// every client.
++pub(crate) fn offline_localnet() -> bool {
++    std::env::var("ENCLAVE_NYM_OFFLINE").is_ok_and(|v| v == "1")
++}
+diff --git a/nym-node/src/node/shared_network/refresher.rs b/nym-node/src/node/shared_network/refresher.rs
+index dc54a67..03d38bf 100644
+--- a/nym-node/src/node/shared_network/refresher.rs
++++ b/nym-node/src/node/shared_network/refresher.rs
+@@ -88,11 +88,15 @@ impl NetworkRefresher {
+             lp_nodes: Default::default(),
+         };
+ 
+-        this.obtain_initial_network(
+-            config.max_startup_waiting_period,
+-            config.min_mix_performance,
+-        )
+-        .await?;
++        // (Enclave localnet: there is no network to fetch; routing to
++        // private addresses is allowed in testnet mode)
++        if !crate::node::offline_localnet() {
++            this.obtain_initial_network(
++                config.max_startup_waiting_period,
++                config.min_mix_performance,
++            )
++            .await?;
++        }
+         Ok(this)
+     }
+ 

@@ -52,9 +52,47 @@ pub struct Options {
     pub role: Role,
     /// Ask for this gateway (identity key), or let nym-sdk choose.
     pub gateway: Option<String>,
-    /// Network details from the environment (`NYM_*` variables, for a
-    /// local mixnet or the sandbox), or mainnet.
-    pub from_env: bool,
+    /// Which mixnet ([`Network::from_env`] for `--env`).
+    pub network: Network,
+}
+
+/// Which mixnet to join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Network {
+    /// Nym's mainnet.
+    Mainnet,
+    /// Network details from `NYM_*` variables (the sandbox), as nym-sdk
+    /// reads them.
+    Env,
+    /// A local mixnet (`ci/nym-localnet`): its fixed topology from a file
+    /// and the one nym-api call a client makes (key-rotation information)
+    /// answered at `nym_api`.
+    Local {
+        /// `NymTopology` JSON.
+        topology: PathBuf,
+        /// Base URL of the nym-api stand-in.
+        nym_api: String,
+    },
+}
+
+impl Network {
+    /// For `--env`: a local mixnet if `ENCLAVE_NYM_TOPOLOGY` names a
+    /// topology file (with `ENCLAVE_NYM_API`, default
+    /// `http://nym-api:8000/`), else the `NYM_*` variables. Without
+    /// `--env`, mainnet.
+    pub fn from_env(env: bool) -> Self {
+        if !env {
+            return Network::Mainnet;
+        }
+        match std::env::var_os("ENCLAVE_NYM_TOPOLOGY") {
+            Some(t) => Network::Local {
+                topology: t.into(),
+                nym_api: std::env::var("ENCLAVE_NYM_API")
+                    .unwrap_or_else(|_| "http://nym-api:8000/".into()),
+            },
+            None => Network::Env,
+        }
+    }
 }
 
 fn client_error(e: impl std::fmt::Display) -> NymError {
@@ -82,10 +120,21 @@ impl NymDriver {
             // Every request carries all the reply blocks its reply needs.
             debug.reply_surbs.maximum_reply_surbs_rerequests = 0;
         }
-        let network = if opts.from_env {
-            nym_sdk::NymNetworkDetails::new_from_env()
-        } else {
-            nym_sdk::NymNetworkDetails::default()
+        let (network, topology) = match &opts.network {
+            Network::Mainnet => (nym_sdk::NymNetworkDetails::default(), None),
+            Network::Env => (nym_sdk::NymNetworkDetails::new_from_env(), None),
+            Network::Local { topology, nym_api } => {
+                let api = url::Url::parse(nym_api).map_err(client_error)?;
+                let provider =
+                    nym_topology::provider_trait::HardcodedTopologyProvider::new_from_file(
+                        topology,
+                    )
+                    .map_err(|e| client_error(format!("{}: {e}", topology.display())))?;
+                (
+                    nym_sdk::NymNetworkDetails::new_mainnet().with_nym_api_urls(vec![api]),
+                    Some(provider),
+                )
+            }
         };
         let mut client = match &opts.role {
             Role::Ingress { dir } => {
@@ -97,6 +146,9 @@ impl NymDriver {
                     .debug_config(debug);
                 if let Some(g) = &opts.gateway {
                     b = b.request_gateway(g.clone());
+                }
+                if let Some(p) = topology {
+                    b = b.custom_topology_provider(Box::new(p));
                 }
                 b.build()
                     .map_err(client_error)?
@@ -110,6 +162,9 @@ impl NymDriver {
                     .debug_config(debug);
                 if let Some(g) = &opts.gateway {
                     b = b.request_gateway(g.clone());
+                }
+                if let Some(p) = topology {
+                    b = b.custom_topology_provider(Box::new(p));
                 }
                 b.build()
                     .map_err(client_error)?

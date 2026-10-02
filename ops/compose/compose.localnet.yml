@@ -1,0 +1,120 @@
+# A local Nym mixnet (ci/nym-localnet; docs/09-transport.md §1): three mix
+# nodes and a gateway with fixed addresses on the `enclave-nymnet`
+# network, the nym-api stand-in, and a one-shot that writes the topology
+# every client uses to LOCALNET_DIR/network.json. Development and CI only.
+#
+#   docker network create --subnet 10.77.0.0/24 enclave-nymnet
+#   LOCALNET_DIR=$PWD/localnet docker compose -p nym-localnet -f compose.localnet.yml up -d
+#
+# Stacks join it with compose.localnet-stack.yml.
+
+name: nym-localnet
+
+x-node: &node
+  image: ${LOCALNET_IMAGE:-enclave-nym-localnet:ci}
+  restart: unless-stopped
+  environment:
+    ENCLAVE_NYM_OFFLINE: "1"
+
+services:
+  nym-api:
+    image: ${LOCALNET_IMAGE:-enclave-nym-localnet:ci}
+    restart: unless-stopped
+    entrypoint: ["python3", "-m", "http.server", "8000", "-d", "/srv/api"]
+    networks:
+      nymnet: { ipv4_address: 10.77.0.2 }
+
+  mix1:
+    <<: *node
+    command:
+      - run
+      - --id=mix1
+      - --mode=mixnode
+      - --public-ips=10.77.0.11
+      - --accept-operator-terms-and-conditions
+      - --local
+      - --mixnet-bind-address=0.0.0.0:1789
+      - --verloc-bind-address=0.0.0.0:1790
+      - --http-bind-address=0.0.0.0:8080
+      - --nym-api-urls=http://10.77.0.2:8000/
+      - --nyxd-urls=http://10.77.0.2:1/
+      - --unsafe-disable-replay-protection
+    networks:
+      nymnet: { ipv4_address: 10.77.0.11 }
+    depends_on: [nym-api]
+  mix2:
+    <<: *node
+    command:
+      - run
+      - --id=mix2
+      - --mode=mixnode
+      - --public-ips=10.77.0.12
+      - --accept-operator-terms-and-conditions
+      - --local
+      - --mixnet-bind-address=0.0.0.0:1789
+      - --verloc-bind-address=0.0.0.0:1790
+      - --http-bind-address=0.0.0.0:8080
+      - --nym-api-urls=http://10.77.0.2:8000/
+      - --nyxd-urls=http://10.77.0.2:1/
+      - --unsafe-disable-replay-protection
+    networks:
+      nymnet: { ipv4_address: 10.77.0.12 }
+    depends_on: [nym-api]
+  mix3:
+    <<: *node
+    command:
+      - run
+      - --id=mix3
+      - --mode=mixnode
+      - --public-ips=10.77.0.13
+      - --accept-operator-terms-and-conditions
+      - --local
+      - --mixnet-bind-address=0.0.0.0:1789
+      - --verloc-bind-address=0.0.0.0:1790
+      - --http-bind-address=0.0.0.0:8080
+      - --nym-api-urls=http://10.77.0.2:8000/
+      - --nyxd-urls=http://10.77.0.2:1/
+      - --unsafe-disable-replay-protection
+    networks:
+      nymnet: { ipv4_address: 10.77.0.13 }
+    depends_on: [nym-api]
+  gateway:
+    <<: *node
+    command:
+      - run
+      - --id=gateway
+      - --mode=entry-gateway
+      - --public-ips=10.77.0.21
+      - --entry-bind-address=0.0.0.0:9000
+      - --enforce-zk-nyms=false
+      - --lp-use-mock-ecash=true
+      - --accept-operator-terms-and-conditions
+      - --local
+      - --mixnet-bind-address=0.0.0.0:1789
+      - --verloc-bind-address=0.0.0.0:1790
+      - --http-bind-address=0.0.0.0:8080
+      - --nym-api-urls=http://10.77.0.2:8000/
+      - --nyxd-urls=http://10.77.0.2:1/
+      - --unsafe-disable-replay-protection
+    networks:
+      nymnet: { ipv4_address: 10.77.0.21 }
+    depends_on: [nym-api]
+
+  topology:
+    image: ${LOCALNET_IMAGE:-enclave-nym-localnet:ci}
+    entrypoint: ["python3", "/usr/local/bin/enclave-localnet-topology"]
+    command:
+      - /localnet/network.json
+      - mix=10.77.0.11:1789:8080
+      - mix=10.77.0.12:1789:8080
+      - mix=10.77.0.13:1789:8080
+      - gateway=10.77.0.21:1789:8080:9000
+    volumes:
+      - ${LOCALNET_DIR:?set LOCALNET_DIR}:/localnet
+    networks: [nymnet]
+    depends_on: [mix1, mix2, mix3, gateway]
+
+networks:
+  nymnet:
+    external: true
+    name: enclave-nymnet

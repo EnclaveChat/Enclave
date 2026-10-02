@@ -230,6 +230,60 @@ jobs:
       - if: always()
         run: ci/federation/gen.sh down
 
+  federation-e2e-localnet:
+    name: federation e2e (3 stacks over a local Nym mixnet)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            . -> target
+            nym -> target
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Server image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ops/docker/Dockerfile
+          target: server
+          tags: enclave-server:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Nym ingress image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ops/docker/Dockerfile
+          target: nym
+          tags: enclave-nym:ci
+          load: true
+          cache-from: type=gha,scope=nym
+          cache-to: type=gha,mode=max,scope=nym
+      - name: Local mixnet image (nym-node 1.21.5, offline patch)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ci/nym-localnet
+          file: ci/nym-localnet/Dockerfile
+          tags: enclave-nym-localnet:ci
+          load: true
+          cache-from: type=gha,scope=localnet
+          cache-to: type=gha,mode=max,scope=localnet
+      - name: Host tools
+        run: |
+          cargo build --release --locked -p enclave-admin -p enclave-e2e
+          (cd nym && cargo build --release --locked -p enclave-nymd)
+      - name: Three stacks and a mixnet, one foundation
+        run: TRANSPORT=nym ci/federation/gen.sh up
+      - name: End to end over the mixnet, with a restart of one stack
+        run: TRANSPORT=nym ci/federation/gen.sh e2e
+      - if: failure()
+        run: TRANSPORT=nym ci/federation/gen.sh logs
+      - if: always()
+        run: TRANSPORT=nym ci/federation/gen.sh down
+
   done-gate:
     name: completion gate (report)
     runs-on: ubuntu-24.04

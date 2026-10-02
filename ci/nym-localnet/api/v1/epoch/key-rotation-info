@@ -1,0 +1,1 @@
+{"key_rotation_state":{"validity_epochs":1000000,"initial_epoch_id":0},"current_absolute_epoch_id":0,"current_epoch_start":"2026-01-01T00:00:00Z","epoch_duration":{"secs":3600,"nanos":0},"progress":{"current_key_rotation_id":0,"current_rotation_starting_epoch":0,"current_rotation_ending_epoch":999999}}

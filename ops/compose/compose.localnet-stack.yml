@@ -1,0 +1,40 @@
+# A stack on the local mixnet (compose.localnet.yml): its ingress and push
+# egress join `enclave-nymnet` and use the localnet's topology and nym-api
+# stand-in instead of mainnet. Development and CI only.
+#
+#   docker compose -f compose.yml -f compose.localnet-stack.yml --profile nym up -d
+
+x-localnet: &localnet
+  environment:
+    ENCLAVE_NYM_TOPOLOGY: /localnet/network.json
+    ENCLAVE_NYM_API: http://10.77.0.2:8000/
+
+services:
+  ingress:
+    <<: *localnet
+    command: ["run", "--server", "server:7443", "--env"]
+    volumes:
+      - ingress-data:/var/lib/enclave/ingress
+      - public:/var/lib/enclave/public
+      - ${LOCALNET_DIR:?set LOCALNET_DIR}:/localnet:ro
+    networks: [backend, egress, nymnet]
+  push-egress:
+    <<: *localnet
+    command: ["forward", "--listen", "0.0.0.0:7446", "--to", "${PUSH_RELAY_NYM:-}", "--env"]
+    volumes:
+      - push-egress-data:/var/lib/enclave/public
+      - ${LOCALNET_DIR:?set LOCALNET_DIR}:/localnet:ro
+    networks: [backend, egress, nymnet]
+  push-ingress:
+    <<: *localnet
+    command: ["oneway", "--relay", "push-relay:7445", "--env"]
+    volumes:
+      - push-ingress-data:/var/lib/enclave/ingress
+      - public:/var/lib/enclave/public
+      - ${LOCALNET_DIR:?set LOCALNET_DIR}:/localnet:ro
+    networks: [backend, egress, nymnet]
+
+networks:
+  nymnet:
+    external: true
+    name: enclave-nymnet

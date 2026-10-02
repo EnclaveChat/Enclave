@@ -16,8 +16,9 @@ workspace = true
 enclave-core = { path = "../enclave-core" }
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-federation = { path = "../enclave-federation" }
-enclave-net = { path = "../enclave-net" }
+enclave-net = { path = "../enclave-net", features = ["nym"] }
+enclave-nym = { path = "../enclave-nym" }
 enclave-push-relay = { path = "../enclave-push-relay" }
 enclave-service = { path = "../enclave-service" }
 enclave-store = { path = "../enclave-store" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
