@@ -77,6 +77,10 @@ pub enum FedError {
     /// Older than (or the same as) what the client already holds.
     #[error("not newer than the list held")]
     Stale,
+    /// Not what the server's key-transparency log commits to (or the log's
+    /// answer didn't verify under the pinned keys and witnesses).
+    #[error("not the descriptor the server's log commits to")]
+    NotLogged,
     /// Signing failed.
     #[error("signing failed")]
     Crypto,

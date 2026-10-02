@@ -309,6 +309,32 @@ pub fn verify_lookup(
     Ok((r.value.0, r.version, trusted))
 }
 
+/// Verify a lookup of a server's committed descriptor digest
+/// ([`KtLog::commit_descriptor`]) the way [`verify_lookup`] verifies a
+/// name. Returns the 64-byte digest and the trusted head time.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_descriptor_lookup(
+    policy: &WitnessPolicy,
+    server_key: &CompositePublic,
+    server_operator: &str,
+    vrf_public: &[u8],
+    sh: &SignedHead,
+    proof: LookupProof,
+    now: u64,
+) -> Result<([u8; 64], u64)> {
+    let trusted = policy.check(sh, server_key, server_operator, now)?;
+    let r = akd::verify::lookup_verify::<EnclaveKtConfig>(
+        vrf_public,
+        sh.head.root,
+        sh.head.epoch,
+        AkdLabel(DESCRIPTOR_LABEL.to_vec()),
+        proof,
+    )
+    .map_err(|_| KtError::Lookup)?;
+    let digest = r.value.0.try_into().map_err(|_| KtError::Lookup)?;
+    Ok((digest, trusted))
+}
+
 /// A witness as the log's server reaches it: in the same process
 /// ([`Witness`], development and tests) or another operator's service
 /// over HTTPS (`enclave_witness::HttpWitness`).

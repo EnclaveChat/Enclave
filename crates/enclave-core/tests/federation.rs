@@ -1,8 +1,10 @@
 //! Three servers held together by the foundation's list (`docs/12-servers.md`
 //! §4): people on different servers find each other by username through
 //! pins that come only from the list, add each other and talk; cards carry
-//! the home server's domain; the list moves forward from the home server
-//! and never back; a list from any other key is refused.
+//! the home server's domain; each server's descriptor is taken only if
+//! its own log commits to it and it is the server's; the list moves
+//! forward from the home server and never back; a list from any other key
+//! is refused.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use enclave_core::{Client, CoreError, Event, ListUpdate, Options};
@@ -106,6 +108,43 @@ async fn three_servers_one_list() {
             "{ev:?}"
         );
     }
+
+    // Each server's descriptor, checked against the digest its own log
+    // commits to under the witness quorum.
+    for (i, d) in ["a.test", "b.test", "c.test"].iter().enumerate() {
+        let desc = cy.fetch_descriptor(&ids[i]).await.unwrap();
+        assert_eq!((desc.domain.as_str(), desc.id()), (*d, ids[i]));
+    }
+    assert_eq!(
+        cy.server_descriptor(&ids[1]).unwrap().unwrap().domain,
+        "b.test"
+    );
+    // B shows a descriptor its log doesn't carry: refused, and the one
+    // held is kept. Once committed, it's taken.
+    net.publish_descriptor(&ids[1], "nym-shown-to-one", false)
+        .unwrap();
+    assert!(matches!(
+        cy.fetch_descriptor(&ids[1]).await,
+        Err(CoreError::Federation(FedError::NotLogged))
+    ));
+    assert_eq!(
+        cy.server_descriptor(&ids[1]).unwrap().unwrap().nym_address,
+        ""
+    );
+    net.publish_descriptor(&ids[1], "nym-for-everyone", true)
+        .unwrap();
+    assert_eq!(
+        cy.fetch_descriptor(&ids[1]).await.unwrap().nym_address,
+        "nym-for-everyone"
+    );
+    // B serves A's (genuine) descriptor as its own: not B's identity.
+    let a_desc = cy.server_descriptor(&ids[0]).unwrap().unwrap().encode();
+    net.with_server(&ids[1], |s| s.set_descriptor(a_desc))
+        .unwrap();
+    assert!(matches!(
+        cy.fetch_descriptor(&ids[1]).await,
+        Err(CoreError::Federation(FedError::WrongId))
+    ));
 
     // A newer list, mirrored by A: Ada fetches it from her home server. An
     // older one offered afterwards changes nothing.

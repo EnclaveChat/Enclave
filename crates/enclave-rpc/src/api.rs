@@ -108,6 +108,8 @@ pub enum DirKind {
     Vault = 3,
     /// Username claims (put, keyed by the name) and key-transparency lookups
     /// (get: index 0 keyed by the name, later chunks by the returned reply id).
+    /// A get keyed by [`DESCRIPTOR_LOOKUP_KEY`] (no name) looks up the
+    /// server's committed descriptor digest instead.
     Username = 4,
     /// Device attestations about an account's manifest changes (co-sign or
     /// veto), keyed like the manifest.
@@ -374,6 +376,10 @@ pub fn name_key(name: &str) -> Option<[u8; 32]> {
     k[..b.len()].copy_from_slice(b);
     Some(k)
 }
+
+/// The key of a `DirKind::Username` get for the server's committed
+/// descriptor digest: the empty name, which no username can be.
+pub const DESCRIPTOR_LOOKUP_KEY: [u8; 32] = [0; 32];
 
 /// Inverse of [`name_key`].
 pub fn key_name(key: &[u8; 32]) -> Option<String> {

@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Default)]
 pub struct LocalTransport {
     servers: Arc<Mutex<HashMap<ServerId, Server>>>,
+    /// Identity keys of servers started with [`Self::add_federated_server`]
+    /// (descriptors are signed with them).
+    identities: Arc<Mutex<HashMap<ServerId, (String, enclave_crypto::sig::CompositeSigningKey)>>>,
     /// Seconds added to the system clock (to simulate time passing).
     offset: Arc<Mutex<u64>>,
 }
@@ -97,7 +100,57 @@ impl LocalTransport {
                 url: String::new(),
             })
             .collect();
+        if let Ok(mut m) = self.identities.lock() {
+            m.insert(id, (domain.to_string(), identity));
+        }
+        self.publish_descriptor(&id, "", true)
+            .ok_or(enclave_server::ServerError::Crypto(
+                enclave_crypto::Error::Rng,
+            ))?;
         Ok((listed, witnesses))
+    }
+
+    /// Have federated server `id` sign a descriptor (valid two days, its
+    /// current request key, `nym_address`) and serve it, committing its
+    /// digest to its key-transparency log if `commit` (as a real server
+    /// always does; `false` simulates a server showing a descriptor its log
+    /// doesn't carry).
+    pub fn publish_descriptor(
+        &self,
+        id: &ServerId,
+        nym_address: &str,
+        commit: bool,
+    ) -> Option<enclave_federation::ServerDescriptor> {
+        let now = self.now();
+        let ids = self.identities.lock().ok()?;
+        let (domain, identity) = ids.get(id)?;
+        let mut rng = enclave_crypto::rng::HedgedRng::new().ok()?;
+        self.with_server(id, |s| {
+            let kt = s.kt_info().map(|i| enclave_federation::KtKeys {
+                head_key: i.head_key,
+                vrf_public: i.vrf_public,
+            });
+            let d = enclave_federation::ServerDescriptor::sign(
+                identity,
+                domain,
+                &format!("operator-{domain}"),
+                &format!("family-{domain}"),
+                nym_address,
+                "",
+                enclave_federation::Policy::default(),
+                kt,
+                &[s.public_key()?],
+                now,
+                now + 2 * 86_400,
+                &mut rng,
+            )
+            .ok()?;
+            s.set_descriptor(d.encode());
+            if commit {
+                s.commit_descriptor(d.digest(), now)?.ok()?;
+            }
+            Some(d)
+        })?
     }
 
     /// Turn on usernames for server `id` under `domain`, with a development

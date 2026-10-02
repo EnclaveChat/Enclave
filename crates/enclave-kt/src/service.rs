@@ -30,8 +30,9 @@ enum Job {
         now: u64,
         reply: mpsc::Sender<Result<u64>>,
     },
+    /// A name, or the server's descriptor digest (`None`).
     Lookup {
-        name: String,
+        name: Option<String>,
         now: u64,
         reply: mpsc::Sender<Result<Vec<u8>>>,
     },
@@ -255,13 +256,19 @@ impl KtService {
 
     /// An encoded [`LookupReply`] for `name` against a fresh, cosigned head.
     pub fn lookup(&self, name: &str, now: u64) -> Result<Vec<u8>> {
+        self.lookup_label(Some(name.to_string()), now)
+    }
+
+    /// An encoded [`LookupReply`] for the server's committed descriptor
+    /// digest (checked with [`crate::log::verify_descriptor_lookup`]).
+    pub fn lookup_descriptor(&self, now: u64) -> Result<Vec<u8>> {
+        self.lookup_label(None, now)
+    }
+
+    fn lookup_label(&self, name: Option<String>, now: u64) -> Result<Vec<u8>> {
         let (reply, rx) = mpsc::channel();
         self.tx
-            .send(Job::Lookup {
-                name: name.to_string(),
-                now,
-                reply,
-            })
+            .send(Job::Lookup { name, now, reply })
             .map_err(|_| KtError::Stopped)?;
         rx.recv().map_err(|_| KtError::Stopped)?
     }
@@ -357,7 +364,10 @@ fn run(
                         log.heartbeat(now, &mut rng).await?;
                         cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
                     }
-                    let (proof, head) = log.lookup(&name).await?;
+                    let (proof, head) = match &name {
+                        Some(n) => log.lookup(n).await?,
+                        None => log.lookup_descriptor().await?,
+                    };
                     LookupReply { head, proof }.encode()
                 });
                 let _ = reply.send(r);

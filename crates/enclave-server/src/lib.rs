@@ -1191,10 +1191,15 @@ impl Server {
         let Some(kt) = self.kt_lookups() else {
             return (Status::NotFound, Reply::Empty);
         };
-        let Some(name) = api::key_name(&req.key) else {
-            return (Status::Malformed, Reply::Empty);
+        let found = if req.key == api::DESCRIPTOR_LOOKUP_KEY {
+            kt.lookup_descriptor(now)
+        } else {
+            let Some(name) = api::key_name(&req.key) else {
+                return (Status::Malformed, Reply::Empty);
+            };
+            kt.lookup(&name, now)
         };
-        let Ok(bytes) = kt.lookup(&name, now) else {
+        let Ok(bytes) = found else {
             return (Status::NotFound, Reply::Empty);
         };
         let Ok(id) = self.rng.array::<32>("server/kt-reply-id") else {
