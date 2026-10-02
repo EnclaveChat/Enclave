@@ -24,6 +24,8 @@ const TICK: Duration = Duration::from_secs(3);
 
 /// Where the account lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Made once at start; its size doesn't matter (paths are larger on Windows).
+#[allow(clippy::large_enum_variant)]
 pub enum Mode {
     /// Everything in memory with a local server and a demo contact.
     Demo,

@@ -383,12 +383,56 @@ async fn acme_certificate_from_pebble() {
         );
     }
 
-    // Fresh enough: kept, not renewed.
+    // Checked again: kept while it has more than RENEW_DAYS left, renewed
+    // otherwise (pebble picks among its profiles, one of them 6 days).
     let before = std::fs::read(dir.join("cert.pem")).unwrap();
+    let left = enclave_front::acme::days_left(&chain, t).unwrap();
     enclave_front::acme::ensure(&cfg, &challenges, &certs, t)
         .await
         .unwrap();
-    assert_eq!(std::fs::read(dir.join("cert.pem")).unwrap(), before);
+    let after = std::fs::read(dir.join("cert.pem")).unwrap();
+    if left > enclave_front::acme::RENEW_DAYS {
+        assert_eq!(after, before, "{left} days left: kept");
+    } else {
+        assert_ne!(after, before, "{left} days left: renewed");
+    }
     assert!(dir.join("acme-account.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A certificate on disk with more than `RENEW_DAYS` left is used as is:
+/// the CA (here an address nothing answers on) is never asked. One with
+/// fewer days left is renewed, so the unreachable CA makes that fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_certificate_on_disk_is_kept() {
+    let dir = temp("keep");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = |y| {
+        let mut p = rcgen::CertificateParams::new(vec!["front.test".to_string()]).unwrap();
+        p.not_after = rcgen::date_time_ymd(y, 1, 1);
+        p.self_signed(&key).unwrap().pem()
+    };
+    std::fs::write(dir.join("cert.pem"), cert(2100)).unwrap();
+    std::fs::write(dir.join("key.pem"), key.serialize_pem()).unwrap();
+    let cfg = enclave_front::acme::AcmeConfig {
+        domain: "front.test".into(),
+        email: None,
+        directory: "https://127.0.0.1:9/dir".into(),
+        ca_root: None,
+        data_dir: dir.clone(),
+    };
+    let certs = CertStore::default();
+    let challenges = Challenges::default();
+    enclave_front::acme::ensure(&cfg, &challenges, &certs, now() as i64)
+        .await
+        .unwrap();
+    assert!(certs.ready());
+    // Expiring within RENEW_DAYS: renewal is attempted (and fails here).
+    std::fs::write(dir.join("cert.pem"), cert(2000)).unwrap();
+    assert!(
+        enclave_front::acme::ensure(&cfg, &challenges, &CertStore::default(), now() as i64)
+            .await
+            .is_err()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
