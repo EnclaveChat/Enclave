@@ -11,7 +11,7 @@ Source: PLAN.md §9.4, §9.5, honest limit 5, Appendix A; `crates/enclave-net/sr
 | Profile | Tick delay | Poll target |
 |---|---|---|
 | Foreground | fixed 3 s | account inbox on even ticks; other mailboxes on odd ticks by smooth weighted round robin; inbox on every tick if there are no other mailboxes |
-| Background | exponential, mean 120 s (Poisson process) | same as Foreground |
+| Background | exponential, mean 120 s (Poisson process) | account inbox on 3 of every 4 ticks; other mailboxes on every 4th (`Scheduler::other_mailbox_period`, `Client::sync_round_every`); inbox on every tick if there are no other mailboxes |
 | Maximum | fixed 3 s | same as Foreground |
 
 Each tick sends one 16,384 B unit (real or cover) and one 2,048 B poll. Bulk bursts are allowed in Foreground and Background and disabled in Maximum.
@@ -178,7 +178,7 @@ D_poll_reply  the poll's reply over SURBs ≈ 1.0–1.5 s
 | Foreground or Maximum, inbox only | 1.5 | 1.0–1.5 | 1.5 | 1.0–1.5 | **5.0–6.0 s** |
 | Foreground or Maximum, other mailboxes present | 1.5 | 1.0–1.5 | 3.0 | 1.0–1.5 | **6.5–7.5 s** |
 | Background, inbox only (no push) | 1.5 | 1.0–1.5 | 83.8 (§7.3) | 1.0–1.5 | **≈88 s** |
-| Background, other mailboxes present (no push) | 1.5 | 1.0–1.5 | 136.2 (§7.3) | 1.0–1.5 | **≈140 s** |
+| Background, other mailboxes present (no push) | 1.5 | 1.0–1.5 | 107.7 (§7.3) | 1.0–1.5 | **≈112 s** |
 
 PLAN's "≈5–6 s" holds when the inbox is polled every tick. With other mailboxes in the rotation the median rises by about 1.5 s (`00-overview.md` §9, I-9).
 
@@ -189,10 +189,10 @@ Background ticks are a Poisson process with mean 120 s, so the wait from a messa
 | Inbox polled on | Median wait | P(wait ≤ 115 s) | Median `L` (sender in Foreground) | Status |
 |---|---|---|---|---|
 | Every tick | 83.8 s | 61.5% | ≈88 s | implemented when the inbox is the only mailbox |
-| 3 of every 4 ticks | 107.7 s | 52.3% | ≈112 s | proposed in the M0 draft; not implemented |
-| Every other tick | 136.2 s | 43.6% | ≈140 s | implemented when other mailboxes are present |
+| 3 of every 4 ticks | 107.7 s | 52.3% | ≈112 s | implemented in Background when other mailboxes are present |
+| Every other tick | 136.2 s | 43.6% | ≈140 s | Foreground and Maximum pattern; not used in Background |
 
-PLAN's "≤2 min" in Background holds for the median only if the inbox is polled on at least 3 of every 4 Background ticks. The implemented scheduler alternates strictly in every profile, so with other mailboxes present the Background median is ≈140 s. Either the scheduler changes (the 1-in-4 pattern keeps exactly one poll per tick, so the traffic shape is unchanged), or PLAN's Background latency figure changes (`09-transport.md` Open questions).
+PLAN's "≤2 min" in Background holds for the median only if the inbox is polled on at least 3 of every 4 Background ticks, so that is what Background does (test `background_polls_the_inbox_three_ticks_in_four`). The pattern keeps exactly one poll per tick, so the traffic shape is unchanged; groups are read on every 4th tick instead of every other one.
 
 ## 8. Server-side scale
 
@@ -213,4 +213,4 @@ If any measured data rate falls outside ±20% of §3 to §5, the tick length is 
 1. The Nym SURB size is not known; if a reply of `k` packets needs `k` SURBs of several hundred bytes each, a poll may need 3 or more packets rather than PLAN's 1 to 2, raising every figure above by about 2 to 4%.
 2. Whether Nym loop cover returning to the client counts toward the downlink budget in the same way on all platforms (it does in this model).
 3. Every request gets a reply unit in the implemented transports (§1, §2.1). Meeting PLAN's data budget requires sending writes and cover units without reply SURBs. Dropping those replies also removes the only delivery status a sender gets for a write; delivery would then be confirmed by receipts only.
-4. The Background median latency with other mailboxes present is ≈140 s as implemented (§7.3), above PLAN's "≤2 min".
+4. **Resolved:** the Background median latency with other mailboxes present was ≈140 s; Background now polls the inbox on 3 of every 4 ticks (≈112 s, §7.3).

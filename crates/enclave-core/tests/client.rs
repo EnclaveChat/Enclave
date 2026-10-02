@@ -1977,6 +1977,19 @@ async fn sync_in_rounds() {
         texts.contains(&"in one".to_string()) && texts.contains(&"in two".to_string()),
         "{texts:?}"
     );
+
+    // In Background groups get one round in four: rounds 0–2 read the
+    // inbox only, round 3 a group.
+    mo.send_group_text(&g1, "later").await.unwrap();
+    for r in 0..3 {
+        let ev = ada.sync_round_every(r, 4).await.unwrap();
+        assert!(group_texts(&ev).is_empty(), "round {r}: {ev:?}");
+    }
+    let mut later = Vec::new();
+    for r in 3..12 {
+        later.extend(ada.sync_round_every(r, 4).await.unwrap());
+    }
+    assert!(group_texts(&later).contains(&"later".to_string()));
 }
 
 /// Archive, pin to the top and mute: local to this device. A new message

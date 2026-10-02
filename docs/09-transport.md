@@ -184,7 +184,7 @@ There are exactly three profiles, identical in every client, and no per-user or 
 | Profile | When | Tick delay (`mean_tick`, `poisson`) | Bulk bursts (`allows_bulk`) | Data (estimate, PLAN's 1-down model; M4 must land within ±20%) | Median text latency (estimate) |
 |---|---|---|---|---|---|
 | **Foreground** | App visible | fixed 3 s | allowed | ≈60–70 MB/h | ≈5–6 s without other mailboxes; ≈6.5–7.5 s with |
-| **Background** | Android foreground service, desktop tray | exponential, mean 120 s | allowed | ≈35–40 MB/day | ≈88 s without other mailboxes; ≈140 s with |
+| **Background** | Android foreground service, desktop tray | exponential, mean 120 s | allowed | ≈35–40 MB/day | ≈88 s without other mailboxes; ≈112 s with (other mailboxes on every 4th tick) |
 | **Maximum privacy** | Opt-in; Android and desktop always, iOS only while open | fixed 3 s | not allowed | ≈1.5–1.7 GB/day | as Foreground |
 | Background (iOS) | Not possible (the OS suspends the app) | none | — | 0 | On open, or on push |
 
@@ -254,7 +254,7 @@ Not implemented yet: `BLOB_ALLOC` with Privacy Pass quotas, client-side chunk se
 
 ## Open questions
 
-1. PLAN §9.3 polls the inbox in slot 1 and rotates groups in slot 2. The implementation alternates strictly in all profiles. In Background this puts the median text latency at about 140 s when other mailboxes are polled, above PLAN's "≤2 min"; the M0 draft proposed using the second slot on only every 4th Background tick (median ≈112 s). The scheduler needs that change, or PLAN's Background latency figure needs to change.
+1. **Resolved:** PLAN §9.3 polls the inbox in slot 1 and rotates groups in slot 2. Strict alternation put the Background median at ≈140 s with other mailboxes; Background now gives the other mailboxes every 4th tick (median ≈112 s, within "≤2 min"); Foreground and Maximum alternate (`math/cover-traffic.md` §7.3).
 2. **Resolved:** PLAN §9.2's replay cache of request ciphertexts per key is built (§2.3).
 3. PLAN §9.2 says old daily keys are deleted; the implementation keeps the previous day's key until the next rotation rather than for a short grace window. Deleting it after a grace period needs a timer in the server.
 4. Read credentials are static and inbox addresses do not rotate (§3.1). PLAN §9.3 derives weekly addresses and daily credentials from an inbox seed; the implementation intentionally starts simpler. This needs to be implemented before a server can be prevented from linking a device's polls across weeks.

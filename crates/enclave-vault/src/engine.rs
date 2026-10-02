@@ -2320,12 +2320,17 @@ impl Engine {
                 Err(e) => eprintln!("enclave-vault: server list: {e}"),
             }
         }
+        // Groups get one round in this many (fewer in Background).
+        let period = match self.shaper.as_ref().map(|s| s.shaping()) {
+            Some(Shaping::On(p)) => enclave_net::schedule::Scheduler::other_mailbox_period(p),
+            _ => 2,
+        } as u64;
         let shaped = self.shaper.is_some();
         let round = self.round;
         self.round = self.round.wrapping_add(1);
         if let Some(c) = self.client.as_mut() {
             let result = if shaped {
-                c.sync_round(round).await
+                c.sync_round_every(round, period).await
             } else {
                 c.sync().await
             };

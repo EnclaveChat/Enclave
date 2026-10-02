@@ -1045,6 +1045,15 @@ impl Client {
     /// makes only a few requests, so at one poll per tick the app stays
     /// responsive between rounds.
     pub async fn sync_round(&mut self, round: u64) -> Result<Vec<Event>> {
+        self.sync_round_every(round, 2).await
+    }
+
+    /// Like [`Client::sync_round`], with groups read in one round of every
+    /// `period` (at least 2) and the account's inboxes in the others: the
+    /// scheduler's `other_mailbox_period` for the profile (4 in
+    /// Background).
+    pub async fn sync_round_every(&mut self, round: u64, period: u64) -> Result<Vec<Event>> {
+        let period = period.max(2);
         let now = self.now();
         let groups: Vec<[u8; 32]> = self
             .groups
@@ -1052,10 +1061,10 @@ impl Client {
             .filter(|(_, e)| !e.left)
             .map(|(k, _)| *k)
             .collect();
-        let mut events = if round.is_multiple_of(2) || groups.is_empty() {
+        let mut events = if round % period != period - 1 || groups.is_empty() {
             self.sync_inboxes(now).await?
         } else {
-            let gid = groups[((round / 2) % groups.len() as u64) as usize];
+            let gid = groups[((round / period) % groups.len() as u64) as usize];
             self.sync_group(&gid, now).await?
         };
         if round % UPKEEP_EVERY == 1 {

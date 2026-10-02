@@ -171,10 +171,23 @@ impl Scheduler {
         mean.mul_f64(-u.ln())
     }
 
+    /// One tick in this many polls the other mailboxes; the rest poll the
+    /// account inbox. Every other tick, except in Background, where ticks
+    /// are rare and every 4th keeps the median text latency under 2 min
+    /// (`docs/09-transport.md` §6).
+    pub fn other_mailbox_period(profile: Profile) -> usize {
+        match profile {
+            Profile::Background => 4,
+            _ => 2,
+        }
+    }
+
     fn next_poll(&mut self) -> PollTarget {
-        // Even ticks poll the account inbox; odd ticks go to the other mailboxes
-        // by weighted round robin (smooth weighted), falling back to the inbox.
-        let idx = if self.rr.is_multiple_of(2) || self.mailboxes.len() <= 1 {
+        // Most ticks poll the account inbox; one in `period` goes to the
+        // other mailboxes by weighted round robin (smooth weighted), falling
+        // back to the inbox.
+        let period = Self::other_mailbox_period(self.profile);
+        let idx = if self.rr % period != period - 1 || self.mailboxes.len() <= 1 {
             0
         } else {
             let total: u64 = self
@@ -277,6 +290,22 @@ mod tests {
         assert_eq!(counts[0], 200);
         assert_eq!(counts[1], 150);
         assert_eq!(counts[2], 50);
+    }
+
+    /// In Background the other mailboxes get every 4th tick.
+    #[test]
+    fn background_polls_the_inbox_three_ticks_in_four() {
+        let mut rng = HedgedRng::new().unwrap();
+        let mut s = Scheduler::new(Profile::Background, boxes());
+        let mut counts = [0usize; 3];
+        for i in 0..400 {
+            let t = s.tick(&mut rng);
+            if i % 4 != 3 {
+                assert_eq!(t.poll.mailbox, 0);
+            }
+            counts[t.poll.mailbox] += 1;
+        }
+        assert_eq!(counts, [300, 75, 25]);
     }
 
     #[test]
