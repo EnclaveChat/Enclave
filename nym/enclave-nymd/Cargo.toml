@@ -1,0 +1,19 @@
+[package]
+name = "enclave-nymd"
+description = "A device's mixnet client, driven by enclave-netd over its stdin and stdout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+enclave-nym = { path = "../../crates/enclave-nym" }
+enclave-nym-sdk = { path = "../enclave-nym-sdk" }
+enclave-sandbox = { path = "../../crates/enclave-sandbox" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }

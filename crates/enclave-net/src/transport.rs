@@ -36,6 +36,10 @@ pub trait Transport: Send + Sync {
     /// network transport checks the signed key bundle against the id
     /// ([`verify_key_bundle`]).
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey>;
+    /// Reach `server` by `route` from now on (a Nym address from the
+    /// server list or a descriptor). A transport that can't carry that
+    /// kind of route ignores it.
+    fn set_route(&self, _server: ServerId, _route: Route) {}
     /// Current time, Unix seconds. The system clock, except in simulations
     /// that move time forward.
     fn now(&self) -> u64 {
@@ -56,10 +60,36 @@ pub fn decode_server_key(b: &[u8]) -> Result<ServerKey> {
     ServerKey::from_bytes(b).map_err(|_| NetError::BadReply)
 }
 
-/// Parse `HEXID=HOST:PORT` (a 32-hex-digit server id and its address), the
-/// form `--server` takes in the app, the vault and netd.
-pub fn parse_server(s: &str) -> Option<(ServerId, SocketAddr)> {
-    let (hex, addr) = s.split_once('=')?;
+/// How a server is reached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The development TCP transport: `HOST:PORT`.
+    Tcp(SocketAddr),
+    /// Over the mixnet, to the server's ingress: `nym:ADDRESS`.
+    Nym(String),
+}
+
+impl Route {
+    /// Parse `HOST:PORT` or `nym:ADDRESS`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.strip_prefix("nym:") {
+            Some(a) if !a.is_empty() => Some(Route::Nym(a.into())),
+            Some(_) => None,
+            None => s.parse().ok().map(Route::Tcp),
+        }
+    }
+}
+
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Route::Tcp(a) => write!(f, "{a}"),
+            Route::Nym(a) => write!(f, "nym:{a}"),
+        }
+    }
+}
+
+fn parse_id(hex: &str) -> Option<ServerId> {
     if hex.len() != 32 {
         return None;
     }
@@ -67,7 +97,23 @@ pub fn parse_server(s: &str) -> Option<(ServerId, SocketAddr)> {
     for (i, b) in id.iter_mut().enumerate() {
         *b = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
-    Some((id, addr.parse().ok()?))
+    Some(id)
+}
+
+/// Parse `HEXID=HOST:PORT` or `HEXID=nym:ADDRESS` (a 32-hex-digit server
+/// id and its route), the form `--server` takes in the app, the vault and
+/// netd.
+pub fn parse_route(s: &str) -> Option<(ServerId, Route)> {
+    let (hex, route) = s.split_once('=')?;
+    Some((parse_id(hex)?, Route::parse(route)?))
+}
+
+/// Parse `HEXID=HOST:PORT` (a TCP route only; see [`parse_route`]).
+pub fn parse_server(s: &str) -> Option<(ServerId, SocketAddr)> {
+    match parse_route(s)? {
+        (id, Route::Tcp(a)) => Some((id, a)),
+        _ => None,
+    }
 }
 
 /// Check a key bundle (the reply to a zero-length request) against the id
@@ -80,19 +126,24 @@ pub fn verify_key_bundle(server: &ServerId, bundle: &[u8], now: u64) -> Result<S
 
 /// Development transport: length-prefixed frames over TCP.
 pub struct TcpTransport {
-    addrs: HashMap<ServerId, SocketAddr>,
+    addrs: std::sync::RwLock<HashMap<ServerId, SocketAddr>>,
 }
 
 impl TcpTransport {
-    /// New transport with a static address book.
+    /// New transport with an address book (TCP routes added later go in
+    /// it too).
     pub fn new(addrs: HashMap<ServerId, SocketAddr>) -> Self {
-        Self { addrs }
+        Self {
+            addrs: std::sync::RwLock::new(addrs),
+        }
     }
 
     async fn roundtrip(&self, server: &ServerId, frame: &[u8]) -> Result<Vec<u8>> {
         let addr = self
             .addrs
-            .get(server)
+            .read()
+            .ok()
+            .and_then(|a| a.get(server).copied())
             .ok_or_else(|| NetError::Unreachable("unknown server".into()))?;
         let mut s = TcpStream::connect(addr).await?;
         s.write_all(&(frame.len() as u32).to_be_bytes()).await?;
@@ -118,6 +169,12 @@ impl Transport for TcpTransport {
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
         let bundle = self.roundtrip(server, &[]).await?;
         verify_key_bundle(server, &bundle, self.now())
+    }
+
+    fn set_route(&self, server: ServerId, route: Route) {
+        if let (Route::Tcp(a), Ok(mut addrs)) = (route, self.addrs.write()) {
+            addrs.insert(server, a);
+        }
     }
 }
 
@@ -239,13 +296,6 @@ impl NymTransport {
         }
     }
 
-    /// Reach `server` at Nym address `address` from now on.
-    pub fn set_route(&self, server: ServerId, address: String) {
-        if let Ok(mut r) = self.routes.write() {
-            r.insert(server, address);
-        }
-    }
-
     /// Requests waiting for a reply.
     pub fn in_flight(&self) -> usize {
         self.pending.lock().map(|p| p.len()).unwrap_or(0)
@@ -312,5 +362,11 @@ impl Transport for NymTransport {
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
         let bundle = self.roundtrip(server, Vec::new()).await?;
         verify_key_bundle(server, &bundle, self.now())
+    }
+
+    fn set_route(&self, server: ServerId, route: Route) {
+        if let (Route::Nym(a), Ok(mut r)) = (route, self.routes.write()) {
+            r.insert(server, a);
+        }
     }
 }

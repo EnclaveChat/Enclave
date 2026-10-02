@@ -47,8 +47,13 @@ pub fn netd_binary() -> Option<std::path::PathBuf> {
 }
 
 impl Link {
-    fn spawn(bin: &std::path::Path, servers: &[(ServerId, String)]) -> std::io::Result<Self> {
+    fn spawn(
+        bin: &std::path::Path,
+        servers: &[(ServerId, String)],
+        extra: &[String],
+    ) -> std::io::Result<Self> {
         let mut cmd = Command::new(bin);
+        cmd.args(extra);
         for (id, addr) in servers {
             let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
             cmd.args(["--server", &format!("{hex}={addr}")]);
@@ -102,12 +107,16 @@ impl Link {
 }
 
 impl PipeTransport {
-    /// Start netd, and [`SPARES`] more, knowing `servers` (id and dev
-    /// address). Must run inside a tokio runtime, before the vault confines
-    /// itself.
-    pub fn spawn(bin: &std::path::Path, servers: &[(ServerId, String)]) -> std::io::Result<Self> {
-        let mut links = vec![Link::spawn(bin, servers)?];
-        links.extend((0..SPARES).filter_map(|_| Link::spawn(bin, servers).ok()));
+    /// Start netd, and [`SPARES`] more, knowing `servers` (id and route,
+    /// `nym:ADDRESS` or `HOST:PORT`), with `extra` arguments. Must run
+    /// inside a tokio runtime, before the vault confines itself.
+    pub fn spawn(
+        bin: &std::path::Path,
+        servers: &[(ServerId, String)],
+        extra: &[String],
+    ) -> std::io::Result<Self> {
+        let mut links = vec![Link::spawn(bin, servers, extra)?];
+        links.extend((0..SPARES).filter_map(|_| Link::spawn(bin, servers, extra).ok()));
         Ok(Self { links })
     }
 
@@ -161,5 +170,17 @@ impl Transport for PipeTransport {
         let server = *server;
         let b = self.call(|id| NetRequest::ServerKey { id, server }).await?;
         enclave_net::transport::decode_server_key(&b)
+    }
+
+    fn set_route(&self, server: ServerId, route: enclave_net::transport::Route) {
+        // Every netd, so a spare taking over knows the route too.
+        let body = NetRequest::SetRoute {
+            server,
+            route: route.to_string(),
+        }
+        .encode();
+        for l in &self.links {
+            let _ = l.out.send(body.clone());
+        }
     }
 }

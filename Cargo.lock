@@ -2659,12 +2659,16 @@ dependencies = [
 name = "enclave-netd"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "enclave-crypto",
  "enclave-federation",
+ "enclave-ingress",
  "enclave-ipc",
  "enclave-net",
+ "enclave-nym",
  "enclave-rpc",
  "enclave-sandbox",
+ "enclave-wire",
  "tokio",
 ]
 

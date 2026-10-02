@@ -18,12 +18,17 @@ path = "src/main.rs"
 
 [dependencies]
 enclave-ipc = { path = "../enclave-ipc" }
-enclave-net = { path = "../enclave-net" }
+enclave-net = { path = "../enclave-net", features = ["nym"] }
+enclave-nym = { path = "../enclave-nym" }
 enclave-sandbox = { path = "../enclave-sandbox" }
-tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std"] }
+enclave-rpc = { path = "../enclave-rpc" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std", "process"] }
 
 [dev-dependencies]
+enclave-ingress = { path = "../enclave-ingress" }
+enclave-wire = { path = "../enclave-wire" }
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-federation = { path = "../enclave-federation" }
 enclave-rpc = { path = "../enclave-rpc" }
-tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "process", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "io-std", "process", "time"] }

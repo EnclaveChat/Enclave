@@ -265,3 +265,63 @@ async fn rt23_clock_skew_warning_shown() {
     assert!(matches!(got.as_slice(), [Some(s)] if *s > 0), "{ev:?}");
     assert!(t.now() > net.now());
 }
+
+/// The network, noting the routes the client gives it.
+struct Routes {
+    net: LocalTransport,
+    seen: std::sync::Mutex<Vec<([u8; 16], enclave_net::transport::Route)>>,
+}
+
+#[async_trait::async_trait]
+impl enclave_net::transport::Transport for Routes {
+    async fn exchange(&self, server: &[u8; 16], request: Vec<u8>) -> enclave_net::Result<Vec<u8>> {
+        self.net.exchange(server, request).await
+    }
+    fn now(&self) -> u64 {
+        self.net.now()
+    }
+    async fn server_key(&self, server: &[u8; 16]) -> enclave_net::Result<enclave_rpc::ServerKey> {
+        self.net.server_key(server).await
+    }
+    fn set_route(&self, server: [u8; 16], route: enclave_net::transport::Route) {
+        self.seen.lock().unwrap().push((server, route));
+    }
+}
+
+/// Listed servers are reached at their ingress's Nym address, and a
+/// descriptor's (newer) address replaces it.
+#[tokio::test(flavor = "multi_thread")]
+async fn nym_routes_from_the_list_and_descriptors() {
+    use enclave_net::transport::Route;
+    let net = LocalTransport::new();
+    let (mut a, wa) = net.add_federated_server("a.test", 1).unwrap();
+    let (b, wb) = net.add_federated_server("b.test", 2).unwrap();
+    a.nym_address = "ingress-a".into();
+    let (ida, idb) = (a.id(), b.id());
+    let mut rng = HedgedRng::new().unwrap();
+    let foundation = FoundationKey::generate(&mut rng).unwrap();
+    let witnesses: Vec<_> = wa.into_iter().chain(wb).collect();
+    let signed = list(1, &[a, b], &witnesses, net.now())
+        .sign(&foundation, &mut rng)
+        .unwrap();
+    let t = Arc::new(Routes {
+        net: net.clone(),
+        seen: std::sync::Mutex::default(),
+    });
+    let (mut ada, _) = Client::create(memory(), t.clone(), ida, "Ada")
+        .await
+        .unwrap();
+    ada.set_foundation(foundation.public()).unwrap();
+    ada.offer_server_list(&signed).unwrap();
+    // B has no ingress in the list: no route for it.
+    assert_eq!(
+        t.seen.lock().unwrap().as_slice(),
+        &[(ida, Route::Nym("ingress-a".into()))]
+    );
+    net.publish_descriptor(&idb, "ingress-b", true).unwrap();
+    ada.fetch_descriptor(&idb).await.unwrap();
+    assert_eq!(
+        t.seen.lock().unwrap().last(),
+        Some(&(idb, Route::Nym("ingress-b".into())))
+    );
+}

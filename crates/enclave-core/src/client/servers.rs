@@ -21,6 +21,7 @@ use super::Client;
 use crate::{CoreError, Result};
 use enclave_federation::{FedError, FoundationPublic, ServerDescriptor, ServerList};
 use enclave_kt::{KtPolicy, LookupReply, verify_descriptor_lookup};
+use enclave_net::transport::Route;
 use enclave_rpc::api::{self, DirAction, DirKind};
 
 /// Store namespace (not in backups: the list is public and comes back on
@@ -54,6 +55,7 @@ impl Client {
             }
         }
         self.apply_pins();
+        self.apply_routes();
         Ok(())
     }
 
@@ -72,6 +74,7 @@ impl Client {
         let seq = list.seq;
         self.servers = Some(list);
         self.apply_pins();
+        self.apply_routes();
         Ok(ListUpdate::Updated(seq))
     }
 
@@ -107,6 +110,10 @@ impl Client {
             }
         }
         let d = result?;
+        // The descriptor names the server's ingress as it is now.
+        if !d.nym_address.is_empty() {
+            self.rpc.set_route(*id, Route::Nym(d.nym_address.clone()));
+        }
         let key = [KEY_DESCRIPTOR, id.as_slice()].concat();
         self.store
             .put(NS_SERVERS, &key, &d.encode(), &mut self.rng)?;
@@ -213,6 +220,19 @@ impl Client {
                     .and_then(|p| p.by_server(id))
                     .map(|i| i.domain.clone())
             })
+    }
+
+    /// Reach every listed server at its ingress's Nym address (a
+    /// transport without the mixnet ignores these).
+    fn apply_routes(&self) {
+        for s in self.servers.iter().flat_map(|l| &l.servers) {
+            if !s.nym_address.is_empty() {
+                self.rpc.set_route(
+                    enclave_federation::server_id(&s.identity),
+                    Route::Nym(s.nym_address.clone()),
+                );
+            }
+        }
     }
 
     /// Pins from the list, merged with the ones the app added.

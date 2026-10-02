@@ -147,3 +147,114 @@ async fn carries_requests_and_keys() {
         .unwrap();
     assert!(status.success());
 }
+
+/// A server named by a Nym address is reached over the mixnet, through the
+/// mixnet client netd starts (here a stand-in, `examples/fake_nymd.rs`,
+/// with an in-process mixnet and the real ingress in front of the server).
+#[tokio::test]
+async fn carries_requests_over_nym() {
+    let identity = CompositeSigningKey::generate(&mut HedgedRng::new().unwrap()).unwrap();
+    let server = enclave_federation::server_id(identity.public());
+    let addr = fake_server(identity).await;
+    let hex: String = server.iter().map(|b| format!("{b:02x}")).collect();
+    // `cargo test` builds the examples next to the test binaries.
+    let nymd = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join(format!("fake_nymd{}", std::env::consts::EXE_SUFFIX));
+    assert!(nymd.exists(), "{}", nymd.display());
+    let mut child = tokio::process::Command::new(BIN)
+        .args(["--server", &format!("{hex}=nym:ingress")])
+        .args(["--nymd", nymd.to_str().unwrap()])
+        .env("ENCLAVE_FAKE_NYMD_SERVER", addr.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let poll: Vec<u8> = (0..enclave_wire::POLL_LEN).map(|i| i as u8).collect();
+    let requests = [
+        NetRequest::Exchange {
+            id: 1,
+            server,
+            bytes: poll.clone(),
+        },
+        NetRequest::ServerKey { id: 2, server },
+    ];
+    for r in &requests {
+        frame::write_frame(&mut stdin, &r.encode()).await.unwrap();
+    }
+    let mut replies = Vec::new();
+    for _ in 0..requests.len() {
+        let b = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            frame::read_frame(&mut stdout),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        replies.push(NetReply::decode(&b).unwrap());
+    }
+    replies.sort_by_key(|r| r.id);
+    let reversed: Vec<u8> = poll.iter().rev().copied().collect();
+    assert_eq!(replies[0].result, Ok(reversed), "over the mixnet and back");
+    assert_eq!(replies[1].result.as_ref().unwrap().len(), 4 + 56 + 1568);
+}
+
+/// A Nym route the vault sends later (from the server list or a
+/// descriptor) is used for the next request.
+#[tokio::test]
+async fn learns_nym_routes() {
+    let identity = CompositeSigningKey::generate(&mut HedgedRng::new().unwrap()).unwrap();
+    let server = enclave_federation::server_id(identity.public());
+    let addr = fake_server(identity).await;
+    let nymd = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join(format!("fake_nymd{}", std::env::consts::EXE_SUFFIX));
+    // Some other server over the mixnet, so netd starts its mixnet
+    // client; ours has no route yet.
+    let mut child = tokio::process::Command::new(BIN)
+        .args(["--server", &format!("{}=nym:elsewhere", "11".repeat(16))])
+        .args(["--nymd", nymd.to_str().unwrap()])
+        .env("ENCLAVE_FAKE_NYMD_SERVER", addr.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reply = async |stdout: &mut tokio::process::ChildStdout| {
+        let b = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            frame::read_frame(stdout),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        NetReply::decode(&b).unwrap()
+    };
+    let key = |id| NetRequest::ServerKey { id, server }.encode();
+    frame::write_frame(&mut stdin, &key(1)).await.unwrap();
+    assert!(reply(&mut stdout).await.result.is_err(), "no route yet");
+    let set = NetRequest::SetRoute {
+        server,
+        route: "nym:ingress".into(),
+    };
+    frame::write_frame(&mut stdin, &set.encode()).await.unwrap();
+    frame::write_frame(&mut stdin, &key(2)).await.unwrap();
+    let r = reply(&mut stdout).await;
+    assert_eq!(r.id, 2);
+    assert_eq!(r.result.unwrap().len(), 4 + 56 + 1568);
+}

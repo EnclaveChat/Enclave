@@ -3,10 +3,11 @@
 //! `enclave` runs a self-contained demo (local server, demo contact, nothing
 //! leaves the computer). Keys live in a separate `enclave-vault` process when
 //! it is installed next to this binary (`--single-process` keeps them in a
-//! thread instead). `enclave --server SERVER_ID=HOST:PORT --profile DIR` talks to
-//! a dev server (`enclave-server`) over TCP (add `--kt-pins FILE`, written by
-//! the server, to use usernames); the Tor and Nym transports are
-//! wired in by M4's gate.
+//! thread instead). `enclave --server SERVER_ID=nym:ADDRESS --profile DIR`
+//! reaches a server over the mixnet (through `enclave-netd` and
+//! `enclave-nymd`; `--nym-env` for a local mixnet or the sandbox), and
+//! `--server SERVER_ID=HOST:PORT` a dev server (`enclave-server`) over TCP
+//! (add `--kt-pins FILE`, written by the server, to use usernames).
 #![deny(unsafe_code)]
 
 use enclave_app::{AppWindow, Screen, Sheet, vault, view};

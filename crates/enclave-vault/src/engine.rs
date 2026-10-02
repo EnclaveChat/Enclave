@@ -9,11 +9,10 @@ use enclave_crypto::pwhash::PwParams;
 use enclave_ipc::{Cmd, Device, Effect, Msg, Out, Pick, Row, Snapshot, tint_for};
 use enclave_net::schedule::Profile;
 use enclave_net::shaped::{ShapedTransport, Shaping};
-use enclave_net::transport::{ServerId, TcpTransport, Transport};
+use enclave_net::transport::{Route, ServerId, TcpTransport, Transport};
 use enclave_sim::LocalTransport;
 use enclave_store::{FileKeystore, MemoryKeystore};
 use std::collections::{BTreeSet, HashMap};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,18 +28,22 @@ const TICK: Duration = Duration::from_secs(3);
 pub enum Mode {
     /// Everything in memory with a local server and a demo contact.
     Demo,
-    /// A profile on disk talking to a dev server over TCP.
+    /// A profile on disk, its servers reached over the mixnet (or, in
+    /// development, TCP).
     Server {
         /// Profile directory.
         profile: PathBuf,
         /// The home server's id: its key bundle must be signed by the
         /// identity this id is derived from.
         server: ServerId,
-        /// Server address.
-        addr: SocketAddr,
+        /// How the home server is reached.
+        route: Route,
         /// Other servers this build reaches directly (more `--server`
         /// flags: development routes).
-        others: Vec<(ServerId, SocketAddr)>,
+        others: Vec<(ServerId, Route)>,
+        /// The mixnet client takes its network from `NYM_*` variables (a
+        /// local mixnet, the sandbox) instead of mainnet (`--nym-env`).
+        nym_env: bool,
         /// Key-transparency pins for usernames (written by the dev server).
         kt_pins: Option<PathBuf>,
         /// The foundation's public key, when not built in.
@@ -54,7 +57,8 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Parse `--server HEXID=HOST:PORT --profile DIR [--kt-pins FILE]`
+    /// Parse `--server HEXID=ROUTE --profile DIR [--kt-pins FILE]`, a
+    /// route being `nym:ADDRESS` or (development) `HOST:PORT`
     /// (`enclave-server show-id` prints the id); without `--server` it is
     /// the demo. A `--server` that doesn't parse, or one without
     /// `--profile`, is an error rather than a quiet fall back to the demo.
@@ -68,20 +72,25 @@ impl Mode {
         let mut servers = Vec::new();
         for pair in args.windows(2).filter(|p| p[0] == "--server") {
             servers.push(
-                enclave_net::transport::parse_server(&pair[1])
-                    .ok_or_else(|| format!("--server {}: expected SERVER_ID=HOST:PORT", pair[1]))?,
+                enclave_net::transport::parse_route(&pair[1]).ok_or_else(|| {
+                    format!(
+                        "--server {}: expected SERVER_ID=nym:ADDRESS or SERVER_ID=HOST:PORT",
+                        pair[1]
+                    )
+                })?,
             );
         }
         if servers.is_empty() {
             return Ok(Mode::Demo);
         }
-        let (server, addr) = servers.remove(0);
+        let (server, route) = servers.remove(0);
         let profile = arg("--profile").ok_or("--server needs --profile DIR")?;
         Ok(Mode::Server {
             profile: profile.into(),
             server,
-            addr,
+            route,
             others: servers,
+            nym_env: args.iter().any(|a| a == "--nym-env"),
             kt_pins: arg("--kt-pins").map(Into::into),
             foundation: arg("--foundation").map(Into::into),
             server_list: arg("--server-list").map(Into::into),
@@ -96,8 +105,9 @@ impl Mode {
             Mode::Server {
                 profile,
                 server,
-                addr,
+                route,
                 others,
+                nym_env,
                 kt_pins,
                 foundation,
                 server_list,
@@ -107,7 +117,7 @@ impl Mode {
                     |id: &ServerId| -> String { id.iter().map(|b| format!("{b:02x}")).collect() };
                 let mut v = vec![
                     "--server".into(),
-                    format!("{}={addr}", hex(server)),
+                    format!("{}={route}", hex(server)),
                     "--profile".into(),
                     profile.display().to_string(),
                 ];
@@ -127,6 +137,9 @@ impl Mode {
                 }
                 if !shaping {
                     v.push("--no-shaping".into());
+                }
+                if *nym_env {
+                    v.push("--nym-env".into());
                 }
                 v
             }
@@ -591,7 +604,7 @@ pub async fn run_with(
         }
         Mode::Server {
             server,
-            addr,
+            route,
             others,
             kt_pins,
             shaping,
@@ -605,8 +618,21 @@ pub async fn run_with(
             let t: Arc<dyn Transport> = match helpers.net {
                 Some(t) => t,
                 None => {
-                    let mut routes = HashMap::from([(id, *addr)]);
-                    routes.extend(others.iter().copied());
+                    // Without netd only the development TCP routes work:
+                    // the mixnet client is netd's.
+                    let mut routes = HashMap::new();
+                    for (s, r) in
+                        std::iter::once((id, route)).chain(others.iter().map(|(s, r)| (*s, r)))
+                    {
+                        match r {
+                            Route::Tcp(a) => {
+                                routes.insert(s, *a);
+                            }
+                            Route::Nym(_) => {
+                                eprintln!("enclave-vault: no netd, so no mixnet route to a server");
+                            }
+                        }
+                    }
                     Arc::new(TcpTransport::new(routes))
                 }
             };

@@ -386,6 +386,10 @@ impl Transport for ShapedTransport {
         self.inner.server_key(server).await
     }
 
+    fn set_route(&self, server: ServerId, route: crate::transport::Route) {
+        self.inner.set_route(server, route);
+    }
+
     fn set_bulk(&self, on: bool) {
         use std::sync::atomic::Ordering::SeqCst;
         if on {

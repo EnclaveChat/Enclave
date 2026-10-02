@@ -1,5 +1,6 @@
-//! `enclave-vault --connect SOCKET|PIPE [--server SERVER_ID=HOST:PORT --profile DIR
-//! [--kt-pins FILE] | --demo] [--report]`
+//! `enclave-vault --connect SOCKET|PIPE [--server SERVER_ID=ROUTE --profile DIR
+//! [--kt-pins FILE] [--nym-env] | --demo] [--report]`, a route being
+//! `nym:ADDRESS` or (development) `HOST:PORT`
 //!
 //! Started by the Enclave UI, never by hand. Hardens itself (no core dumps,
 //! not dumpable, `no_new_privs`), reads the connection token (hex) from
@@ -137,17 +138,23 @@ fn start_netd(
 ) -> Option<std::sync::Arc<dyn enclave_net::transport::Transport>> {
     let enclave_vault::Mode::Server {
         server,
-        addr,
+        route,
         others,
+        nym_env,
         ..
     } = mode
     else {
         return None;
     };
     let bin = enclave_vault::netd::netd_binary()?;
-    let mut servers = vec![(*server, addr.to_string())];
-    servers.extend(others.iter().map(|(id, a)| (*id, a.to_string())));
-    match enclave_vault::netd::PipeTransport::spawn(&bin, &servers) {
+    let mut servers = vec![(*server, route.to_string())];
+    servers.extend(others.iter().map(|(id, r)| (*id, r.to_string())));
+    let extra: Vec<String> = if *nym_env {
+        vec!["--nym-env".into()]
+    } else {
+        Vec::new()
+    };
+    match enclave_vault::netd::PipeTransport::spawn(&bin, &servers, &extra) {
         Ok(t) => Some(std::sync::Arc::new(t)),
         Err(e) => {
             eprintln!("enclave-vault: netd didn't start ({e}); using the network directly");

@@ -37,6 +37,11 @@ impl Rpc {
         }
     }
 
+    /// Reach `server` by `route` from now on ([`Transport::set_route`]).
+    pub fn set_route(&self, server: ServerId, route: enclave_net::transport::Route) {
+        self.transport.set_route(server, route);
+    }
+
     /// Current time, from the transport (simulations move it).
     pub fn now(&self) -> u64 {
         self.transport.now()

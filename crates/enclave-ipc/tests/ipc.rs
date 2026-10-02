@@ -313,6 +313,10 @@ fn net_messages_round_trip_and_refuse_garbage() {
             id: u32::MAX,
             server: [4; 16],
         },
+        NetRequest::SetRoute {
+            server: [5; 16],
+            route: "nym:abc.def@ghi".into(),
+        },
     ] {
         let e = r.encode();
         assert_eq!(NetRequest::decode(&e).unwrap(), r);

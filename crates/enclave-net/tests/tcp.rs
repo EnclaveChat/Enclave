@@ -94,6 +94,32 @@ async fn a_key_from_the_wrong_identity_is_refused() {
     assert!(t.server_key(&real).await.is_ok());
 }
 
+/// Routes parse in both forms, print back the same, and a TCP route
+/// learned later is used; a Nym route is ignored by the TCP transport.
+#[tokio::test]
+async fn routes_parse_and_are_learned() {
+    use enclave_net::transport::{Route, parse_route, parse_server};
+    let hex = "00112233445566778899aabbccddeeff";
+    let (id, r) = parse_route(&format!("{hex}=nym:abc.def@ghi")).unwrap();
+    assert_eq!(r, Route::Nym("abc.def@ghi".into()));
+    assert_eq!(r.to_string(), "nym:abc.def@ghi");
+    assert_eq!(id[0], 0x00);
+    assert_eq!(id[15], 0xff);
+    assert!(parse_server(&format!("{hex}=nym:abc")).is_none());
+    assert!(parse_route(&format!("{hex}=nym:")).is_none());
+    assert!(parse_route("0011=127.0.0.1:1").is_none());
+    let (_, r) = parse_route(&format!("{hex}=127.0.0.1:7443")).unwrap();
+    assert_eq!(Route::parse(&r.to_string()), Some(r));
+
+    let (addr, real) = spawn_server().await;
+    let t = TcpTransport::new(HashMap::new());
+    assert!(t.server_key(&real).await.is_err());
+    t.set_route(real, Route::Nym("somewhere".into()));
+    assert!(t.server_key(&real).await.is_err());
+    t.set_route(real, Route::Tcp(addr));
+    assert!(t.server_key(&real).await.is_ok());
+}
+
 #[tokio::test]
 async fn tcp_roundtrip_creates_inbox_and_polls() {
     let (addr, id) = spawn_server().await;

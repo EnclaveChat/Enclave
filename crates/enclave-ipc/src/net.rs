@@ -26,6 +26,14 @@ pub enum NetRequest {
         /// Server.
         server: [u8; 16],
     },
+    /// Reach a server by this route from now on (`HOST:PORT` or
+    /// `nym:ADDRESS`, as in netd's `--server`). No reply.
+    SetRoute {
+        /// Server.
+        server: [u8; 16],
+        /// Route.
+        route: String,
+    },
 }
 
 /// netd → vault.
@@ -48,6 +56,9 @@ impl NetRequest {
             NetRequest::ServerKey { id, server } => {
                 w.u8(2).u32(*id).bytes(server);
             }
+            NetRequest::SetRoute { server, route } => {
+                w.u8(3).bytes(server).str(route);
+            }
         }
         w.0
     }
@@ -67,6 +78,10 @@ impl NetRequest {
             2 => NetRequest::ServerKey {
                 id: r.u32()?,
                 server: server(&mut r)?,
+            },
+            3 => NetRequest::SetRoute {
+                server: server(&mut r)?,
+                route: r.str()?,
             },
             _ => return Err(IpcError::Malformed),
         };

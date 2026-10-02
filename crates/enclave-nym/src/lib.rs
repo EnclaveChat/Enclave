@@ -17,6 +17,7 @@
 
 pub mod fake;
 pub mod frame;
+pub mod pipe;
 
 /// Errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
