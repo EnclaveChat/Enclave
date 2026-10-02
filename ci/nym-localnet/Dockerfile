@@ -21,7 +21,7 @@ FROM ${RUST_IMAGE} AS build
 ARG NYM_TAG
 ENV CARGO_HOME=/cargo CARGO_INCREMENTAL=0 CARGO_TERM_COLOR=never
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates pkg-config libssl-dev build-essential \
+ && apt-get install -y --no-install-recommends git ca-certificates curl pkg-config libssl-dev build-essential \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone --depth 1 --branch "${NYM_TAG}" https://github.com/nymtech/nym.git nym

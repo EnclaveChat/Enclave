@@ -223,11 +223,16 @@ async fn carries_requests_over_nym() {
     {
         assert!(report.contains("syscalls filtered"), "{report}");
         let pid = child.id().unwrap();
-        let fds: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .filter_map(|e| std::fs::read_link(e.unwrap().path()).ok())
-            .map(|l| l.display().to_string())
-            .collect();
+        // netd is not dumpable, so only root may look at its descriptors;
+        // as anyone else the report above is the check.
+        let fds: Vec<String> = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+            Ok(d) => d
+                .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+                .map(|l| l.display().to_string())
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("{e}"),
+        };
         // Only Unix sockets (tokio's own signal pair for the child); no
         // IP socket is open.
         let unix = std::fs::read_to_string(format!("/proc/{pid}/net/unix")).unwrap();

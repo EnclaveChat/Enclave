@@ -130,10 +130,13 @@ up() {
     done
     for o in "${STACKS[@]}"; do [ "$o" != "$s" ] && others+=("\"http://witness-$o:7446\""); done
     sed -i "s|^witnesses = \[\]|witnesses = [$(IFS=,; echo "${others[*]}")]|" "$d/config/server.toml"
-    if [ "$s" = b ] && [ "$TRANSPORT" = nym ]; then
-      printf '\n[push]\nforward = "push-egress:7446"\n' >> "$d/config/server.toml"
-    elif [ "$s" = b ]; then
-      printf '\n[push]\nforward = "push-relay:7445"\n' >> "$d/config/server.toml"
+    # Stack b's due wakes: to its push egress over the mixnet, or straight
+    # to the push relay on the dev transport ([push] is in the example).
+    if [ "$s" = b ]; then
+      local fwd=push-relay:7445
+      [ "$TRANSPORT" = nym ] && fwd=push-egress:7446
+      sed -i "s|^# forward = .*|forward = \"$fwd\"|" "$d/config/server.toml"
+      grep -q "^forward = \"$fwd\"" "$d/config/server.toml"
     fi
     cat >> "$d/config/front.toml" <<EOF
 tls = "files"
