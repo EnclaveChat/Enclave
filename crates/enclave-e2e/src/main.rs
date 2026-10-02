@@ -8,7 +8,7 @@
 //! enclave-e2e after-restart --state DIR --servers … --foundation FILE --server-list FILE
 //! ```
 //!
-//! Three people, one per stack (Ada on A, Ben on B, Cy on C). `setup`:
+//! Three people, one per stack (Ada on A, Ben on B, Cyrus on C). `setup`:
 //!
 //! 1. each claims a username on their home server; the others find them
 //!    by `@name@domain`, verified under pins from the foundation's list
@@ -41,7 +41,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const NAMES: [&str; 3] = ["ada", "ben", "cy"];
+const NAMES: [&str; 3] = ["ada", "ben", "cyrus"];
 /// How long to wait for something to arrive.
 const PATIENCE: Duration = Duration::from_secs(180);
 
@@ -224,8 +224,12 @@ fn group_text(text: &'static str) -> impl Fn(&Event) -> bool {
 }
 
 async fn setup(w: &World, args: &[String]) -> R<()> {
+    // A fresh start: profiles from an earlier run belong to other servers.
+    for n in NAMES {
+        let _ = std::fs::remove_dir_all(w.state.join(n));
+    }
     let mut seen = Seen::default();
-    eprintln!("creating Ada on A, Ben on B, Cy on C");
+    eprintln!("creating Ada on A, Ben on B, Cyrus on C");
     let mut ada = w.create(0).await?;
     let mut ben = w.create(1).await?;
     let mut cy = w.create(2).await?;
@@ -248,7 +252,7 @@ async fn setup(w: &World, args: &[String]) -> R<()> {
     let ada_card = cy
         .find_username(&format!("@ada@{}", w.domains[0]))
         .await
-        .map_err(|x| format!("cy: find ada: {x}"))?;
+        .map_err(|x| format!("cyrus: find ada: {x}"))?;
     if ben_card.root != ben.root() || ada_card.root != ada.root() {
         return Err("a username led to the wrong account".into());
     }
@@ -256,9 +260,9 @@ async fn setup(w: &World, args: &[String]) -> R<()> {
     // 2. Contacts across servers.
     eprintln!("2. one-to-one across servers");
     connect(&mut seen, &mut ada, "ada", &ben_card, &mut ben, "ben").await?;
-    connect(&mut seen, &mut cy, "cy", &ada_card, &mut ada, "ada").await?;
+    connect(&mut seen, &mut cy, "cyrus", &ada_card, &mut ada, "ada").await?;
     let cy_card = cy.card();
-    connect(&mut seen, &mut ben, "ben", &cy_card, &mut cy, "cy").await?;
+    connect(&mut seen, &mut ben, "ben", &cy_card, &mut cy, "cyrus").await?;
     ada.send_text(&ben.root(), "hello from A")
         .await
         .map_err(e)?;
@@ -286,14 +290,14 @@ async fn setup(w: &World, args: &[String]) -> R<()> {
         .create_group("e2e", &[ben.root(), cy.root()])
         .await
         .map_err(|x| format!("ada: create group: {x}"))?;
-    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cy")] {
+    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cyrus")] {
         seen.until(c, who, "the group", |ev| {
             matches!(ev, Event::GroupJoined { .. })
         })
         .await?;
     }
     ada.send_group_text(&gid, "group hello").await.map_err(e)?;
-    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cy")] {
+    for (c, who) in [(&mut ben, "ben"), (&mut cy, "cyrus")] {
         seen.until(c, who, "the group message", group_text("group hello"))
             .await?;
     }
@@ -303,7 +307,7 @@ async fn setup(w: &World, args: &[String]) -> R<()> {
     seen.until(
         &mut ada,
         "ada",
-        "Cy's group message",
+        "Cyrus's group message",
         group_text("from C to the group"),
     )
     .await?;
@@ -468,14 +472,14 @@ async fn after_restart(w: &World) -> R<()> {
     let card = cy
         .find_username(&format!("@ben@{}", w.domains[1]))
         .await
-        .map_err(|x| format!("cy: find ben after the restart: {x}"))?;
+        .map_err(|x| format!("cyrus: find ben after the restart: {x}"))?;
     if card.root != ben.root() {
         return Err("Ben's username moved".into());
     }
     ben.send_group_text(&gid, "group after restart")
         .await
         .map_err(e)?;
-    for (c, who) in [(&mut ada, "ada"), (&mut cy, "cy")] {
+    for (c, who) in [(&mut ada, "ada"), (&mut cy, "cyrus")] {
         seen.until(
             c,
             who,
