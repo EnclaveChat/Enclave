@@ -46,8 +46,11 @@ exchanged.** Everything below is build-level evidence plus in-process tests.
 | b | A fresh sender tag per request? | Not upstream: nym-client-core keeps one tag per recipient for the client's life. Patched (`third_party/PATCHES.md`): a fresh tag per message. |
 | c | Poisson off, loop cover on? | The configuration has both switches (`disable_main_poisson_packet_distribution`, `loop_cover_traffic_average_delay`); whether Nym supports that setting on mainnet is still to confirm live. |
 | d | A custom gateway connector (for Tor under Nym)? | nym-sdk 1.21.5 has `MixnetClientBuilder::custom_gateway_transceiver` and `connect_to_mixnet_via_socks5`; which one carries the gateway WSS over arti is N2's work. |
-| e | Can the server refuse "more SURBs" round trips? | Yes: `maximum_reply_surbs_rerequests = 0` on the ingress, and every request carries all its reply blocks. |
-| f–i | Local mixnet in Docker, packets per unit and poll, in-memory storage, sandbox credentials | Still open: need a network that allows raw TCP (CI job to come with N1's localnet). |
+| e | Can the server refuse "more SURBs" round trips? | Yes, with two settings: `maximum_reply_surbs_rerequests = 0`, and no reply blocks held in reserve (`minimum_reply_surb_storage_threshold = 0`; the default keeps 10 back for asking, which left a 16 KB reply 9 packets short and made the ingress ask anyway). The reply-block store takes those thresholds when it is created (`initialise_persistent_storage(&debug)`, not `new_with_default_storage`). Every request carries 12 reply blocks: the 11 regular packets nym-sphinx splits a 16,406 B reply into, plus one. Checked on the local mixnet. |
+| f | A local mixnet in Docker? | Yes, with a small patch (`ci/nym-localnet/offline.patch`): nym-node 1.21.5 wants a chain at start (network monitors, chain watcher, initial topology) and ignores its LP bind-address flags. Three mix nodes and a gateway run on 127.0.0.1 (`run-local.sh`) or in Docker (`compose.localnet.yml`); a static file stands in for nym-api. Measured: connect ≈0.2 s; request plus full reply ≈0.37–0.42 s. |
+| g | Packets per unit and poll | A reply is 11 regular packets (above); the request side is measured by the pcap check (N1, `ci/federation/pcap-check`). |
+| h | In-memory storage | Devices use nym-sdk's ephemeral (in-memory) storage; nymd confines itself with nothing writable, and the round trip works that way. The ingress keeps its identity and reply store on disk. |
+| i | Sandbox credentials | Still open (N3). |
 
 The TLS under nym's gateway connection was on rustls 0.21; the patched copies use tungstenite 0.24 on rustls 0.23.
 

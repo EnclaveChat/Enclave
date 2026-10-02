@@ -36,6 +36,7 @@ node mix1 mixnode 1
 node mix2 mixnode 2
 node mix3 mixnode 3
 node gw entry-gateway 4 --entry-bind-address 127.0.0.1:9000 \
+  --lp-control-bind-address 127.0.0.1:41264 --lp-data-bind-address 127.0.0.1:51264 \
   --enforce-zk-nyms false --lp-use-mock-ecash true
 
 python3 "$HERE/topology.py" "$DIR/network.json" \

@@ -24,13 +24,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
-/// Plaintext a reply block carries, conservatively: a regular Sphinx
-/// packet holds 2 KiB, less the fragment header and reply encryption.
-pub const SURB_PAYLOAD: usize = 1_800;
-
-/// Reply blocks for an answer of `len` bytes, with one to spare.
+/// Reply blocks for an answer of `len` bytes, with one to spare: the
+/// regular packets nym-sphinx splits such a reply into (each reply packet
+/// carries a 2 KiB Sphinx payload less its acknowledgement, key digest and
+/// fragment header). Too few would make the ingress ask the device for
+/// more, which it can't answer (every message has a fresh sender tag).
 pub fn surbs_for(len: usize) -> u32 {
-    u32::try_from(len.div_ceil(SURB_PAYLOAD) + 1).unwrap_or(u32::MAX)
+    use nym_sphinx::anonymous_replies::requests::ReplyMessage;
+    use nym_sphinx::message::NymMessage;
+    use nym_sphinx::params::PacketSize;
+    let m = NymMessage::new_reply(ReplyMessage::new_data_message(vec![0; len]));
+    u32::try_from(m.required_packets(PacketSize::RegularPacket) + 1).unwrap_or(u32::MAX)
 }
 
 /// Which side of Enclave this client is.
@@ -117,8 +121,13 @@ impl NymDriver {
             debug.cover_traffic.loop_cover_traffic_average_delay = Duration::from_secs(10);
         }
         if matches!(opts.role, Role::Ingress { .. }) {
-            // Every request carries all the reply blocks its reply needs.
+            // Every request carries all the reply blocks its reply needs, so
+            // the ingress never asks for more and keeps none in reserve for
+            // asking (nym-sdk holds back 10 by default, which would leave a
+            // reply short).
             debug.reply_surbs.maximum_reply_surbs_rerequests = 0;
+            debug.reply_surbs.minimum_reply_surb_storage_threshold = 0;
+            debug.reply_surbs.minimum_reply_surb_threshold_buffer = 0;
         }
         let (network, topology) = match &opts.network {
             Network::Mainnet => (nym_sdk::NymNetworkDetails::default(), None),
@@ -139,9 +148,13 @@ impl NymDriver {
         let mut client = match &opts.role {
             Role::Ingress { dir } => {
                 let paths = StoragePaths::new_from_dir(dir).map_err(client_error)?;
-                let mut b = MixnetClientBuilder::new_with_default_storage(paths)
+                // The reply-block store takes its thresholds when it is
+                // made, so from our configuration, not the defaults.
+                let storage = paths
+                    .initialise_persistent_storage(&debug)
                     .await
-                    .map_err(client_error)?
+                    .map_err(client_error)?;
+                let mut b = MixnetClientBuilder::new_with_storage(storage)
                     .network_details(network)
                     .debug_config(debug);
                 if let Some(g) = &opts.gateway {
@@ -242,8 +255,10 @@ mod tests {
 
     #[test]
     fn a_reply_unit_gets_enough_reply_blocks() {
-        // 16,406 B → 10 regular packets' worth, plus one.
-        assert_eq!(surbs_for(enclave_nym::frame::REPLY_LEN), 11);
+        // A reply packet carries ≈1.6 KB: a 16,406 B reply is 11 packets,
+        // plus one spare.
+        let n = surbs_for(enclave_nym::frame::REPLY_LEN);
+        assert_eq!(n, 12, "{n}");
         assert_eq!(surbs_for(1), 2);
     }
 }

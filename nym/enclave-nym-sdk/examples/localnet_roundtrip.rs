@@ -15,6 +15,14 @@ use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() {
+    // RUST_LOG for nym-sdk's own logs (warnings by default).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let network = Network::from_env(true);
     assert!(
         matches!(network, Network::Local { .. }),

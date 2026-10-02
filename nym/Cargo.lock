@@ -1804,8 +1804,10 @@ dependencies = [
  "enclave-wire",
  "nym-client-core-gateways-storage",
  "nym-sdk",
+ "nym-sphinx",
  "nym-topology",
  "tokio",
+ "tracing-subscriber",
  "url",
 ]
 

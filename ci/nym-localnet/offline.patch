@@ -1,3 +1,28 @@
+diff --git a/nym-node/src/cli/helpers.rs b/nym-node/src/cli/helpers.rs
+index 970c537..4e16537 100644
+--- a/nym-node/src/cli/helpers.rs
++++ b/nym-node/src/cli/helpers.rs
+@@ -642,6 +642,20 @@ impl LpArgs {
+     }
+ 
+     pub(crate) fn override_config_section(self, mut section: config::LpConfig) -> config::LpConfig {
++        // (Enclave localnet: apply the bind addresses and ports too, so a
++        // host without IPv6 can run a gateway)
++        if let Some(addr) = self.lp_control_bind_address {
++            section.control_bind_address = addr
++        }
++        if let Some(port) = self.lp_control_announce_port {
++            section.announce_control_port = Some(port)
++        }
++        if let Some(addr) = self.lp_data_bind_address {
++            section.data_bind_address = addr
++        }
++        if let Some(port) = self.lp_data_announce_port {
++            section.announce_data_port = Some(port)
++        }
+         if let Some(use_mock_ecash) = self.lp_use_mock_ecash {
+             section.debug.use_mock_ecash = use_mock_ecash
+         }
 diff --git a/nym-node/src/node/mod.rs b/nym-node/src/node/mod.rs
 index 360c815..b21a9b6 100644
 --- a/nym-node/src/node/mod.rs

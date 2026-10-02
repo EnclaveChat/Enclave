@@ -18,6 +18,8 @@ enclave-nym = { path = "../../crates/enclave-nym" }
 # only with its storage crate pinned too (docs/spikes/m4-network.md).
 nym-sdk = "=1.21.5"
 nym-client-core-gateways-storage = "=1.21.5"
+# How many packets a reply takes (the same arithmetic the client uses).
+nym-sphinx = "=1.21.5"
 # A fixed topology for a local mixnet (ci/nym-localnet).
 nym-topology = { version = "=1.21.5", features = ["persistence"] }
 url = "2"
@@ -26,3 +28,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 
 [dev-dependencies]
 enclave-wire = { path = "../../crates/enclave-wire" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -86,6 +86,8 @@ services:
       - --mode=entry-gateway
       - --public-ips=10.77.0.21
       - --entry-bind-address=0.0.0.0:9000
+      - --lp-control-bind-address=0.0.0.0:41264
+      - --lp-data-bind-address=0.0.0.0:51264
       - --enforce-zk-nyms=false
       - --lp-use-mock-ecash=true
       - --accept-operator-terms-and-conditions
