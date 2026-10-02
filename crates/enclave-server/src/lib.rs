@@ -26,7 +26,7 @@ pub mod keys;
 use db::{Db, Tx};
 use enclave_crypto::hash::sha3_512;
 use enclave_crypto::rng::HedgedRng;
-use enclave_kt::{KtInfo, KtService, UsernameClaim};
+use enclave_kt::{KtError, KtInfo, KtService, UsernameClaim};
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{
@@ -276,6 +276,10 @@ pub struct Server {
     stored_lengths: HashSet<usize>,
     /// The signed key bundle served to a zero-length request.
     key_bundle: Vec<u8>,
+    /// This server's signed descriptor (`DirKind::Descriptor`).
+    descriptor: Vec<u8>,
+    /// The foundation's server list as mirrored here (`DirKind::ServerList`).
+    server_list: Vec<u8>,
     rng: HedgedRng,
 }
 
@@ -343,6 +347,8 @@ impl Server {
             stats: Stats::default(),
             stored_lengths: HashSet::new(),
             key_bundle: Vec::new(),
+            descriptor: Vec::new(),
+            server_list: Vec::new(),
             rng,
         })
     }
@@ -357,6 +363,23 @@ impl Server {
     /// The signed key bundle (empty until one is set).
     pub fn key_bundle(&self) -> &[u8] {
         &self.key_bundle
+    }
+
+    /// Commit a descriptor digest to this server's key-transparency log
+    /// (`None` if the server runs no log).
+    pub fn commit_descriptor(&self, digest: [u8; 64], now: u64) -> Option<Result<u64, KtError>> {
+        self.kt.as_ref().map(|kt| kt.commit_descriptor(digest, now))
+    }
+
+    /// Set the signed descriptor served as `DirKind::Descriptor`.
+    pub fn set_descriptor(&mut self, descriptor: Vec<u8>) {
+        self.descriptor = descriptor;
+    }
+
+    /// Set the server list served as `DirKind::ServerList`. The server
+    /// doesn't check it (it holds no foundation key); clients do.
+    pub fn set_server_list(&mut self, list: Vec<u8>) {
+        self.server_list = list;
     }
 
     /// The database (backups, operator tools).
@@ -994,6 +1017,10 @@ impl Server {
 
     fn directory(&mut self, req: DirRequest, now: u64) -> (Status, Reply) {
         match (req.kind, req.action) {
+            // Served from what the operator set, never uploaded.
+            (DirKind::Descriptor | DirKind::ServerList, DirAction::Put) => {
+                (Status::Denied, Reply::Empty)
+            }
             (_, DirAction::Put) => self.dir_put(req, now),
             (DirKind::Manifest, DirAction::Get) => {
                 let got = self.db.read(|r| {
@@ -1035,6 +1062,15 @@ impl Server {
                 Some((bytes, _)) => Self::chunk_reply(bytes, req.index, req.key),
                 None => (Status::NotFound, Reply::Empty),
             },
+            (DirKind::Descriptor, DirAction::Get) if !self.descriptor.is_empty() => {
+                Self::chunk_reply(&self.descriptor, req.index, [0; 32])
+            }
+            (DirKind::ServerList, DirAction::Get) if !self.server_list.is_empty() => {
+                Self::chunk_reply(&self.server_list, req.index, [0; 32])
+            }
+            (DirKind::Descriptor | DirKind::ServerList, DirAction::Get) => {
+                (Status::NotFound, Reply::Empty)
+            }
             _ => (Status::Malformed, Reply::Empty),
         }
     }
@@ -1146,6 +1182,7 @@ impl Server {
             DirKind::Username => self.accept_username(&req.key, &req.proof, &object, now),
             DirKind::Attest => self.accept_attestation(&req.key, object),
             DirKind::Migration => self.accept_migration(&req.key, &object, now),
+            DirKind::Descriptor | DirKind::ServerList => Status::Denied,
         };
         (status, Reply::Empty)
     }

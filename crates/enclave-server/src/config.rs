@@ -45,6 +45,12 @@ pub struct ServerSection {
     pub listen: SocketAddr,
     /// Where public files (descriptor, KT pins) are written for the front.
     pub public_dir: PathBuf,
+    /// The Nym address of this server's ingress, published in the
+    /// descriptor (empty until it has one).
+    pub nym_address: String,
+    /// A copy of the foundation's signed server list to serve to clients
+    /// (`DirKind::ServerList`); re-read when it changes.
+    pub server_list: Option<PathBuf>,
 }
 
 impl Default for ServerSection {
@@ -57,6 +63,8 @@ impl Default for ServerSection {
             keys_dir: PathBuf::from("/var/lib/enclave/keys"),
             listen: SocketAddr::from(([127, 0, 0, 1], 7443)),
             public_dir: PathBuf::from("/var/lib/enclave/public"),
+            nym_address: String::new(),
+            server_list: None,
         }
     }
 }
@@ -175,6 +183,22 @@ impl FileConfig {
             ));
         }
         Ok(())
+    }
+
+    /// The policy as published in the descriptor.
+    pub fn published_policy(&self) -> enclave_federation::Policy {
+        let p = &self.policy;
+        let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        enclave_federation::Policy {
+            effort_request: p.effort_request,
+            effort_claim: p.effort_claim,
+            effort_blob: p.effort_blob,
+            effort_username: p.effort_username,
+            inbox_quota: n(p.inbox_quota),
+            request_quota: n(p.request_quota),
+            token_quota: n(p.token_quota),
+            ttl_days: u32::try_from(p.ttl_days).unwrap_or(u32::MAX),
+        }
     }
 
     /// The server policy.

@@ -5,6 +5,8 @@
 //! enclave-server run         [--config FILE]   serve (state in redb, keys from disk)
 //! enclave-server show-id     [--config FILE]   print the server id
 //! enclave-server backup DIR  [--config FILE]   write a consistent snapshot now
+//! enclave-server restore SNAPSHOT [--config FILE]   put a snapshot back (server stopped)
+//! enclave-server descriptor  [--config FILE]   verify and describe the published descriptor
 //! enclave-server healthcheck [--config FILE]   exit 0 if the server answers
 //! enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
 //! ```
@@ -59,11 +61,13 @@ fn main() -> ExitCode {
         "run" => runtime().and_then(|rt| rt.block_on(run(&args))),
         "show-id" => show_id(&args),
         "backup" => backup_now(&args),
+        "restore" => restore(&args),
+        "descriptor" => show_descriptor(&args),
         "healthcheck" => runtime().and_then(|rt| rt.block_on(healthcheck(&args))),
         "dev" => runtime().and_then(|rt| rt.block_on(dev(&args[1.min(args.len())..]))),
         "--help" | "-h" | "help" => {
             eprintln!(
-                "usage: enclave-server init|run|show-id|healthcheck [--config FILE]\n       enclave-server backup DIR [--config FILE]\n       enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]"
+                "usage: enclave-server init|run|show-id|descriptor|healthcheck [--config FILE]\n       enclave-server backup DIR | restore SNAPSHOT [--config FILE]\n       enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]"
             );
             Ok(())
         }
@@ -160,6 +164,70 @@ fn backup_now(args: &[String]) -> Result<(), String> {
     };
     let p = snapshot(&db, kt.as_ref(), Path::new(dir), usize::MAX)?;
     println!("{}", p.display());
+    Ok(())
+}
+
+/// Put a snapshot written by `backup` (or by `run`'s `[backup]`) back:
+/// `server-<t>.redb`, and `kt-<t>.redb` next to it if there is one. The
+/// server must be stopped; the files it replaces are kept as `*.old`. The
+/// key directory is restored separately (it isn't in snapshots).
+fn restore(args: &[String]) -> Result<(), String> {
+    let snap = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .map(PathBuf::from)
+        .ok_or("usage: enclave-server restore SNAPSHOT")?;
+    let name = snap
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| n.starts_with("server-") && n.ends_with(".redb"))
+        .ok_or("expected a server-<time>.redb snapshot")?;
+    let cfg = load_config(args)?;
+    // Opening it checks it is a database this server can read.
+    drop(Db::open(&snap).map_err(|e| format!("{}: {e}", snap.display()))?);
+    // redb takes a lock: if `run` holds the database, this fails here.
+    drop(Db::open(&db_path(&cfg)).map_err(|e| format!("is the server running? {e}"))?);
+    let kt_snap = snap.with_file_name(name.replacen("server-", "kt-", 1));
+    let mut pairs = vec![(snap.clone(), db_path(&cfg))];
+    if kt_snap.exists() {
+        pairs.push((kt_snap, kt_path(&cfg)));
+    }
+    for (from, to) in pairs {
+        if to.exists() {
+            std::fs::rename(&to, to.with_extension("redb.old")).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+        println!("{} -> {}", from.display(), to.display());
+    }
+    Ok(())
+}
+
+/// Verify `public_dir/descriptor.bin` and print what it says.
+fn show_descriptor(args: &[String]) -> Result<(), String> {
+    let cfg = load_config(args)?;
+    let path = cfg.server.public_dir.join("descriptor.bin");
+    let b = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let d = enclave_federation::ServerDescriptor::decode(&b).map_err(|e| e.to_string())?;
+    d.verify(now()).map_err(|e| format!("descriptor: {e}"))?;
+    println!("id        {}", hex(&d.id()));
+    println!("domain    {}", d.domain);
+    println!("operator  {} (family {})", d.operator, d.family);
+    println!(
+        "nym       {}",
+        if d.nym_address.is_empty() {
+            "-"
+        } else {
+            &d.nym_address
+        }
+    );
+    println!("kt        {}", if d.kt.is_some() { "yes" } else { "no" });
+    for c in &d.certs {
+        println!(
+            "key       day {} (valid {}..{})",
+            c.key.key_id, c.not_before, c.not_after
+        );
+    }
+    println!("expires   {}", d.expires);
     Ok(())
 }
 
@@ -262,6 +330,9 @@ async fn run(args: &[String]) -> Result<(), String> {
     } else {
         None
     };
+    publish_descriptor(&cfg, &keys, &mut server)?;
+    let mut list_seen = None;
+    refresh_server_list(&cfg, &mut server, &mut list_seen);
     eprintln!(
         "enclave-server {} ({}) listening on {}",
         hex(&id),
@@ -276,6 +347,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     {
         let server = Arc::clone(&server);
         let keys = Arc::clone(&keys);
+        let cfg = cfg.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -292,12 +364,18 @@ async fn run(args: &[String]) -> Result<(), String> {
                             Ok(b) => s.set_key_bundle(b),
                             Err(e) => eprintln!("key bundle failed: {e}"),
                         }
+                        // A new day's keys: a new descriptor.
+                        if let Err(e) = publish_descriptor(&cfg, &k, &mut s) {
+                            eprintln!("descriptor failed: {e}");
+                        }
                     }
                     Ok(false) => {}
                     Err(e) => eprintln!("request-key rotation failed: {e}"),
                 }
                 drop(k);
-                server.lock().await.expire(now());
+                let mut s = server.lock().await;
+                s.expire(now());
+                refresh_server_list(&cfg, &mut s, &mut list_seen);
             }
         });
     }
@@ -334,6 +412,77 @@ async fn run(args: &[String]) -> Result<(), String> {
             eprintln!("enclave-server: stopped");
             Ok(())
         }
+    }
+}
+
+/// Sign today's descriptor, serve it (`DirKind::Descriptor`), write it to
+/// `public_dir/descriptor.bin` for the front, and commit its digest to the
+/// key-transparency log.
+fn publish_descriptor(
+    cfg: &FileConfig,
+    keys: &ServerKeys,
+    server: &mut Server,
+) -> Result<(), String> {
+    let t = now();
+    let kt = server.kt_info().map(|i| enclave_federation::KtKeys {
+        head_key: i.head_key,
+        vrf_public: i.vrf_public,
+    });
+    let mut rng = HedgedRng::new().map_err(|e| e.to_string())?;
+    let d = enclave_federation::ServerDescriptor::sign(
+        &keys.identity,
+        &cfg.server.domain,
+        &cfg.server.operator,
+        &cfg.server.family,
+        &cfg.server.nym_address,
+        "",
+        cfg.published_policy(),
+        kt,
+        &[
+            keys.chain.keys()[0].public().clone(),
+            keys.chain.next_key().public().clone(),
+        ],
+        t,
+        t + 2 * 86_400,
+        &mut rng,
+    )
+    .map_err(|e| format!("descriptor: {e}"))?;
+    let bytes = d.encode();
+    std::fs::create_dir_all(&cfg.server.public_dir).map_err(|e| e.to_string())?;
+    let path = cfg.server.public_dir.join("descriptor.bin");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &bytes)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    server.set_descriptor(bytes);
+    if let Some(Err(e)) = server.commit_descriptor(d.digest(), t) {
+        eprintln!("committing the descriptor to the log failed: {e}");
+    }
+    Ok(())
+}
+
+/// Serve the foundation's list from `server.server_list`, re-reading the
+/// file when its modification time changes.
+fn refresh_server_list(
+    cfg: &FileConfig,
+    server: &mut Server,
+    seen: &mut Option<std::time::SystemTime>,
+) {
+    let Some(path) = &cfg.server.server_list else {
+        return;
+    };
+    let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        return;
+    };
+    if *seen == Some(modified) {
+        return;
+    }
+    match std::fs::read(path) {
+        Ok(b) => {
+            server.set_server_list(b);
+            *seen = Some(modified);
+        }
+        Err(e) => eprintln!("{}: {e}", path.display()),
     }
 }
 

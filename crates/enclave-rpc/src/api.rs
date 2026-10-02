@@ -115,6 +115,12 @@ pub enum DirKind {
     /// A change of recovery words (`03-identity.md` §8.2), keyed like the
     /// old root's manifest, which it replaces.
     Migration = 6,
+    /// The server's own signed descriptor (`12-servers.md` §4.3); get only,
+    /// key ignored.
+    Descriptor = 7,
+    /// The foundation's signed server list as this server mirrors it
+    /// (`12-servers.md` §4.1); get only, key ignored.
+    ServerList = 8,
 }
 
 /// Directory action.
@@ -175,6 +181,8 @@ impl DirRequest {
             4 => DirKind::Username,
             5 => DirKind::Attest,
             6 => DirKind::Migration,
+            7 => DirKind::Descriptor,
+            8 => DirKind::ServerList,
             _ => return Err(RpcError::Malformed),
         };
         let action = match b[1] {

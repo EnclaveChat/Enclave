@@ -35,6 +35,11 @@ enum Job {
         now: u64,
         reply: mpsc::Sender<Result<Vec<u8>>>,
     },
+    CommitDescriptor {
+        digest: [u8; 64],
+        now: u64,
+        reply: mpsc::Sender<Result<u64>>,
+    },
 }
 
 /// Handle to a running log.
@@ -235,6 +240,16 @@ impl KtService {
         rx.recv().map_err(|_| KtError::Stopped)?
     }
 
+    /// Commit a descriptor digest in a new epoch (and collect witness
+    /// cosignatures). Returns the epoch.
+    pub fn commit_descriptor(&self, digest: [u8; 64], now: u64) -> Result<u64> {
+        let (reply, rx) = mpsc::channel();
+        self.tx
+            .send(Job::CommitDescriptor { digest, now, reply })
+            .map_err(|_| KtError::Stopped)?;
+        rx.recv().map_err(|_| KtError::Stopped)?
+    }
+
     /// An encoded [`LookupReply`] for `name` against a fresh, cosigned head.
     pub fn lookup(&self, name: &str, now: u64) -> Result<Vec<u8>> {
         let (reply, rx) = mpsc::channel();
@@ -312,6 +327,14 @@ fn run(
             } => {
                 let r = rt.block_on(async {
                     let sh = log.publish(&name, value, now, &mut rng).await?;
+                    cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
+                    Ok(sh.head.epoch)
+                });
+                let _ = reply.send(r);
+            }
+            Job::CommitDescriptor { digest, now, reply } => {
+                let r = rt.block_on(async {
+                    let sh = log.commit_descriptor(digest, now, &mut rng).await?;
                     cosign_all(&mut log, &mut witnesses, &mut last, now, &mut rng).await;
                     Ok(sh.head.epoch)
                 });

@@ -13,6 +13,10 @@ use enclave_crypto::sig::{CompositePublic, CompositeSigningKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The key-transparency label under which a server commits its
+/// descriptor's digest (not a valid username: it starts with a zero byte).
+pub const DESCRIPTOR_LABEL: &[u8] = b"\0descriptor";
+
 /// VRF key held in memory for the life of the process.
 #[derive(Clone)]
 pub struct VrfKey(Arc<[u8; 32]>);
@@ -165,6 +169,40 @@ impl KtLog {
             rng,
         )
         .await
+    }
+
+    /// Commit the digest of the server's current descriptor
+    /// (`12-servers.md` §4.3) in a new epoch, under a label no username
+    /// can equal, so a server can't show different people different
+    /// descriptors without the log showing it.
+    pub async fn commit_descriptor(
+        &mut self,
+        digest: [u8; 64],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<SignedHead> {
+        self.publish_raw(
+            AkdLabel(DESCRIPTOR_LABEL.to_vec()),
+            digest.to_vec(),
+            now,
+            rng,
+        )
+        .await
+    }
+
+    /// Lookup proof for the committed descriptor digest against the latest
+    /// head.
+    pub async fn lookup_descriptor(&self) -> Result<(LookupProof, SignedHead)> {
+        let head = self.latest().cloned().ok_or(KtError::Lookup)?;
+        let (proof, eh) = self
+            .dir
+            .lookup(AkdLabel(DESCRIPTOR_LABEL.to_vec()))
+            .await
+            .map_err(|_| KtError::Lookup)?;
+        if eh.epoch() != head.head.epoch {
+            return Err(KtError::Stale);
+        }
+        Ok((proof, head))
     }
 
     async fn publish_raw(

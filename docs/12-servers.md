@@ -20,6 +20,8 @@ Operators write `server.toml` (`config.rs`, `FileConfig`). Every key can be over
 | | `keys_dir` | `/var/lib/enclave/keys` | Long-term keys (§1.4) |
 | | `listen` | `127.0.0.1:7443` | Where the ingress reaches the server |
 | | `public_dir` | `/var/lib/enclave/public` | Files the front serves (KT pins, descriptor) |
+| | `nym_address` | empty | The ingress's Nym address, published in the descriptor |
+| | `server_list` | none | A copy of the foundation's signed list to serve (`DirKind::ServerList`), re-read when it changes |
 | `[policy]` | `effort_request`, `effort_claim`, `effort_blob`, `effort_username`, `inbox_quota`, `request_quota`, `token_quota`, `ttl_days` | as `Config` below | Abuse controls |
 | `[kt]` | `enabled` | `true` | Username log (`data_dir/kt.redb`, §3.1) |
 | `[push]` | `forward` | none | Push egress address for due wakes |
@@ -105,11 +107,13 @@ enclave-server init        [--config FILE]   create keys; print the server id
 enclave-server run         [--config FILE]   serve (state in redb, keys from disk)
 enclave-server show-id     [--config FILE]   print the server id
 enclave-server backup DIR  [--config FILE]   snapshot the database (server stopped)
+enclave-server restore SNAPSHOT [--config FILE]   put a snapshot back (server stopped)
+enclave-server descriptor  [--config FILE]   verify and print the published descriptor
 enclave-server healthcheck [--config FILE]   exit 0 if the server answers
 enclave-server dev [ADDR] [--domain NAME] [--kt-pins FILE] [--push-relay ADDR]
 ```
 
-`run` listens on `server.listen` with the length-prefixed frame transport (`09-transport.md` §1); in a deployment only the Nym ingress on the stack's internal network can reach it. Once a minute it steps the request-key chain if the day changed and expires old objects. With `[backup] dir` set it writes `server-<unix time>.redb` and `kt-<unix time>.redb` snapshots at start and every `interval_hours`, and keeps the newest `keep` of each. On SIGTERM or Ctrl-C it waits for the request in flight (which has already committed) and exits. A restore needs both a snapshot and the key directory; the key directory must be backed up separately, encrypted and off the host. `dev` is the all-in-memory development server: random keys every start, nothing persisted; a bare `enclave-server [ADDR]` runs it.
+`run` listens on `server.listen` with the length-prefixed frame transport (`09-transport.md` §1); in a deployment only the Nym ingress on the stack's internal network can reach it. Once a minute it steps the request-key chain if the day changed and expires old objects. With `[backup] dir` set it writes `server-<unix time>.redb` and `kt-<unix time>.redb` snapshots at start and every `interval_hours`, and keeps the newest `keep` of each. On SIGTERM or Ctrl-C it waits for the request in flight (which has already committed) and exits. A restore needs both a snapshot and the key directory; the key directory must be backed up separately, encrypted and off the host. `restore` refuses while `run` holds the database, keeps the files it replaces as `*.redb.old`, and restores `kt-<t>.redb` with `server-<t>.redb`. Restoring a key-transparency log older than the last head witnesses cosigned makes the next heads look like a fork to them (they refuse heads that don't extend the one they hold), so restore the newest snapshot. `dev` is the all-in-memory development server: random keys every start, nothing persisted; a bare `enclave-server [ADDR]` runs it.
 
 ## 2. Directory
 
@@ -270,7 +274,7 @@ A server whose witnesses collude can show different people different logs, each 
 
 The foundation's list of vetted servers, witnesses, call relays and push relays (`list.rs`, format in its module docs). It carries what changes rarely and what the foundation vouches for: identity keys, domains, operators and families, weights for new accounts, the key-transparency keys clients pin (head key and VRF key per server), the witness threshold, witnesses' cosigning keys and URLs, relays' link keys, and push relays' Nym addresses with their current and next keys. Short-lived keys are not in it: they come from the services, signed by the identity keys it lists.
 
-The list is signed twice under ctx `enclave/v1/update/server-list`: SLH-DSA-SHAKE-256s (the foundation key's SLH-DSA half is derived from a 32-byte secret under `enclave/v1/update/foundation-keygen`) and composite Ed448 + ML-DSA-87. `ServerList::verify` requires both, an unexpired list, and a sequence number higher than the one the client holds. `pick(draw)` chooses a server for a new account by weight. Not implemented yet (S2): shipping the list in the app, refreshing it over the mixnet (`DirKind::ServerList`), deriving `KtPolicy` from it, and `enclave-admin` to build and sign it; moving it under TUF is R2.
+The list is signed twice under ctx `enclave/v1/update/server-list`: SLH-DSA-SHAKE-256s (the foundation key's SLH-DSA half is derived from a 32-byte secret under `enclave/v1/update/foundation-keygen`) and composite Ed448 + ML-DSA-87. `ServerList::verify` requires both, an unexpired list, and a sequence number higher than the one the client holds. `pick(draw)` chooses a server for a new account by weight. A server serves the copy named by `server.server_list` as `DirKind::ServerList` (8), in chunks; it can't check the list (it holds no foundation key) and doesn't need to, since clients do. Not implemented yet (S2): shipping the list in the app, the client fetching and holding it, deriving `KtPolicy` from it, and `enclave-admin` to build and sign it; moving it under TUF is R2.
 
 ### 4.2 Request-key certificates
 
@@ -286,7 +290,7 @@ Day `d`'s key is valid from the start of day `d` to the end of day `d + 1`. A ze
 
 ### 4.3 Server descriptors
 
-`ServerDescriptor` (`descriptor.rs`) is what a server says about itself, self-signed under `enclave/v1/net/server-descriptor`: identity key, domain, operator, family, Nym address, onion address, policy (efforts, quotas, retention), key-transparency keys, request-key certificates for today and tomorrow, and a validity window of at most 3 days. Witnesses and call relays have the same kind of self-signed descriptor (`WitnessDescriptor` under `enclave/v1/kt/witness-descriptor`, id `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`; `RelayDescriptor` under `enclave/v1/calls/relay-descriptor`, id `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)`). Not implemented yet (S2): publishing descriptors at `https://<domain>/.well-known/enclave` and over the mixnet (`DirKind::Descriptor`), and committing each descriptor's digest to the key-transparency log.
+`ServerDescriptor` (`descriptor.rs`) is what a server says about itself, self-signed under `enclave/v1/net/server-descriptor`: identity key, domain, operator, family, Nym address, onion address, policy (efforts, quotas, retention), key-transparency keys, request-key certificates for today and tomorrow, and a validity window of at most 3 days. Witnesses and call relays have the same kind of self-signed descriptor (`WitnessDescriptor` under `enclave/v1/kt/witness-descriptor`, id `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`; `RelayDescriptor` under `enclave/v1/calls/relay-descriptor`, id `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)`). `enclave-server run` signs a descriptor at start and at every daily key rotation (valid two days, today's and tomorrow's key certificates), serves it as `DirKind::Descriptor` (7), writes it to `public_dir/descriptor.bin` for the front, and commits its SHA3-512 digest to its key-transparency log under the label `0x00 ‖ "descriptor"`, which no username can equal (`KtLog::commit_descriptor`, `lookup_descriptor`; test `descriptor_digests_are_committed`). Uploads of either kind are `Denied` (test `descriptor_and_list_are_served_not_uploaded`). `enclave-server descriptor` verifies and prints the file. Not implemented yet (S2): serving it at `https://<domain>/.well-known/enclave` (the front), and clients fetching descriptors and checking them against the committed digest.
 
 ### 4.4 Moving an account
 

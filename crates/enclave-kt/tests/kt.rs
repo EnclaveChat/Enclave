@@ -262,3 +262,27 @@ fn service_round_trip_from_sync_code() {
     assert_eq!(UsernameClaim::decode(&claim.encode()).unwrap(), claim);
     assert_eq!(claim.root(), Some([7; 64]));
 }
+
+/// A descriptor digest committed to the log is provable against the head,
+/// and no username lookup can reach its label.
+#[tokio::test(flavor = "multi_thread")]
+async fn descriptor_digests_are_committed() {
+    let mut rng = HedgedRng::new().unwrap();
+    let key = CompositeSigningKey::generate(&mut rng).unwrap();
+    let mut log = KtLog::new([1; 16], key, [9; 32]).await.unwrap();
+    let digest = [0x42u8; 64];
+    let sh = log.commit_descriptor(digest, NOW, &mut rng).await.unwrap();
+    assert_eq!(sh.head.epoch, 1);
+    let (proof, head) = log.lookup_descriptor().await.unwrap();
+    let r = akd::verify::lookup_verify::<enclave_kt::EnclaveKtConfig>(
+        log.vrf_public(),
+        head.head.root,
+        head.head.epoch,
+        akd::AkdLabel(enclave_kt::log::DESCRIPTOR_LABEL.to_vec()),
+        proof,
+    )
+    .unwrap();
+    assert_eq!(r.value.0, digest);
+    // The label isn't a name.
+    assert!(log.lookup("\0descriptor").await.is_err());
+}
