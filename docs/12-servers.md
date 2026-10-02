@@ -61,10 +61,11 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | Op | Server behavior |
 |---|---|
 | `Cover` | Count it; reply `Ok`. |
+| `RegisterTokens` + `EFFORT` (0x40) | Owner only (`Denied`), request inboxes only (`Denied`): the payload's `u32` (≤ 16,384, else `Malformed`) becomes the effort writers to it need, 0 for the server's (`13-operators.md` §2). |
 | `RegisterTokens` + `CREATE` | Verify the PoW (`Pow`). If the address exists: `Denied`. Otherwise create the inbox with `owner = credential_hash(token)`, `read = credential_hash(read_credential(token))`, request flag from `REQUEST_INBOX`, sequence numbers starting at 1. |
 | `RegisterTokens` | Inbox must exist (`NotFound`) and `credential_hash(token)` must equal `owner` (`Denied`). The payload must be a multiple of 32 B (`Malformed`); the unspent total must stay ≤ `token_quota` (`Quota`). Insert the hashes; with `REVOKE` (0x08), remove them instead (cancelled invite links). On a request inbox the hashes are invite capabilities. |
 | `Write` | Inbox must exist and not be a request inbox (`Denied`). Burn `token_hash(token)` or reply `Denied`. Store the envelope under the next sequence number, or `Quota` if the inbox holds `inbox_quota` envelopes. |
-| `WriteRequest` | Inbox must be a request inbox (`Denied`). With `INVITE` (0x08), burn `token_hash(token)` (an invite capability, `03-identity.md` §9.2) or reply `Denied`; otherwise verify the PoW (`Pow`). Store; when `request_quota` envelopes are pending, drop the oldest first (FIFO). |
+| `WriteRequest` | Inbox must be a request inbox (`Denied`). With `INVITE` (0x08), burn `token_hash(token)` (an invite capability, `03-identity.md` §9.2) or reply `Denied`; otherwise verify the PoW at the larger of the server's effort and the one the inbox's owner set (`Pow`). Store; when `request_quota` envelopes are pending, drop the oldest first (FIFO). |
 | `Poll` | `credential_hash(token[0..24])` must equal `read` (`Denied`). Return the first envelope with sequence number > `u64(token[24..32])`, with `FOUND`, the sequence number in the reply token, and `MORE` if another follows; or `Ok` with no envelope. |
 | `Ack` | Same credential check. Delete every envelope with sequence number ≤ `u64(token[24..32])`. |
 | `BlobPut` | If the chunk ID exists: `Denied`. Verify the PoW (`Pow`). Store the envelope region under the ID. |
@@ -476,6 +477,20 @@ Assumptions: 1.5 devices per account (150,000 devices), 5% of devices in Foregro
 | Decapsulation cost | ≈0.3 ms per request (X448 + ML-KEM-1024 decaps + EnclaveCombine + one open) | ≈2.2 cores (PLAN: 2 to 3) |
 
 As implemented, every request (including writes and cover) gets a reply unit, which doubles reply egress (`math/cover-traffic.md` §2.1). A server that holds two daily keys may try both on a request, so the decapsulation cost is up to twice as high around rotation.
+
+**Measured** (`cargo run --release -p enclave-server --example scale -- --accounts 100000`; a 4-vCPU cloud VM, redb on its virtual disk, 2026-10-02). The run fills a server with 100,000 accounts (an inbox and a request inbox each, 16 write tokens, one stored message: 400,000 sealed requests), then times 20,000 requests of each kind against that state, on one core:
+
+| Quantity | Measured |
+|---|---|
+| State on disk | 3.4 GiB, 35 KiB per account (mostly the stored 14 KiB envelope and redb's page overhead) |
+| Poll | 0.66 ms per request (1,513/s per core) |
+| Cover unit | 0.74 ms (1,361/s) |
+| Write (stored, synced to disk) | 2.0 ms (495/s), most of it the disk sync |
+| A replayed request, refused | 0.52 ms |
+| Resident memory | 1.4 GiB (redb's page cache) |
+| Cores for 7,375 requests/s (50% polls, 45% cover, 5% writes) | ≈5.6 |
+
+Where a request's time goes (`--example open_cost`): opening it is 0.42 ms, of which X448 is 0.29 ms (on `fiat-crypto`'s verified arithmetic; the `x448` crate took 0.52 ms) and ML-KEM-1024 decapsulation 0.03 ms; the 16 KiB random reply 0.05 ms; the replay-cache record and the operation's transaction the rest. So the estimate above (0.3 ms, 2 to 3 cores) was low by about two: a 100,000-account server needs about 6 cores of this class at peak, or fewer, faster ones. Writes are bounded by the disk's sync rate, which the replay cache doesn't add to (its records are committed without their own sync, `09-transport.md` §2.3). CI runs the same example with 2,000 accounts on every push (job `scale-smoke`) so it keeps working; the numbers above are rerun by hand on release candidates (`release-checklist.md`).
 
 ## 8. Errors
 

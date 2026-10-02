@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod admin;
 pub mod config;
 pub mod db;
 pub mod keys;
@@ -31,8 +32,8 @@ use enclave_kt::{KtError, KtInfo, KtService, UsernameClaim};
 use enclave_proto::bundle::{Bundle, Publication};
 use enclave_proto::manifest::{Manifest, SignedManifest};
 use enclave_rpc::api::{
-    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_FOUND, FLAG_GROUP,
-    FLAG_INVITE, FLAG_MORE, FLAG_REQUEST_INBOX, FLAG_REVOKE, Status,
+    self, DirAction, DirKind, DirReply, DirRequest, FLAG_CREATE, FLAG_EFFORT, FLAG_FOUND,
+    FLAG_GROUP, FLAG_INVITE, FLAG_MORE, FLAG_REQUEST_INBOX, FLAG_REVOKE, Status,
 };
 use enclave_rpc::{ServerKey, ServerSecret};
 use enclave_tokens::{PowProof, token_hash};
@@ -119,20 +120,26 @@ struct Inbox {
     request: bool,
     group: bool,
     next_seq: u64,
+    /// Proof-of-work effort its owner asks of request writers (0: the
+    /// server's).
+    effort: u32,
 }
 
 impl Inbox {
-    fn encode(&self) -> [u8; 73] {
-        let mut b = [0u8; 73];
+    /// `owner ‖ read ‖ flags ‖ u64 next_seq ‖ u32 effort` (77 B; records
+    /// written before the effort existed are 73 B, effort 0).
+    fn encode(&self) -> [u8; 77] {
+        let mut b = [0u8; 77];
         b[..32].copy_from_slice(&self.owner);
         b[32..64].copy_from_slice(&self.read);
         b[64] = u8::from(self.request) | u8::from(self.group) << 1;
-        b[65..].copy_from_slice(&self.next_seq.to_be_bytes());
+        b[65..73].copy_from_slice(&self.next_seq.to_be_bytes());
+        b[73..].copy_from_slice(&self.effort.to_be_bytes());
         b
     }
 
     fn decode(b: &[u8]) -> Option<Self> {
-        if b.len() != 73 {
+        if b.len() != 73 && b.len() != 77 {
             return None;
         }
         Some(Self {
@@ -140,7 +147,11 @@ impl Inbox {
             read: b[32..64].try_into().ok()?,
             request: b[64] & 1 != 0,
             group: b[64] & 2 != 0,
-            next_seq: u64::from_be_bytes(b[65..].try_into().ok()?),
+            next_seq: u64::from_be_bytes(b[65..73].try_into().ok()?),
+            effort: b
+                .get(73..77)
+                .and_then(|e| e.try_into().ok())
+                .map_or(0, u32::from_be_bytes),
         })
     }
 }
@@ -513,7 +524,7 @@ impl Server {
         };
         let k = cat(&u32::try_from(day).unwrap_or(u32::MAX).to_be_bytes(), proof);
         self.db
-            .write(|t| {
+            .write_lazy(|t| {
                 if t.has(db::POW_SPENT, &k)? {
                     return Ok(false);
                 }
@@ -531,7 +542,7 @@ impl Server {
     fn first_time(&mut self, key_id: u32, id: &[u8; 32]) -> bool {
         let k = cat(&key_id.to_be_bytes(), id);
         self.db
-            .write(|t| {
+            .write_lazy(|t| {
                 if t.has(db::REPLAYS, &k)? {
                     return Ok(false);
                 }
@@ -760,6 +771,7 @@ impl Server {
                 request: h.flags & FLAG_REQUEST_INBOX != 0,
                 group: false,
                 next_seq: 1,
+                effort: 0,
             };
             return self
                 .tx(|t| {
@@ -774,6 +786,30 @@ impl Server {
         let Ok(p) = api::unframe(env) else {
             return Status::Malformed;
         };
+        if h.flags & FLAG_EFFORT != 0 {
+            // The owner of a request inbox sets what writing to it costs.
+            let Some(effort) = p
+                .get(..4)
+                .and_then(|e| e.try_into().ok())
+                .map(u32::from_be_bytes)
+                .filter(|e| *e <= api::MAX_INBOX_EFFORT)
+            else {
+                return Status::Malformed;
+            };
+            return self
+                .tx(|t| {
+                    let Some(mut ib) = get_inbox(t, &mb)? else {
+                        return Ok(Status::NotFound);
+                    };
+                    if ib.owner != owner_hash || !ib.request {
+                        return Ok(Status::Denied);
+                    }
+                    ib.effort = effort;
+                    put_inbox(t, &mb, &ib)?;
+                    Ok(Status::Ok)
+                })
+                .unwrap_or_else(|s| s);
+        }
         if p.len() % 32 != 0 {
             return Status::Malformed;
         }
@@ -970,6 +1006,7 @@ impl Server {
                             request: false,
                             group: true,
                             next_seq: 1,
+                            effort: 0,
                         },
                     )?,
                     Some(ib) if ib.group && ib.owner == owner_hash => {}
@@ -987,9 +1024,18 @@ impl Server {
     fn write_request(&mut self, h: &RequestHeader, env: &[u8], now: u64) -> Status {
         let invite = h.flags & FLAG_INVITE != 0;
         if !invite {
+            // The server's effort, or more if the inbox's owner asked.
+            let asked = self
+                .db
+                .read(|r| r.get(db::INBOXES, &h.mailbox))
+                .ok()
+                .flatten()
+                .and_then(|b| Inbox::decode(&b))
+                .map_or(0, |ib| ib.effort);
+            let effort = self.cfg.effort_request.max(asked);
             let digest = sha3_512(env);
             let ctx = |d| api::pow_context_request(&h.mailbox, d, &digest);
-            if !self.spend_pow(ctx, self.cfg.effort_request, &h.token, now) {
+            if !self.spend_pow(ctx, effort, &h.token, now) {
                 return Status::Pow;
             }
         }
@@ -1065,6 +1111,30 @@ impl Server {
                 })
             })
             .collect()
+    }
+
+    /// Reports waiting for the operator with their ids, oldest first.
+    pub fn reports_by_id(&self) -> Vec<(u64, Report)> {
+        self.db
+            .read(|r| r.scan(db::REPORTS, b""))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                Some((
+                    head_u64(&k),
+                    Report {
+                        day: head_u64(&v),
+                        request_inbox: v.get(8..40)?.try_into().ok()?,
+                        body: api::ReportBody::decode(v.get(40..)?).ok()?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Forget report `id` (the operator dealt with it). Whether it existed.
+    pub fn dismiss_report(&mut self, id: u64) -> bool {
+        self.tx(|t| t.del(db::REPORTS, &be(id))).unwrap_or(false)
     }
 
     /// Hand the waiting reports to the operator and forget them here.

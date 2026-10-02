@@ -457,6 +457,11 @@ async fn run(args: &[String]) -> Result<(), String> {
     if let Some(fwd) = cfg.push.forward.clone() {
         spawn_push_forwarder(Arc::clone(&server), fwd);
     }
+    #[cfg(unix)]
+    spawn_admin_socket(
+        Arc::clone(&server),
+        cfg.server.data_dir.join(enclave_server::admin::SOCKET),
+    )?;
     let listener = TcpListener::bind(cfg.server.listen)
         .await
         .map_err(|e| e.to_string())?;
@@ -626,6 +631,39 @@ async fn shutdown_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// The operator's console (`enclave_server::admin`): one command per
+/// connection on a Unix socket only the server's user can open.
+#[cfg(unix)]
+fn spawn_admin_socket(server: Arc<Mutex<Server>>, path: PathBuf) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let _ = std::fs::remove_file(&path);
+    let listener =
+        tokio::net::UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                continue;
+            };
+            let server = Arc::clone(&server);
+            tokio::spawn(async move {
+                let (rd, mut wr) = sock.into_split();
+                let mut line = String::new();
+                let mut rd = BufReader::new(rd.take(4096));
+                if rd.read_line(&mut line).await.is_err() {
+                    return;
+                }
+                let answer =
+                    enclave_server::admin::command(&mut *server.lock().await, line.trim(), now());
+                let _ = wr.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    Ok(())
 }
 
 fn spawn_push_forwarder(server: Arc<Mutex<Server>>, to: String) {

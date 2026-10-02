@@ -9,7 +9,14 @@
 //! enclave-admin kt-pins LIST --foundation PUBLIC --out PINS [--now UNIX]
 //! enclave-admin descriptor verify server|witness|relay FILE [--id HEX] [--now UNIX]
 //! enclave-admin descriptor fetch DOMAIN --out FILE [--id HEX] [--ca PEM] [--now UNIX]
+//! enclave-admin reports [show N | dismiss N | close-request-inbox HEX] [--socket PATH]
+//! enclave-admin console COMMAND… [--socket PATH]
 //! ```
+//!
+//! `reports` and `console` talk to a running server through its console
+//! socket (`enclave_server::admin`, default
+//! `/var/lib/enclave/server/admin.sock`): run them in the server's
+//! container, `docker compose exec server enclave-admin reports`.
 //!
 //! `build` without `--key` writes the list unsigned: the foundation key
 //! can then stay on an offline machine, where `sign` shows what it is about
@@ -130,7 +137,9 @@ fn main() -> ExitCode {
         ["kt-pins", ..] => kt_pins(&args),
         ["descriptor", "verify", ..] => verify_descriptor(&args),
         ["descriptor", "fetch", ..] => fetch_descriptor(&args),
-        _ => Err("usage: enclave-admin foundation-keygen | server-list build|sign|verify | kt-pins | descriptor verify|fetch (see the module docs)".into()),
+        ["reports", ..] => reports(&args),
+        ["console", ..] => console(&args),
+        _ => Err("usage: enclave-admin foundation-keygen | server-list build|sign|verify | kt-pins | descriptor verify|fetch | reports | console (see the module docs)".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -139,6 +148,67 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Default console socket of a server in the compose stack.
+#[cfg(unix)]
+const CONSOLE: &str = "/var/lib/enclave/server/admin.sock";
+
+/// Send one command to a running server's console; print its answer.
+#[cfg(unix)]
+fn ask(args: &[String], line: &str) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let path = flag(args, "--socket").unwrap_or_else(|| CONSOLE.to_string());
+    let mut s = std::os::unix::net::UnixStream::connect(&path)
+        .map_err(|e| format!("{path}: {e} (is the server running, and is this its container?)"))?;
+    s.write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).map_err(|e| e.to_string())?;
+    print!("{answer}");
+    if answer.starts_with("ok") {
+        Ok(())
+    } else {
+        Err("the server refused".into())
+    }
+}
+
+#[cfg(not(unix))]
+fn ask(_: &[String], _: &str) -> Result<(), String> {
+    Err("the server console is a Unix socket".into())
+}
+
+/// The words of `args` from `from` on, up to the first `--flag`.
+fn words_from(args: &[String], from: usize) -> Vec<&str> {
+    args.iter()
+        .skip(from)
+        .take_while(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .collect()
+}
+
+fn reports(args: &[String]) -> Result<(), String> {
+    let line = match words_from(args, 1).as_slice() {
+        [] => "reports".to_string(),
+        ["show", n] => format!("report {n}"),
+        ["dismiss", n] => format!("dismiss {n}"),
+        ["close-request-inbox", h] => format!("close-request-inbox {h}"),
+        _ => {
+            return Err(
+                "usage: enclave-admin reports [show N | dismiss N | close-request-inbox HEX]"
+                    .into(),
+            );
+        }
+    };
+    ask(args, &line)
+}
+
+fn console(args: &[String]) -> Result<(), String> {
+    let words = words_from(args, 1);
+    if words.is_empty() {
+        return Err("usage: enclave-admin console COMMAND…".into());
+    }
+    ask(args, &words.join(" "))
 }
 
 fn foundation_keygen(args: &[String]) -> Result<(), String> {

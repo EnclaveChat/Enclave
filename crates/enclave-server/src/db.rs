@@ -178,18 +178,36 @@ impl Db {
         })
     }
 
-    /// Run `f` in one write transaction and commit it.
+    /// Run `f` in one write transaction and commit it durably (synced to
+    /// disk before this returns).
     pub fn write<R>(&self, f: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
+        self.write_with(true, f)
+    }
+
+    /// Like [`Db::write`], but the commit isn't synced on its own: it
+    /// becomes durable with the next durable commit, and a crash before
+    /// that loses it. For bookkeeping that a request's own durable write
+    /// carries along (the replay cache, spent proofs of work), so a request
+    /// costs one sync, not two.
+    pub fn write_lazy<R>(&self, f: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
+        self.write_with(false, f)
+    }
+
+    fn write_with<R>(&self, durable: bool, f: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
         match &self.backend {
             Backend::Redb(db) => {
-                let w = db.begin_write()?;
+                let mut w = db.begin_write()?;
+                if !durable {
+                    w.set_durability(redb::Durability::None)
+                        .map_err(|e| DbError(e.to_string()))?;
+                }
                 let r = f(&mut Tx {
                     inner: TxInner::Redb(&w),
                 })?;
                 w.commit()?;
                 Ok(r)
             }
-            Backend::Pg(pg) => pg.transaction(|t| {
+            Backend::Pg(pg) => pg.transaction(durable, |t| {
                 f(&mut Tx {
                     inner: TxInner::Pg(RefCell::new(t)),
                 })
@@ -206,7 +224,7 @@ impl Db {
                     inner: RxInner::Redb(r),
                 })
             }
-            Backend::Pg(pg) => pg.transaction(|t| {
+            Backend::Pg(pg) => pg.transaction(true, |t| {
                 f(&Rx {
                     inner: RxInner::Pg(RefCell::new(t)),
                 })

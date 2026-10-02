@@ -22,5 +22,6 @@ pub mod pwhash;
 pub mod rng;
 pub mod seal;
 pub mod sig;
+mod x448_ladder;
 
 pub use error::{Error, Result};

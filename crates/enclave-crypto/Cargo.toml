@@ -17,7 +17,8 @@ libcrux-ml-kem = { version = "0.0.10", default-features = false, features = ["ml
 libcrux-ml-dsa = { version = "0.0.10" }
 slh-dsa = "0.2.0-rc.5"
 ed448-goldilocks = "0.14.0-pre.15"
-x448 = "0.14.0-pre.12"
+# X448 on formally verified p448 field arithmetic (`x448_ladder.rs`).
+fiat-crypto = { version = "0.2.9", default-features = false }
 classic-mceliece-rust = { version = "3.1.0", features = ["mceliece8192128", "zeroize"] }
 chacha20 = { version = "0.10.2", features = ["xchacha"] }
 aes = "0.9.3"
@@ -32,6 +33,8 @@ rand_core_06 = { package = "rand_core", version = "0.6", features = ["getrandom"
 thiserror = "2"
 
 [dev-dependencies]
+# Oracle for `x448_ladder.rs`.
+x448 = "0.14.0-pre.12"
 hex = "0.4"
 hex-literal = "1.1.0"
 proptest = "1.11.0"

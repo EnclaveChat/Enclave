@@ -73,14 +73,21 @@ impl X448Secret {
 
     /// Public key for this secret.
     pub fn public(&self) -> X448Public {
-        X448Public(x448::x448_unchecked(*self.0, x448::X448_BASEPOINT_BYTES))
+        X448Public(crate::x448_ladder::x448(
+            &self.0,
+            &crate::x448_ladder::BASEPOINT,
+        ))
     }
 
     /// Diffie-Hellman. Fails on low-order or all-zero results.
     pub fn diffie_hellman(&self, peer: &X448Public) -> Result<Zeroizing<[u8; X448_LEN]>> {
-        x448::x448(*self.0, peer.0)
-            .map(Zeroizing::new)
-            .ok_or(Error::InvalidKey)
+        let ss = Zeroizing::new(crate::x448_ladder::x448(&self.0, &peer.0));
+        // Constant-time all-zero check (a low-order point gives zero).
+        let zero = ss.iter().fold(0u8, |acc, b| acc | b);
+        if subtle::ConstantTimeEq::ct_eq(&zero, &0).into() {
+            return Err(Error::InvalidKey);
+        }
+        Ok(ss)
     }
 }
 

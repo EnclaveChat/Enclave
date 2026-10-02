@@ -1645,6 +1645,27 @@ async fn report_to_the_operator() {
     let r = net.with_server(&S2, |s| s.take_reports()).unwrap();
     assert!(r[0].body.quotes.is_empty(), "quotes are optional");
 
+    // Ada makes message requests to her cost more for a month: a
+    // stranger's request still arrives (their device climbs the effort
+    // ladder), and a month later the server's own effort is back.
+    assert_eq!(ada.raise_request_effort().await.unwrap(), 256);
+    assert_eq!(ada.raise_request_effort().await.unwrap(), 1024);
+    let (mut kit, _) = Client::create(memory(), Arc::new(net.clone()), S2, "Kit")
+        .await
+        .unwrap();
+    kit.add_contact(&ada.card(), "hello from a stranger")
+        .await
+        .unwrap();
+    let ev = ada.sync().await.unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Request { root, .. } if *root == kit.root())),
+        "{ev:?}"
+    );
+    net.advance(enclave_core::client::RAISED_EFFORT_SECS + 1);
+    ada.sync().await.unwrap();
+    assert_eq!(ada.request_effort().unwrap().0, 0);
+
     assert!(
         net.with_server(&S2, |s| s.disable_request_inbox(&mo_inbox))
             .unwrap()

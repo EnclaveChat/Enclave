@@ -383,8 +383,9 @@ pub enum Cmd {
     /// typed), label.
     ShareLocation(String, String, String, String),
     /// Report a contact to their server's operator: id, reason (1 spam,
-    /// 2 abuse, 3 other), quote their latest messages, also block them.
-    Report(String, u8, bool, bool),
+    /// 2 abuse, 3 other), quote their latest messages, also block them,
+    /// make message requests to us cost more for a month (spam only).
+    Report(String, u8, bool, bool, bool),
     /// Make a sticker pack: title, pictures (as read from files).
     CreatePack(String, Vec<Vec<u8>>),
     /// Send a sticker: conversation, pack id, index.
@@ -897,7 +898,7 @@ impl Cmd {
             Cmd::ShareContact(c, who) => w.u8(51).str(c).str(who),
             Cmd::AddShared(c, s) => w.u8(52).str(c).u64(*s),
             Cmd::ShareLocation(c, la, lo, l) => w.u8(53).str(c).str(la).str(lo).str(l),
-            Cmd::Report(c, r, q, b) => w.u8(54).str(c).u8(*r).bool(*q).bool(*b),
+            Cmd::Report(c, r, q, b, e) => w.u8(54).str(c).u8(*r).bool(*q).bool(*b).bool(*e),
             Cmd::CreatePack(t, pics) => {
                 w.u8(55).str(t).len(pics.len());
                 for p in pics {
@@ -973,7 +974,7 @@ impl Cmd {
             51 => Cmd::ShareContact(r.str()?, r.str()?),
             52 => Cmd::AddShared(r.str()?, r.u64()?),
             53 => Cmd::ShareLocation(r.str()?, r.str()?, r.str()?, r.str()?),
-            54 => Cmd::Report(r.str()?, r.u8()?, r.bool()?, r.bool()?),
+            54 => Cmd::Report(r.str()?, r.u8()?, r.bool()?, r.bool()?, r.bool()?),
             55 => {
                 let t = r.str()?;
                 let n = r.len()?;

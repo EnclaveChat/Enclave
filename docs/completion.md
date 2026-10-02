@@ -40,7 +40,7 @@ The milestones are the ones in `completion-plan.md`. Each closes the items that 
 | S2 | Federation: descriptors checked against KT, server list, Enclave TLS (OpenSSL 3.5 interop), witnesses, front with ACME, admin tools, server moves | Done |
 | S3 | Image, compose stack, operator kit, 3-stack federation e2e in CI (images published to GHCR by R1) | Done (job `federation-e2e-tcp`) |
 | S4 | Production compose reachable only through Nym | Open (after N1–N4) |
-| S5 | Server completeness | In progress: done are Unicode usernames, tombstones, absence proofs, request replay cache, inbox proof of work, single-use proofs of work, the device-clock warning, C2SP cosignatures (Ed25519 and ML-DSA-44, checked with the Go reference), split-view proofs published to witnesses, PostgreSQL. Left: report tooling, 100k scale test |
+| S5 | Server completeness: Unicode usernames, tombstones, absence proofs, replay cache, inbox and single-use proofs of work, clock warning, C2SP cosignatures, published split views, PostgreSQL, report tooling, 100k scale run | Done (verifiable On-the-record reports come with P3) |
 | N0–N4 | Full Nym integration, credentials, fallback, M4 gate report | Open |
 | P1–P7 | Protocol completion | Open |
 | D1, R1 | Desktop shippable; release pipeline | Open |

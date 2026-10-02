@@ -585,7 +585,7 @@ export component AppWindow inherits Window {
     callback share-contact(string, string);
     callback add-shared(string, string);
     callback share-location(string, string, string, string);
-    callback report(string, int, bool, bool);
+    callback report(string, int, bool, bool, bool);
     callback add-pack(string, string);
     callback send-sticker(string, string, int);
     callback load-stickers();
@@ -610,6 +610,7 @@ export component AppWindow inherits Window {
     in-out property <int> report-reason: 1;
     in-out property <bool> report-quote: true;
     in-out property <bool> report-block: true;
+    in-out property <bool> report-costlier: true;
     in-out property <string> location-lat;
     // Photos and files in the open conversation.
     in property <int> gallery-count;
@@ -1843,13 +1844,19 @@ export component AppWindow inherits Window {
             on: root.report-block;
             toggled => { root.report-block = !root.report-block; }
         }
+        if root.report-reason == 1: SwitchRow {
+            label: "Make message requests cost more";
+            detail: "For a month, anyone sending you a message request has their device do more work first. It slows down people who send many; one message from a friend still goes through.";
+            on: root.report-costlier;
+            toggled => { root.report-costlier = !root.report-costlier; }
+        }
         HorizontalLayout {
             alignment: start;
             PrimaryButton {
                 text: root.busy ? "Sending…" : "Send report";
                 enabled: !root.busy;
                 clicked => {
-                    root.report(root.current-id, root.report-reason, root.report-quote, root.report-block);
+                    root.report(root.current-id, root.report-reason, root.report-quote, root.report-block, root.report-costlier);
                     root.sheet = Sheet.none;
                 }
             }

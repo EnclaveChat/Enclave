@@ -142,6 +142,7 @@ pub use migrate::Moved;
 pub use pins::MAX_PINS;
 pub use polls::{MAX_OPTIONS, PollView};
 pub use prefs::{ConvPrefs, MAX_PINNED_CONVERSATIONS};
+pub use reports::RAISED_EFFORT_SECS;
 pub use search::{Hit, Place};
 pub use servers::ListUpdate;
 pub use social::{MAX_HOLDERS, words_from_shares};
@@ -1144,6 +1145,11 @@ impl Client {
             return Err(e);
         }
         events.append(&mut self.audit_username(now).await?);
+        if let Err(e) = self.relax_request_effort(now).await
+            && matches!(e, CoreError::Net(_))
+        {
+            return Err(e);
+        }
         events.extend(self.process_kt(now).await?);
         if self.import_pending_history(now).await? > 0 {
             events.push(Event::HistoryImported);

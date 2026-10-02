@@ -132,6 +132,16 @@ jobs:
           ENCLAVE_REQUIRE_POSTGRES: "1"
         run: cargo test -p enclave-server --test backends --test restart --test replay -- --nocapture
 
+  scale-smoke:
+    name: server scale example (2,000 accounts)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      # The 100,000-account run behind 12-servers.md §7 is a release
+      # checklist step; this keeps the example working.
+      - run: cargo run --release -p enclave-server --example scale -- --accounts 2000 --samples 500 | tee -a "$GITHUB_STEP_SUMMARY"
+
   tls-interop:
     name: TLS interop (OpenSSL 3.5), ACME (pebble), C2SP cosignatures (Go)
     runs-on: ubuntu-24.04

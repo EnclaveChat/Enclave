@@ -435,7 +435,8 @@ Required but not yet implemented: dudect/ctgrind constant-time testing (`20-assu
 | ML-KEM-1024 | `libcrux-ml-kem` 0.0.10 (formally verified) | RustCrypto `ml-kem` |
 | ML-DSA-87 | `libcrux-ml-dsa` 0.0.10 | RustCrypto `ml-dsa` |
 | SLH-DSA-SHAKE-256s | RustCrypto `slh-dsa` 0.2 | `fips205` |
-| Ed448, X448 | `ed448-goldilocks`, `x448` | OpenSSL (system) |
+| Ed448 | `ed448-goldilocks` | OpenSSL (system) |
+| X448 | RFC 7748's Montgomery ladder (`x448_ladder.rs`) on `fiat-crypto`'s formally verified p448 field arithmetic, with fiat's constant-time select for the swap; 1.8× faster than the `x448` crate, which is every server request's main cost | RFC 7748 vectors (both single ones, 1 and 1,000 iterations), the `x448` crate on random inputs, OpenSSL (system) |
 | McEliece-8192128 | `classic-mceliece-rust` 3.1 (safe Rust) | — (round-trip and implicit-rejection tests only) |
 | XChaCha20, AES-256, CTR, SHA3, cSHAKE | RustCrypto `chacha20`, `aes`, `ctr`, `sha3`, `cshake` | — |
 | KMAC256 | In-house on `cshake` | `libcrux-kmac`, NIST SP 800-185 samples |

@@ -1395,7 +1395,7 @@ impl Engine {
                     }
                 }
             }
-            Cmd::Report(id, reason, quote, block) => {
+            Cmd::Report(id, reason, quote, block, costlier) => {
                 use enclave_rpc::api::ReportReason;
                 let Some(root) = self.root_of(&id) else {
                     return;
@@ -1415,13 +1415,20 @@ impl Engine {
                     .await
                     .is_ok();
                 let blocked = block && c.block(&root).await.is_ok();
-                self.status = match (sent, blocked) {
+                let raised = costlier
+                    && reason == ReportReason::Spam
+                    && c.raise_request_effort().await.is_ok();
+                let mut status = match (sent, blocked) {
                     (true, true) => "Reported and blocked. Their server's operator can close their account's request inbox.",
                     (true, false) => "Reported. Their server's operator can close their account's request inbox.",
                     (false, true) => "Blocked, but the report didn't go through. Check your connection.",
                     (false, false) => "Couldn't send the report. Check your connection.",
                 }
-                .into();
+                .to_string();
+                if raised {
+                    status.push_str(" Message requests to you cost more for the next month.");
+                }
+                self.status = status;
                 if blocked && self.selected == Some(root) {
                     let request = self
                         .client

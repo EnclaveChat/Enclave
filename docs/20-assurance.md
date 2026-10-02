@@ -123,7 +123,7 @@ Rules:
 ### 3.1 Funded audit (M1–M2)
 
 - RustCrypto `slh-dsa` (never audited);
-- `ed448-goldilocks` and `x448` (not audited);
+- `ed448-goldilocks` (not audited), and the X448 ladder in `enclave-crypto/src/x448_ladder.rs` (about 60 lines on `fiat-crypto`'s verified field arithmetic);
 - `classic-mceliece-rust` (no audit found);
 - EnclaveSeal-v1 and its implementation, KMAC256 implementation, EnclaveCombine.
 

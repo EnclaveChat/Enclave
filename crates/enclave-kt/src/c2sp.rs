@@ -284,7 +284,7 @@ mod tests {
         let key = B64.decode(v[0].splitn(3, '+').nth(2).unwrap()).unwrap();
         assert_eq!(key[0], COSIGNATURE_V1);
         assert_eq!(
-            v[0].splitn(3, '+').nth(1).unwrap(),
+            v[0].split('+').nth(1).unwrap(),
             hex(&key_id(&key_name(&[3; 16]), key[0], &key[1..]))
         );
         let key = B64.decode(v[1].splitn(3, '+').nth(2).unwrap()).unwrap();

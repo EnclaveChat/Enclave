@@ -115,8 +115,13 @@ impl Pg {
         })
     }
 
-    /// Run `f` in one transaction, committed if it returns `Ok`.
-    pub(crate) fn transaction<R>(&self, f: impl FnOnce(&mut dyn Kv) -> Result<R>) -> Result<R> {
+    /// Run `f` in one transaction, committed if it returns `Ok`; without
+    /// waiting for the commit to reach disk unless `durable`.
+    pub(crate) fn transaction<R>(
+        &self,
+        durable: bool,
+        f: impl FnOnce(&mut dyn Kv) -> Result<R>,
+    ) -> Result<R> {
         blocking(|| {
             let mut client = self
                 .client
@@ -126,6 +131,9 @@ impl Pg {
                 .as_mut()
                 .ok_or_else(|| DbError::new("postgres connection closed"))?;
             let mut t = client.transaction()?;
+            if !durable {
+                t.batch_execute("SET LOCAL synchronous_commit TO OFF")?;
+            }
             let r = f(&mut t)?;
             t.commit()?;
             Ok(r)

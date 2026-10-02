@@ -350,3 +350,41 @@ async fn fetch_a_descriptor_from_a_front() {
     assert!(!ok, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `enclave-admin reports` and `console` against a server's console socket
+/// (here a server in this process, served the way `enclave-server run`
+/// serves it).
+#[cfg(unix)]
+#[test]
+fn reports_through_a_server_console() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::env::temp_dir().join(format!("enclave-admin-console-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("admin.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let cfg = enclave_server::Config {
+        id: [1; 16],
+        ..enclave_server::Config::default()
+    };
+    let mut server = enclave_server::Server::new(cfg, (NOW / 86_400) as u32).unwrap();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut conn = conn.unwrap();
+            let mut line = String::new();
+            BufReader::new(&conn).read_line(&mut line).unwrap();
+            let answer = enclave_server::admin::command(&mut server, line.trim(), NOW);
+            conn.write_all(answer.as_bytes()).unwrap();
+        }
+    });
+    let s = sock.to_str().unwrap();
+    let (ok, out, _) = admin(&["reports", "--socket", s]);
+    assert!(ok && out.starts_with("ok 0 waiting"), "{out}");
+    let (ok, out, err) = admin(&["reports", "show", "3", "--socket", s]);
+    assert!(!ok && out.starts_with("error: no report #3"), "{out}{err}");
+    let (ok, out, _) = admin(&["console", "stats", "--socket", s]);
+    assert!(ok && out.contains("requests 0"), "{out}");
+    let (ok, _, err) = admin(&["reports", "--socket", "/nonexistent/admin.sock"]);
+    assert!(!ok && err.contains("is the server running"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

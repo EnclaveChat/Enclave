@@ -69,6 +69,14 @@ pub const FLAG_INVITE: u8 = 0x08;
 /// Request flag on `RegisterTokens`: remove the listed hashes (cancelling
 /// invite capabilities) instead of adding them.
 pub const FLAG_REVOKE: u8 = 0x08;
+/// `RegisterTokens` on a request inbox: set the proof-of-work effort its
+/// writers need (payload `u32`, 0 for the server's), at most
+/// [`MAX_INBOX_EFFORT`]. Its owner raises it after reporting spam
+/// (`13-operators.md` §2).
+pub const FLAG_EFFORT: u8 = 0x40;
+/// Highest effort an owner can ask of writers to its request inbox (the
+/// top of the clients' effort ladder).
+pub const MAX_INBOX_EFFORT: u32 = 16_384;
 
 /// Maximum payload bytes in one envelope.
 pub const MAX_PAYLOAD: usize = ENVELOPE_LEN - 4;

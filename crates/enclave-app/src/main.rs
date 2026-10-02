@@ -394,9 +394,9 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sheet(Sheet::Stickers);
     });
     let t = tx.clone();
-    ui.on_report(move |id, reason, quote, block| {
+    ui.on_report(move |id, reason, quote, block, costlier| {
         let reason = u8::try_from(reason).unwrap_or(3);
-        let _ = t.send(Cmd::Report(id.to_string(), reason, quote, block));
+        let _ = t.send(Cmd::Report(id.to_string(), reason, quote, block, costlier));
     });
     let t = tx.clone();
     ui.on_share_location(move |id, lat, lon, label| {
