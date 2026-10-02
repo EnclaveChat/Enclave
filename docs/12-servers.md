@@ -233,7 +233,7 @@ The username format is `@name@domain`. Unicode names (NFKC and UTS #39 skeletons
 
 ### 3.6 Not implemented yet
 
-The device-clock warning based on trusted time; C2SP cosignature interoperability; the front serving witness and server descriptors at their public URLs (S2); non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
+The device-clock warning based on trusted time; C2SP cosignature interoperability; non-existence proofs for "nobody has this name" (a server can falsely claim a name is unused, but cannot bind it to the wrong key).
 
 ### 3.7 Claims and lookups
 
@@ -292,17 +292,41 @@ Day `d`'s key is valid from the start of day `d` to the end of day `d + 1`. A ze
 
 ### 4.3 Server descriptors
 
-`ServerDescriptor` (`descriptor.rs`) is what a server says about itself, self-signed under `enclave/v1/net/server-descriptor`: identity key, domain, operator, family, Nym address, onion address, policy (efforts, quotas, retention), key-transparency keys, request-key certificates for today and tomorrow, and a validity window of at most 3 days. Witnesses and call relays have the same kind of self-signed descriptor (`WitnessDescriptor` under `enclave/v1/kt/witness-descriptor`, id `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`; `RelayDescriptor` under `enclave/v1/calls/relay-descriptor`, id `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)`). `enclave-server run` signs a descriptor at start and at every daily key rotation (valid two days, today's and tomorrow's key certificates), serves it as `DirKind::Descriptor` (7), writes it to `public_dir/descriptor.bin` for the front, and commits its SHA3-512 digest to its key-transparency log under the label `0x00 ‖ "descriptor"`, which no username can equal (`KtLog::commit_descriptor`, `lookup_descriptor`; test `descriptor_digests_are_committed`). Uploads of either kind are `Denied` (test `descriptor_and_list_are_served_not_uploaded`). `enclave-server descriptor` verifies and prints the file. Not implemented yet (S2): serving it at `https://<domain>/.well-known/enclave` (the front), and clients fetching descriptors and checking them against the committed digest.
+`ServerDescriptor` (`descriptor.rs`) is what a server says about itself, self-signed under `enclave/v1/net/server-descriptor`: identity key, domain, operator, family, Nym address, onion address, policy (efforts, quotas, retention), key-transparency keys, request-key certificates for today and tomorrow, and a validity window of at most 3 days. Witnesses and call relays have the same kind of self-signed descriptor (`WitnessDescriptor` under `enclave/v1/kt/witness-descriptor`, id `SHAKE256("enclave/v1/kt/witness-id" ‖ key)`; `RelayDescriptor` under `enclave/v1/calls/relay-descriptor`, id `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)`). `enclave-server run` signs a descriptor at start and at every daily key rotation (valid two days, today's and tomorrow's key certificates), serves it as `DirKind::Descriptor` (7), writes it to `public_dir/descriptor.bin` for the front, and commits its SHA3-512 digest to its key-transparency log under the label `0x00 ‖ "descriptor"`, which no username can equal (`KtLog::commit_descriptor`, `lookup_descriptor`; test `descriptor_digests_are_committed`). Uploads of either kind are `Denied` (test `descriptor_and_list_are_served_not_uploaded`). `enclave-server descriptor` verifies and prints the file. The front (§4.5) serves it at `https://<domain>/.well-known/enclave`. Not implemented yet (S2): clients fetching descriptors and checking them against the committed digest.
 
 ### 4.4 Moving an account
 
 A root-signed `Moved` record (ctx `enclave/v1/proto/moved`) is not implemented yet (S2).
 
+### 4.5 The front (`enclave-front`)
+
+The key-holding server has no HTTP surface. `enclave-front` is the one process of an operator's stack that faces the web, and holds no key but its TLS key:
+
+| URL | Serves |
+|---|---|
+| `https://<domain>/.well-known/enclave` | `public_dir/descriptor.bin`, as the server wrote it (`application/octet-stream`, cached 5 min); 404 before the first one |
+| `https://<domain>/witness/v1/…` | The stack's witness (§3.3), proxied to it on the internal network (`front.witness`, such as `http://witness:7446`); 404 when none is set |
+| `https://<domain>/healthz` | `ok` |
+| `http://<domain>/.well-known/acme-challenge/<token>` | ACME HTTP-01 answers in flight |
+| `http://<domain>/…` | 308 to the same path on `https://<domain>` |
+
+HTTPS uses the Enclave TLS profile only (`09-transport.md` §8): a client that offers no SecP384r1MLKEM1024 gets no connection. The proxy passes on the method, the path and the body; no header of the client's (address, `Forwarded`, user agent, cookies) reaches the witness, and bodies over 8 MiB are refused. Client addresses are dropped at `accept` and nothing is logged per request.
+
+Certificates (`front.tls`):
+
+- `acme` (default): from `front.acme_directory` (Let's Encrypt unless set) by HTTP-01, so `front.listen_http` (default `0.0.0.0:80`) must be reachable. The ACME account (`acme-account.json`) and the certificate (`cert.pem`, `key.pem` mode 0600) are kept in `front.data_dir`; the certificate on disk is used while it has more than 30 days left and is renewed after that, checked every 12 hours (every 10 minutes until one is held). The new certificate replaces the old one in place; connections after it get the new one. ACME traffic to the CA uses rustls's default profile (`compat_provider`), since public CAs don't offer the hybrid; `front.acme_ca_root` adds a root for a private or test CA.
+- `files`: `front.cert` and `front.key` (PEM), re-read every hour.
+- `self-signed`: made at start, for development.
+
+Configuration is `[front]` in the TOML file given by `--config`, or `ENCLAVE_FRONT__<KEY>`: `listen_https` (default `0.0.0.0:443`), `listen_http`, `domain` (required), `public_dir`, `witness`, `tls`, `acme_email`, `acme_directory`, `acme_ca_root`, `cert`, `key`, `data_dir`. `enclave-front run` serves; `enclave-front healthcheck` checks that both ports accept connections. Tests (`crates/enclave-front/tests/front.rs`): the descriptor and a real witness reached through the front by `HttpWitness` over the Enclave profile, a classical-only client refused, a certificate replaced while serving, the proxy dropping client headers, the HTTP side's challenge answers and redirect, and the whole ACME flow against pebble (CI job `tls-interop`): an account, the HTTP-01 answer, a certificate trusted under pebble's root and served over the Enclave profile, and a second check that keeps it.
+
+Not implemented yet: `/credgate/v1/*` for credentials (N3).
+
 ## 5. Relays
 
 `enclave-relay` as built: the relay-ticket service and the data plane with the interim link framing (`11-calls.md` §3.4). Its keys live in a key directory created by `enclave-relay init` (`keys.rs`): `identity.key` (a composite signing key; the relay id is `SHAKE256("enclave/v1/calls/relay-id" ‖ identity key)` and the key signs the relay's descriptor), `link.key` (the X448 secret for relay↔relay links, published in the descriptor) and `ticket-chain.key`, a daily seed chain (`enclave_service::SeedChain`). Day `d`'s ticket key is `KMAC256(seed_d, u32(d), 960, "enclave/v1/calls/ticket-key")` split into the X448 secret and the ML-KEM-1024 seed; `seed_{d+1} = KMAC256(seed_d, "", 256, "enclave/v1/calls/ticket-chain")`. The relay serves today's key and yesterday's (for requests sealed just before midnight), and publishes tomorrow's ahead. Spent Privacy Pass tokens are recorded in `data_dir/relay.redb` (`ledger.rs`) and committed before the ticket is issued, so a restart never accepts a token twice; they are kept 62 days. `enclave-relay run --config FILE` reads `[relay] listen` (default `0.0.0.0:51820`), `public_addr`, `family` (required), `operator`, `keys_dir`, `data_dir` and `peers` (peer descriptors in hex); `enclave-relay descriptor OUT` writes the signed `RelayDescriptor` (today's and tomorrow's ticket keys) that operators submit for the foundation's list; `healthcheck` checks the heartbeat file `run` writes every 30 s. Calls in progress do not survive a restart (sessions last at most 4 h and are held in memory).
 
-Not implemented yet (C2–C5): GotaTun WireGuard endpoints, a Rosenpass daemon for relay↔relay links, the SFU for group calls, and signed relay descriptors that declare the operator family (`enclave/v1/calls/relay-descriptor`). `enclave-push-relay` is in `10-push.md`. `enclave-witness` will package §3.3 as a service.
+Not implemented yet (C2–C5): GotaTun WireGuard endpoints, a Rosenpass daemon for relay↔relay links, and the SFU for group calls. `enclave-push-relay` is in `10-push.md`; the witness service is §3.3.
 
 ## 6. Deployment
 

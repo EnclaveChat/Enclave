@@ -56,6 +56,20 @@ pub fn server_config(
     Ok(c)
 }
 
+/// A server configuration with the Enclave profile whose certificate comes
+/// from `resolver` (so it can be replaced, after an ACME renewal, without
+/// a restart).
+pub fn server_config_with_resolver(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> Result<rustls::ServerConfig, rustls::Error> {
+    let mut c = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    c.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(c)
+}
+
 /// A client configuration with the Enclave profile, trusting `roots`.
 pub fn client_config(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, rustls::Error> {
     let mut c = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))

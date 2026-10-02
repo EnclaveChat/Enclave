@@ -110,6 +110,34 @@ jobs:
       - name: Every query gives its expected result
         run: cargo xtask proverif
 
+  tls-interop:
+    name: TLS interop (OpenSSL 3.5) and ACME (pebble)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      # Alpine 3.22 ships OpenSSL 3.5 with SecP384r1MLKEM1024.
+      - name: OpenSSL 3.5 image
+        run: printf 'FROM alpine:3.22\nRUN apk add --no-cache openssl\n' | docker build -q -t enclave-openssl35 -
+      - name: Pebble (test ACME CA)
+        run: |
+          GOBIN=$PWD/.pebble go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.8.0
+          src=$(go env GOMODCACHE)/github.com/letsencrypt/pebble/v2@v2.8.0
+          (cd "$src" && PEBBLE_VA_NOSLEEP=1 "$GITHUB_WORKSPACE/.pebble/pebble" -config test/config/pebble-config.json > /tmp/pebble.log 2>&1 &)
+          echo "ENCLAVE_PEBBLE_CA=$src/test/certs/pebble.minica.pem" >> "$GITHUB_ENV"
+          for i in $(seq 1 50); do grep -q "Listening on" /tmp/pebble.log && break; sleep 0.2; done
+      - name: Interop and ACME tests
+        env:
+          ENCLAVE_OPENSSL: docker run --rm -i --network host -v /tmp:/tmp enclave-openssl35 openssl
+          ENCLAVE_PEBBLE_DIRECTORY: https://localhost:14000/dir
+          ENCLAVE_PEBBLE_ROOT_URL: https://localhost:15000/roots/0
+          ENCLAVE_REQUIRE_INTEROP: "1"
+        run: |
+          cargo test -p enclave-tls --test openssl35 -- --nocapture
+          cargo test -p enclave-front --test front -- --nocapture
+      - if: failure()
+        run: cat /tmp/pebble.log
+
   done-gate:
     name: completion gate (report)
     runs-on: ubuntu-24.04
