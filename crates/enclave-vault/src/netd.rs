@@ -172,6 +172,23 @@ impl Transport for PipeTransport {
         enclave_net::transport::decode_server_key(&b)
     }
 
+    async fn exchange_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> enclave_net::Result<Option<Vec<u8>>> {
+        let server = *server;
+        // An empty reply: it went one way (a real reply is never empty).
+        let b = self
+            .call(|id| NetRequest::Oneway {
+                id,
+                server,
+                bytes: request,
+            })
+            .await?;
+        Ok((!b.is_empty()).then_some(b))
+    }
+
     fn set_route(&self, server: ServerId, route: enclave_net::transport::Route) {
         // Every netd, so a spare taking over knows the route too.
         let body = NetRequest::SetRoute {

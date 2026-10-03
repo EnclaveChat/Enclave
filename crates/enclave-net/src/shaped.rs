@@ -51,13 +51,15 @@ pub enum Shaping {
     On(Profile),
 }
 
-type Reply = oneshot::Sender<Result<Vec<u8>>>;
+type Reply = oneshot::Sender<Result<Option<Vec<u8>>>>;
 
 struct Job {
     server: ServerId,
     bytes: Vec<u8>,
     reply: Reply,
     droppable: bool,
+    /// Sent with [`Transport::exchange_oneway`]: no answer over the mixnet.
+    oneway: bool,
     waited: u32,
 }
 
@@ -223,15 +225,25 @@ impl ShapedTransport {
     fn send(&self, job: Job) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let r = inner.exchange(&job.server, job.bytes).await;
+            let r = if job.oneway {
+                inner.exchange_oneway(&job.server, job.bytes).await
+            } else {
+                inner.exchange(&job.server, job.bytes).await.map(Some)
+            };
             let _ = job.reply.send(r);
         });
     }
 
+    /// Cover units go one way (nobody needs their answer); cover polls are
+    /// answered like real polls, which they must look like.
     fn send_cover(&self, server: ServerId, bytes: Vec<u8>) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            let _ = inner.exchange(&server, bytes).await;
+            if bytes.len() == UNIT_LEN {
+                let _ = inner.exchange_oneway(&server, bytes).await;
+            } else {
+                let _ = inner.exchange(&server, bytes).await;
+            }
         });
     }
 
@@ -324,7 +336,8 @@ impl ShapedTransport {
         server: &ServerId,
         request: Vec<u8>,
         droppable: bool,
-    ) -> Result<Vec<u8>> {
+        oneway: bool,
+    ) -> Result<Option<Vec<u8>>> {
         let (tx, rx) = oneshot::channel();
         // Decide under the lock, send (or wait) after releasing it.
         let direct = {
@@ -350,6 +363,7 @@ impl ShapedTransport {
                     bytes: request,
                     reply: tx,
                     droppable,
+                    oneway,
                     waited: 0,
                 };
                 if size == UNIT_LEN {
@@ -364,7 +378,8 @@ impl ShapedTransport {
             }
         };
         match direct {
-            Some(request) => self.inner.exchange(server, request).await,
+            Some(request) if oneway => self.inner.exchange_oneway(server, request).await,
+            Some(request) => self.inner.exchange(server, request).await.map(Some),
             None => rx
                 .await
                 .map_err(|_| NetError::Unavailable("shaper stopped"))?,
@@ -375,11 +390,31 @@ impl ShapedTransport {
 #[async_trait::async_trait]
 impl Transport for ShapedTransport {
     async fn exchange(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
-        self.enqueue(server, request, false).await
+        self.enqueue(server, request, false, false)
+            .await?
+            .ok_or(NetError::BadReply)
     }
 
     async fn exchange_droppable(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
-        self.enqueue(server, request, true).await
+        self.enqueue(server, request, true, false)
+            .await?
+            .ok_or(NetError::BadReply)
+    }
+
+    async fn exchange_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.enqueue(server, request, false, true).await
+    }
+
+    async fn exchange_droppable_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.enqueue(server, request, true, true).await
     }
 
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {

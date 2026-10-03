@@ -94,7 +94,8 @@ pub struct Msg {
     pub outgoing: bool,
     /// "14:02".
     pub time: String,
-    /// 0 sending, 1 on its way, 2 delivered.
+    /// 0 sending, 1 on its way, 2 delivered, 3 read (and every incoming
+    /// message), 4 not delivered yet; negative: no mark (notes to self).
     pub status: i32,
     /// Sender name (incoming group messages).
     pub sender: String,

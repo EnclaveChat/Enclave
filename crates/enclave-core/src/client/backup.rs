@@ -209,6 +209,7 @@ impl Client {
             recovery_alert: None,
             meet: None,
             pending_bond: None,
+            pending_receipts: BTreeMap::new(),
         };
         // Never reuse a token pool: its tokens may have been handed out
         // after the backup was taken. (Pools are not backed up; this is

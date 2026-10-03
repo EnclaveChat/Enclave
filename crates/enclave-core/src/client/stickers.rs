@@ -255,9 +255,9 @@ impl Client {
             index,
             expires: timer,
         };
-        self.send_content(root, &content, now).await?;
+        self.send_tracked(root, id, &content, now).await?;
         self.send_self_copy(root, &content, now).await?;
-        m.delivered = true;
+        m.sent = true;
         self.put_message(root, &m)?;
         Ok(m)
     }
@@ -309,7 +309,7 @@ impl Client {
         let mut m = self.new_message(root, id, outgoing, "", expires, now)?;
         m.attachment = Some(att);
         m.sticker = Some(index);
-        m.delivered = outgoing;
+        m.sent = outgoing;
         self.put_message(root, &m)?;
         Ok(Some(Event::Message {
             root: *root,

@@ -5,6 +5,9 @@
 //!     kind 1: a sealed unit, body 16,384 B
 //!     kind 2: a sealed poll, body 2,048 B
 //!     kind 3: the server's key bundle, body 2,048 zero bytes
+//!     kind 5: a sealed unit sent one way, body 16,384 B: no reply blocks,
+//!             and the ingress drops the server's answer (writes and cover,
+//!             `docs/09-transport.md` §6.1)
 //! reply   = u8(1) ‖ u8 status ‖ req_id (16) ‖ u32 len ‖ data ‖ zeros   = 16,406 B
 //!     status 0: data is the server's answer; 1: the server didn't answer
 //! wake    = u8(1) ‖ u8(4) ‖ u16 len ‖ data ‖ zeros                     = 3,074 B
@@ -36,6 +39,8 @@ pub enum Kind {
     /// The server's key bundle (a zero-length request on the server's own
     /// framing).
     Key = 3,
+    /// A sealed unit sent one way: nobody answers it.
+    Oneway = 5,
 }
 
 /// A request on the mixnet.
@@ -61,6 +66,18 @@ impl Request {
         };
         Ok(Self {
             kind,
+            id,
+            body: sealed,
+        })
+    }
+
+    /// A sealed unit sent one way ([`Kind::Oneway`]).
+    pub fn oneway(id: [u8; 16], sealed: Vec<u8>) -> Result<Self> {
+        if sealed.len() != UNIT_LEN {
+            return Err(NymError::Malformed);
+        }
+        Ok(Self {
+            kind: Kind::Oneway,
             id,
             body: sealed,
         })
@@ -92,6 +109,7 @@ impl Request {
             (1, UNIT_LEN) => (Kind::Unit, body.to_vec()),
             (2, POLL_LEN) => (Kind::Poll, body.to_vec()),
             (3, POLL_LEN) => (Kind::Key, Vec::new()),
+            (5, UNIT_LEN) => (Kind::Oneway, body.to_vec()),
             _ => return Err(NymError::Malformed),
         };
         Ok(Self { kind, id, body })
@@ -192,7 +210,14 @@ mod tests {
             key.encode().len(),
             "a key fetch looks like a poll"
         );
-        for r in [unit, poll, key] {
+        let oneway = Request::oneway([4; 16], vec![9; UNIT_LEN]).unwrap();
+        assert_eq!(
+            oneway.encode().len(),
+            unit.encode().len(),
+            "a one-way unit is a unit's size"
+        );
+        assert!(Request::oneway([0; 16], vec![0; POLL_LEN]).is_err());
+        for r in [unit, poll, key, oneway] {
             assert_eq!(Request::decode(&r.encode()).unwrap(), r);
         }
         assert!(Request::for_sealed([0; 16], vec![0; 100]).is_err());

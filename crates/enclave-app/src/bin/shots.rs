@@ -402,7 +402,7 @@ fn main() -> Result<(), slint::PlatformError> {
             text: "The view from the café".into(),
             outgoing: false,
             time: "14:05".into(),
-            status: 2,
+            status: 3,
             seq: 900,
             file: "harbour.jpg".into(),
             image: true,
@@ -473,7 +473,7 @@ fn main() -> Result<(), slint::PlatformError> {
             text: "Hi, we met at the workshop on Thursday.".into(),
             outgoing: false,
             time: "13:20".into(),
-            status: 2,
+            status: 3,
             sender: String::new(),
             ..Default::default()
         }];
@@ -486,7 +486,7 @@ fn main() -> Result<(), slint::PlatformError> {
             text: "Hi Lucía, it's Robin from the book club.".into(),
             outgoing: true,
             time: "09:12".into(),
-            status: 2,
+            status: 3,
             sender: String::new(),
             ..Default::default()
         }];
@@ -527,7 +527,7 @@ fn main() -> Result<(), slint::PlatformError> {
             text: "Which book next?".into(),
             outgoing: false,
             time: "15:10".into(),
-            status: 2,
+            status: 3,
             sender: "Priya Raman".into(),
             seq: 40,
             poll_options: vec![
@@ -629,7 +629,7 @@ fn main() -> Result<(), slint::PlatformError> {
         shared.messages.push(Msg {
             outgoing: false,
             time: "14:06".into(),
-            status: 2,
+            status: 3,
             seq: 99,
             contact_name: "Tomasz Nowak".into(),
             ..Default::default()
@@ -647,7 +647,7 @@ fn main() -> Result<(), slint::PlatformError> {
         st.messages.push(Msg {
             outgoing: false,
             time: "14:07".into(),
-            status: 2,
+            status: 3,
             seq: 98,
             sticker: true,
             pack_added: false,
@@ -702,7 +702,7 @@ fn main() -> Result<(), slint::PlatformError> {
         vn.messages.push(Msg {
             outgoing: false,
             time: "14:08".into(),
-            status: 2,
+            status: 3,
             seq: 97,
             file: "voice-note.evn".into(),
             voice: true,

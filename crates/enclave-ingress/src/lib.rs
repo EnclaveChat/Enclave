@@ -6,8 +6,10 @@
 //! with the server's own framing (`u32 len ‖ bytes`; a zero-length request
 //! asks for the key bundle), and answers over the sender's reply blocks.
 //! It sees only sealed bytes and never learns who sent them: the mixnet
-//! gives it a single-use tag, not an address. Anything that doesn't parse,
-//! or comes without reply blocks, is dropped.
+//! gives it a single-use tag, not an address. A one-way unit
+//! (`Kind::Oneway`: writes and cover) goes to the server the same way and
+//! its answer is dropped, since nobody can be answered. Anything that
+//! doesn't parse, or any other request without reply blocks, is dropped.
 //!
 //! Push wakes take two more roles of the same binary (`docs/10-push.md`):
 //! [`forward`], the stack's push egress, takes wakes from the server
@@ -18,7 +20,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use enclave_nym::frame::{Reply, Request, WAKE_LEN, Wake};
+use enclave_nym::frame::{Kind, Reply, Request, WAKE_LEN, Wake};
 use enclave_nym::{Incoming, MixnetDriver};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,6 +41,8 @@ pub struct Stats {
     pub failed: AtomicU64,
     /// Messages dropped: malformed or without reply blocks.
     pub dropped: AtomicU64,
+    /// One-way units handed to the server.
+    pub oneway: AtomicU64,
 }
 
 /// Forward everything `driver` receives to the server at `server` until the
@@ -54,7 +58,21 @@ pub async fn serve(driver: Arc<dyn MixnetDriver>, server: SocketAddr, stats: Arc
 }
 
 async fn handle(driver: &dyn MixnetDriver, server: SocketAddr, m: Incoming, stats: &Stats) {
-    let (Ok(req), Some(tag)) = (Request::decode(&m.data), m.reply) else {
+    let Ok(req) = Request::decode(&m.data) else {
+        stats.dropped.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    if req.kind == Kind::Oneway {
+        // The server's answer has nowhere to go.
+        let sent = tokio::time::timeout(SERVER_TIMEOUT, roundtrip(server, &req.body)).await;
+        let counter = match sent {
+            Ok(Ok(_)) => &stats.oneway,
+            _ => &stats.failed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let Some(tag) = m.reply else {
         stats.dropped.fetch_add(1, Ordering::Relaxed);
         return;
     };

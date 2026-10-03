@@ -48,8 +48,14 @@ pub struct Message {
     pub id: MsgId,
     /// Sent by us.
     pub outgoing: bool,
-    /// Accepted by the recipient's server (outgoing only).
+    /// On its way: sent (one way over the mixnet) or accepted by the
+    /// recipient's server (outgoing only).
+    pub sent: bool,
+    /// The recipient's device has it: their delivery receipt came
+    /// (outgoing only).
     pub delivered: bool,
+    /// No receipt after every re-send: "Not delivered yet" (outgoing only).
+    pub stalled: bool,
     /// Ours: they read it. Theirs: we read it.
     pub read: bool,
     /// Unix time (local clock) when sent or received.
@@ -81,7 +87,9 @@ impl Message {
             seq,
             id,
             outgoing,
+            sent: false,
             delivered: false,
+            stalled: false,
             read: false,
             at,
             text,
@@ -98,7 +106,7 @@ impl Message {
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(4).u64(self.seq).fixed(&self.id);
+        w.u8(5).u64(self.seq).fixed(&self.id);
         w.u8(u8::from(self.outgoing))
             .u8(u8::from(self.delivered))
             .u8(u8::from(self.read))
@@ -130,13 +138,14 @@ impl Message {
             Some(i) => w.u8(1).u8(i),
             None => w.u8(0),
         };
+        w.u8(u8::from(self.sent) | (u8::from(self.stalled) << 1));
         w.finish()
     }
 
     pub(crate) fn decode(b: &[u8]) -> enclave_proto::Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if !(2..=4).contains(&version) {
+        if !(2..=5).contains(&version) {
             return Err(ProtoError::Decode);
         }
         let s = |r: &mut Reader<'_>, n| {
@@ -177,12 +186,21 @@ impl Message {
         } else {
             None
         };
+        // Before receipts, "delivered" meant accepted by the server.
+        let (sent, stalled) = if version >= 5 {
+            let f = r.u8()?;
+            (f & 1 != 0, f & 2 != 0)
+        } else {
+            (delivered, false)
+        };
         r.end()?;
         Ok(Self {
             seq,
             id,
             outgoing,
+            sent,
             delivered,
+            stalled,
             read,
             at,
             text,
@@ -506,9 +524,9 @@ impl Client {
             caption: caption.to_string(),
             expires: timer,
         };
-        self.send_content(root, &content, now).await?;
+        self.send_tracked(root, id, &content, now).await?;
         self.send_self_copy(root, &content, now).await?;
-        m.delivered = true;
+        m.sent = true;
         self.put_message(root, &m)?;
         Ok(m)
     }
@@ -556,10 +574,12 @@ impl Client {
         now: u64,
     ) -> Result<Vec<Event>> {
         let mut events = Vec::new();
+        let is_read = matches!(content, Content::Read(_));
         match content {
             Content::Text {
                 text, id, expires, ..
             } => {
+                self.note_receipt(root, id);
                 if self.find(root, &id).is_ok() {
                     return Ok(events); // duplicate
                 }
@@ -576,6 +596,7 @@ impl Client {
                 caption,
                 expires,
             } => {
+                self.note_receipt(root, id);
                 if self.find(root, &id).is_ok() {
                     return Ok(events);
                 }
@@ -632,13 +653,19 @@ impl Client {
                     });
                 }
             }
-            Content::Read(ids) => {
+            Content::Read(ids) | Content::Delivered(ids) => {
+                // Read implies delivered.
+                let read = is_read;
                 for id in ids {
+                    self.outbox_done(root, &id)?;
                     if let Ok(mut m) = self.find(root, &id)
                         && m.outgoing
-                        && !m.read
+                        && !(m.delivered && (m.read || !read))
                     {
-                        m.read = true;
+                        m.sent = true;
+                        m.delivered = true;
+                        m.stalled = false;
+                        m.read |= read;
                         self.put_message(root, &m)?;
                         events.push(Event::MessageChanged {
                             root: *root,
@@ -668,12 +695,14 @@ impl Client {
                 index,
                 expires,
             } => {
+                self.note_receipt(root, id);
                 if let Some(ev) = self.on_sticker(root, id, &pack, index, expires, false, now)? {
                     self.bump_unread(root)?;
                     events.push(ev);
                 }
             }
             Content::ContactShare { id, card } => {
+                self.note_receipt(root, id);
                 if let Some(ev) = self.on_contact_share(root, id, &card, false, now)? {
                     self.bump_unread(root)?;
                     events.push(ev);
@@ -684,6 +713,7 @@ impl Client {
                 location,
                 expires,
             } => {
+                self.note_receipt(root, id);
                 if let Some(ev) = self.on_location(root, id, &location, expires, false, now)? {
                     self.bump_unread(root)?;
                     events.push(ev);
@@ -725,7 +755,7 @@ impl Client {
             } => {
                 if self.find(to, &id).is_err() {
                     let mut m = self.new_message(to, id, true, &text, expires, now)?;
-                    m.delivered = true;
+                    m.sent = true;
                     self.put_message(to, &m)?;
                     events.push(Event::Message {
                         root: *to,
@@ -742,7 +772,7 @@ impl Client {
                 if self.find(to, &id).is_err() {
                     let mut m = self.new_message(to, id, true, &caption, expires, now)?;
                     m.attachment = Some(Attachment::decode(&attachment)?);
-                    m.delivered = true;
+                    m.sent = true;
                     self.put_message(to, &m)?;
                     events.push(Event::Message {
                         root: *to,

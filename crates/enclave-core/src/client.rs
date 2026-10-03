@@ -115,6 +115,7 @@ mod messages;
 mod migrate;
 mod moves;
 mod notes;
+pub mod outbox;
 mod pins;
 mod polls;
 mod prefs;
@@ -350,6 +351,9 @@ pub struct Client {
     meet: Option<(zeroize::Zeroizing<[u8; 32]>, Vec<u8>)>,
     /// Scanned their code; waiting for the person to compare Seal words.
     pending_bond: Option<(ContactCard, zeroize::Zeroizing<[u8; 32]>)>,
+    /// Messages received and not yet acknowledged with a delivery receipt
+    /// (`outbox.rs`), sent at the end of the sync that brought them.
+    pending_receipts: BTreeMap<[u8; 64], (u64, Vec<crate::content::MsgId>)>,
 }
 
 /// A session is identified by the peer root and the peer device.
@@ -534,6 +538,7 @@ impl Client {
             recovery_alert: None,
             meet: None,
             pending_bond: None,
+            pending_receipts: BTreeMap::new(),
         };
         Ok((client, words))
     }
@@ -608,6 +613,7 @@ impl Client {
             recovery_alert: None,
             meet: None,
             pending_bond: None,
+            pending_receipts: BTreeMap::new(),
         };
         client.resume_rename()?;
         Ok(client)
@@ -995,8 +1001,9 @@ impl Client {
         };
         let refilled = !tokens.is_empty();
         let mut msg = self.store_message(root, true, text, now)?;
-        self.send_content(
+        self.send_tracked(
             root,
+            msg.id,
             &Content::Text {
                 tokens,
                 text: text.to_string(),
@@ -1018,7 +1025,7 @@ impl Client {
             let c = c.clone();
             self.save_contact(&c)?;
         }
-        msg.delivered = true;
+        msg.sent = true;
         self.put_message(root, &msg)?;
         Ok(msg)
     }
@@ -1126,6 +1133,12 @@ impl Client {
         }
         events.append(&mut self.process_migrations(now).await?);
         events.append(&mut self.home_upkeep(now).await?);
+        // What arrived is acknowledged before the next round.
+        if let Err(e) = self.flush_receipts(now).await
+            && matches!(e, CoreError::Net(_))
+        {
+            return Err(e);
+        }
         Ok(events)
     }
 
@@ -1146,6 +1159,7 @@ impl Client {
             return Err(e);
         }
         events.append(&mut self.refresh_manifests(now).await?);
+        events.append(&mut self.resend_outbox(now).await?);
         events.append(&mut self.release_held(now).await?);
         events.append(&mut self.check_own_manifest(now).await?);
         if let Err(e) = self.push_migration(now).await
@@ -1519,163 +1533,171 @@ impl Client {
         if self.is_blocked(&root) {
             return Ok(Vec::new()); // dropped without a trace
         }
+        // Delivery receipts may ride along (`outbox.rs`).
+        let (content, receipts) = outbox::unwrap_receipts(&content)?;
         let (content, gossip) = gossip::unwrap(&content)?;
-        if root != self.account.root_public.0 {
-            self.on_gossip(&root, &gossip)?;
-        }
-        if root == self.account.root_public.0 {
-            // From another device of ours: self-copies and device changes.
-            return match Content::decode(&content)? {
-                Content::SelfCopy { to, content } => self.on_self_copy(&to, &content, now),
-                Content::Devices(v) => {
-                    self.stale_manifests.insert(root, v);
-                    Ok(Vec::new())
-                }
-                Content::History(b) => {
-                    if let Some(att) = history::history_ref(&b) {
-                        self.pending_history.push(att);
+        let mut acked = if root != self.account.root_public.0 && !receipts.is_empty() {
+            self.on_message_content(&root, Content::Delivered(receipts), now)?
+        } else {
+            Vec::new()
+        };
+        let rest = (|| -> Result<Vec<Event>> {
+            if root != self.account.root_public.0 {
+                self.on_gossip(&root, &gossip)?;
+            }
+            if root == self.account.root_public.0 {
+                // From another device of ours: self-copies and device changes.
+                return match Content::decode(&content)? {
+                    Content::SelfCopy { to, content } => self.on_self_copy(&to, &content, now),
+                    Content::Devices(v) => {
+                        self.stale_manifests.insert(root, v);
+                        Ok(Vec::new())
                     }
-                    Ok(Vec::new())
+                    Content::History(b) => {
+                        if let Some(att) = history::history_ref(&b) {
+                            self.pending_history.push(att);
+                        }
+                        Ok(Vec::new())
+                    }
+                    Content::Veto(b) => {
+                        self.on_veto(&root, &b)?;
+                        Ok(Vec::new())
+                    }
+                    Content::Migration(b) => {
+                        self.queue_migration(&root, &dev, &b)?;
+                        Ok(Vec::new())
+                    }
+                    Content::HomeMoved { .. } => {
+                        self.queue_home_moved(&content)?;
+                        Ok(Vec::new())
+                    }
+                    _ => Ok(Vec::new()),
+                };
+            }
+            let mut c = self
+                .contacts
+                .get(&root)
+                .cloned()
+                .ok_or(CoreError::NotFound)?;
+            let mut events = Vec::new();
+            let mut rest = None;
+            match Content::decode(&content)? {
+                Content::Hello {
+                    server,
+                    inbox,
+                    tokens,
+                    name,
+                    text,
+                    card,
+                    group: _,
+                    id,
+                } => {
+                    c.server = server;
+                    c.inbox = Some(inbox);
+                    c.name = sanitize_name(&name);
+                    if let Ok(card) = ContactCard::decode(&card)
+                        && card.root == root
+                    {
+                        c.card = Some(card);
+                    }
+                    add_tokens(&mut c.tokens, self.my_share(tokens));
+                    if c.state == ContactState::Pending {
+                        c.state = ContactState::Accepted;
+                        events.push(Event::Accepted { root });
+                    }
+                    if !text.is_empty() {
+                        rest = Some(Content::Text {
+                            tokens: Vec::new(),
+                            text,
+                            id,
+                            expires: 0,
+                        });
+                    }
+                }
+                Content::Tokens(tokens) => {
+                    add_tokens(&mut c.tokens, self.my_share(tokens));
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                }
+                Content::Devices(v) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    if v > c.manifest.version {
+                        self.stale_manifests.insert(root, v);
+                    }
                 }
                 Content::Veto(b) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
                     self.on_veto(&root, &b)?;
-                    Ok(Vec::new())
+                }
+                Content::KtHead(b) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    self.on_kt_head(&root, &b);
                 }
                 Content::Migration(b) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
                     self.queue_migration(&root, &dev, &b)?;
-                    Ok(Vec::new())
                 }
-                Content::HomeMoved { .. } => {
-                    self.queue_home_moved(&content)?;
-                    Ok(Vec::new())
+                Content::ServerMoved {
+                    server,
+                    inbox,
+                    request_inbox,
+                    vault_locator,
+                    tokens,
+                } => {
+                    self.on_server_moved(
+                        &mut c,
+                        (&server, &inbox, &request_inbox, &vault_locator),
+                        tokens,
+                    );
                 }
-                _ => Ok(Vec::new()),
-            };
-        }
-        let mut c = self
-            .contacts
-            .get(&root)
-            .cloned()
-            .ok_or(CoreError::NotFound)?;
-        let mut events = Vec::new();
-        let mut rest = None;
-        match Content::decode(&content)? {
-            Content::Hello {
-                server,
-                inbox,
-                tokens,
-                name,
-                text,
-                card,
-                group: _,
-                id,
-            } => {
-                c.server = server;
-                c.inbox = Some(inbox);
-                c.name = sanitize_name(&name);
-                if let Ok(card) = ContactCard::decode(&card)
-                    && card.root == root
-                {
-                    c.card = Some(card);
+                Content::RecoveryShare(share) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    self.keep_recovery_share(&root, &share)?;
+                    events.push(Event::RecoveryShareReceived { root });
                 }
-                add_tokens(&mut c.tokens, self.my_share(tokens));
-                if c.state == ContactState::Pending {
-                    c.state = ContactState::Accepted;
-                    events.push(Event::Accepted { root });
+                Content::GroupWelcome(welcome) => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    if let Some(ev) = self.on_group_welcome(&root, &welcome, now)? {
+                        events.push(ev);
+                    }
                 }
-                if !text.is_empty() {
+                Content::GroupCards { group_id, cards } => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    self.on_group_cards(&root, &group_id, &cards)?;
+                }
+                Content::Text {
+                    tokens,
+                    text,
+                    id,
+                    expires,
+                } => {
+                    add_tokens(&mut c.tokens, self.my_share(tokens));
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
                     rest = Some(Content::Text {
                         tokens: Vec::new(),
                         text,
                         id,
-                        expires: 0,
+                        expires,
                     });
                 }
-            }
-            Content::Tokens(tokens) => {
-                add_tokens(&mut c.tokens, self.my_share(tokens));
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-            }
-            Content::Devices(v) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                if v > c.manifest.version {
-                    self.stale_manifests.insert(root, v);
+                other => {
+                    c.received_since_refill = c.received_since_refill.saturating_add(1);
+                    rest = Some(other);
                 }
             }
-            Content::Veto(b) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                self.on_veto(&root, &b)?;
+            self.contacts.insert(root, c.clone());
+            self.save_contact(&c)?;
+            if let Some(content) = rest {
+                events.extend(self.on_message_content(&root, content, now)?);
             }
-            Content::KtHead(b) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                self.on_kt_head(&root, &b);
-            }
-            Content::Migration(b) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                self.queue_migration(&root, &dev, &b)?;
-            }
-            Content::ServerMoved {
-                server,
-                inbox,
-                request_inbox,
-                vault_locator,
-                tokens,
-            } => {
-                self.on_server_moved(
-                    &mut c,
-                    (&server, &inbox, &request_inbox, &vault_locator),
-                    tokens,
-                );
-            }
-            Content::RecoveryShare(share) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                self.keep_recovery_share(&root, &share)?;
-                events.push(Event::RecoveryShareReceived { root });
-            }
-            Content::GroupWelcome(welcome) => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                if let Some(ev) = self.on_group_welcome(&root, &welcome, now)? {
-                    events.push(ev);
-                }
-            }
-            Content::GroupCards { group_id, cards } => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                self.on_group_cards(&root, &group_id, &cards)?;
-            }
-            Content::Text {
-                tokens,
-                text,
-                id,
-                expires,
-            } => {
-                add_tokens(&mut c.tokens, self.my_share(tokens));
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                rest = Some(Content::Text {
-                    tokens: Vec::new(),
-                    text,
-                    id,
-                    expires,
-                });
-            }
-            other => {
-                c.received_since_refill = c.received_since_refill.saturating_add(1);
-                rest = Some(other);
-            }
-        }
-        self.contacts.insert(root, c.clone());
-        self.save_contact(&c)?;
-        if let Some(content) = rest {
-            events.extend(self.on_message_content(&root, content, now)?);
-        }
-        Ok(events)
+            Ok(events)
+        })()?;
+        acked.extend(rest);
+        Ok(acked)
     }
 
     async fn send_content(&mut self, root: &[u8; 64], content: &Content, now: u64) -> Result<()> {
         let (server, h, env) = self.seal_content(root, content, false)?;
-        self.rpc
-            .call_ok(&server, h, &env, now, &mut self.rng)
-            .await?;
-        Ok(())
+        self.rpc.write(&server, h, &env, now, &mut self.rng).await
     }
 
     /// Seal `content` for `root`'s devices, spending a write token. A
@@ -1699,6 +1721,15 @@ impl Client {
             gossip::wrap(&bytes, &items)?
         } else {
             bytes
+        };
+        // So do delivery receipts owed to this contact, except on a unit
+        // that may be dropped.
+        let bytes = if droppable {
+            bytes
+        } else {
+            let room = capacity.saturating_sub(bytes.len());
+            let ids = self.take_receipts(root, room);
+            outbox::wrap_receipts(&bytes, &ids)
         };
         let c = self.contacts.get_mut(root).ok_or(CoreError::NotFound)?;
         let inbox = c.inbox.ok_or(CoreError::NotAccepted)?;

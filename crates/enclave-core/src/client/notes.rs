@@ -32,6 +32,7 @@ impl Client {
         let own = self.account.root_public.0;
         let seq = self.next_note_seq()?;
         let mut m = Message::new(seq, id, true, now, text.to_string());
+        m.sent = true;
         m.delivered = true;
         m.read = true;
         self.put_message(&own, &m)?;

@@ -81,6 +81,14 @@ impl Transport for Routed {
         self.pick(server).server_key(server).await
     }
 
+    async fn exchange_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> enclave_net::Result<Option<Vec<u8>>> {
+        self.pick(server).exchange_oneway(server, request).await
+    }
+
     fn set_route(&self, server: ServerId, route: Route) {
         let nym = matches!(route, Route::Nym(_));
         // A Nym route without the mixnet client can't be used: the
@@ -232,6 +240,14 @@ fn main() -> ExitCode {
                         t.server_key(&server)
                             .await
                             .map(|k| encode_server_key(&k))
+                            .map_err(|e| e.to_string()),
+                    ),
+                    // Empty: it went one way.
+                    NetRequest::Oneway { id, server, bytes } => (
+                        id,
+                        t.exchange_oneway(&server, bytes)
+                            .await
+                            .map(Option::unwrap_or_default)
                             .map_err(|e| e.to_string()),
                     ),
                     NetRequest::SetRoute { .. } => return,

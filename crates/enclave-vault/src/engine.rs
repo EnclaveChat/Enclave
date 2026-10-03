@@ -440,10 +440,15 @@ fn display(m: &enclave_core::Message, now: u64) -> Msg {
     for r in &m.reactions {
         text.push_str(&format!("  {}", r.emoji));
     }
-    // 0 sending privately, 1 on its way (accepted by their server), 2 read.
+    // 0 sending privately, 1 on its way, 2 delivered (their receipt),
+    // 3 read, 4 not delivered yet (no receipt after every re-send).
     let status = if !m.outgoing || m.read {
-        2
+        3
     } else if m.delivered {
+        2
+    } else if m.stalled {
+        4
+    } else if m.sent {
         1
     } else {
         0

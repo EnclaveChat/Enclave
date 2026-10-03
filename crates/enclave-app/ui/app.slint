@@ -51,7 +51,8 @@ export struct DeviceRow {
     history-pending: bool,
 }
 
-// status: 0 sending privately, 1 on its way, 2 delivered.
+// status: 0 sending privately, 1 on its way, 2 delivered, 3 read,
+// 4 not delivered yet.
 export struct PollOption {
     text: string,
     count: int,
@@ -118,10 +119,24 @@ component DeliveryMark inherits Rectangle {
     height: 10px;
     border-radius: 5px;
     border-width: 1.5px;
-    border-color: Tokens.meta-on-bubble-out;
-    background: root.status >= 2 ? Tokens.meta-on-bubble-out : transparent;
+    border-color: root.status == 4 ? Tokens.danger : Tokens.meta-on-bubble-out;
+    background: root.status == 2 || root.status == 3 ? Tokens.meta-on-bubble-out : transparent;
     accessible-role: image;
-    accessible-label: root.status == 0 ? "Sending privately" : root.status == 1 ? "On its way" : "Read";
+    accessible-label: root.status == 0 ? "Sending privately"
+        : root.status == 1 ? "On its way"
+        : root.status == 2 ? "Delivered"
+        : root.status == 3 ? "Read"
+        : "Not delivered yet";
+    // Read: a second ring around the filled mark.
+    if root.status == 3: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: Tokens.meta-on-bubble-out;
+    }
     if root.status == 1: Rectangle {
         x: 0;
         width: parent.width / 2;

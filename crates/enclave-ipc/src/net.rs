@@ -26,6 +26,17 @@ pub enum NetRequest {
         /// Server.
         server: [u8; 16],
     },
+    /// Send a sealed unit that needs no answer
+    /// (`Transport::exchange_oneway`). The reply is empty when it went one
+    /// way (over the mixnet), else the server's reply.
+    Oneway {
+        /// Request number.
+        id: u32,
+        /// Server.
+        server: [u8; 16],
+        /// Sealed unit.
+        bytes: Vec<u8>,
+    },
     /// Reach a server by this route from now on (`HOST:PORT` or
     /// `nym:ADDRESS`, as in netd's `--server`). No reply.
     SetRoute {
@@ -59,6 +70,9 @@ impl NetRequest {
             NetRequest::SetRoute { server, route } => {
                 w.u8(3).bytes(server).str(route);
             }
+            NetRequest::Oneway { id, server, bytes } => {
+                w.u8(4).u32(*id).bytes(server).bytes(bytes);
+            }
         }
         w.0
     }
@@ -82,6 +96,11 @@ impl NetRequest {
             3 => NetRequest::SetRoute {
                 server: server(&mut r)?,
                 route: r.str()?,
+            },
+            4 => NetRequest::Oneway {
+                id: r.u32()?,
+                server: server(&mut r)?,
+                bytes: r.bytes()?,
             },
             _ => return Err(IpcError::Malformed),
         };

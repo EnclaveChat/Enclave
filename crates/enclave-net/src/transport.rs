@@ -28,6 +28,27 @@ pub trait Transport: Send + Sync {
     async fn exchange_droppable(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
         self.exchange(server, request).await
     }
+    /// Send a sealed unit that needs no answer (a write, cover). Over the
+    /// mixnet it goes one way, with no reply blocks, and the result is
+    /// `None`: whether it arrived is learned later (a delivery receipt).
+    /// Other transports exchange as usual and return the reply, so its
+    /// status can still be checked.
+    async fn exchange_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.exchange(server, request).await.map(Some)
+    }
+    /// [`Transport::exchange_oneway`] for something that may be dropped
+    /// (see [`Transport::exchange_droppable`]).
+    async fn exchange_droppable_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.exchange_droppable(server, request).await.map(Some)
+    }
     /// Start (`true`) or end a bulk transfer: a shaping transport may then
     /// send without waiting for the clock (a large file, catch-up, account
     /// setup), where its profile allows. Calls nest.
@@ -301,13 +322,32 @@ impl NymTransport {
         self.pending.lock().map(|p| p.len()).unwrap_or(0)
     }
 
-    async fn roundtrip(&self, server: &ServerId, sealed: Vec<u8>) -> Result<Vec<u8>> {
-        let to = self
-            .routes
+    fn route(&self, server: &ServerId) -> Result<String> {
+        self.routes
             .read()
             .ok()
             .and_then(|r| r.get(server).cloned())
-            .ok_or_else(|| NetError::Unreachable("no Nym address for that server".into()))?;
+            .ok_or_else(|| NetError::Unreachable("no Nym address for that server".into()))
+    }
+
+    /// A sealed unit with no reply blocks: nothing comes back.
+    async fn send_oneway(&self, server: &ServerId, sealed: Vec<u8>) -> Result<()> {
+        let to = self.route(server)?;
+        let mut id = [0u8; 16];
+        enclave_crypto::rng::HedgedRng::new()
+            .and_then(|mut r| r.fill("net/nym-request-id", &mut id))
+            .map_err(|_| NetError::Unavailable("randomness"))?;
+        let frame = enclave_nym::frame::Request::oneway(id, sealed)
+            .map_err(|_| NetError::BadReply)?
+            .encode();
+        self.driver
+            .send(&to, frame, 0)
+            .await
+            .map_err(|e| NetError::Unreachable(e.to_string()))
+    }
+
+    async fn roundtrip(&self, server: &ServerId, sealed: Vec<u8>) -> Result<Vec<u8>> {
+        let to = self.route(server)?;
         let mut id = [0u8; 16];
         enclave_crypto::rng::HedgedRng::new()
             .and_then(|mut r| r.fill("net/nym-request-id", &mut id))
@@ -362,6 +402,25 @@ impl Transport for NymTransport {
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
         let bundle = self.roundtrip(server, Vec::new()).await?;
         verify_key_bundle(server, &bundle, self.now())
+    }
+
+    async fn exchange_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        if request.len() != enclave_wire::UNIT_LEN {
+            return self.roundtrip(server, request).await.map(Some);
+        }
+        self.send_oneway(server, request).await.map(|()| None)
+    }
+
+    async fn exchange_droppable_oneway(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.exchange_oneway(server, request).await
     }
 
     fn set_route(&self, server: ServerId, route: Route) {

@@ -125,8 +125,15 @@ async fn request_accept_chat_refill_and_reopen() {
             .await
             .unwrap();
     }
+    // Fourteen messages (and Alice's delivery receipt for Bob's last one,
+    // which rode on the first of them).
+    let messages = |ev: &[Event]| {
+        ev.iter()
+            .filter(|e| matches!(e, Event::Message { .. }))
+            .count()
+    };
     let ev = bob.sync().await.unwrap();
-    assert_eq!(ev.len(), 14);
+    assert_eq!(messages(&ev), 14, "{ev:?}");
     alice.sync().await.unwrap();
     for i in 0..10 {
         alice
@@ -145,7 +152,7 @@ async fn request_accept_chat_refill_and_reopen() {
     assert!(Client::open(wrong, Arc::new(net.clone())).is_err());
     let mut bob = Client::open(bob_opts(), Arc::new(net.clone())).unwrap();
     let ev = bob.sync().await.unwrap();
-    assert_eq!(ev.len(), 10);
+    assert_eq!(messages(&ev), 10, "{ev:?}");
     let history = bob.messages(&alice_root).unwrap();
     assert_eq!(history.len(), 1 + 1 + 1 + 1 + 14 + 10);
     assert!(history.windows(2).all(|w| w[0].seq < w[1].seq));
@@ -153,10 +160,12 @@ async fn request_accept_chat_refill_and_reopen() {
     bob.send_text(&alice_root, "back after a restart")
         .await
         .unwrap();
+    // (with Bob's delivery receipts riding on it)
     let ev = alice.sync().await.unwrap();
-    assert!(
-        matches!(&ev[..], [Event::Message { message, .. }] if message.text == "back after a restart")
-    );
+    assert_eq!(messages(&ev), 1, "{ev:?}");
+    assert!(ev.iter().any(
+        |e| matches!(e, Event::Message { message, .. } if message.text == "back after a restart")
+    ));
 
     // Verification and removal.
     bob.set_verified(&alice_root, true).unwrap();

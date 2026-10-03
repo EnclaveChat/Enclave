@@ -278,7 +278,7 @@ Other crates:
 - **Loop cover:** every 10 s in Foreground and Maximum, every tick in Background. The client is rebuilt only at profile transitions (RT-12).
 - **Packet pacing:** a tick's Sphinx packets are spread evenly across the tick (`09` §6.3).
 - **Self-loop probes** (`net/loop-probe`) and **RT-02 gateway switching:** loss >10% or latency >5× the median over 50 exchanges, at most one switch per 10 min.
-- **`FLAG_NO_REPLY`:** writes and cover carry 0 SURBs, so a tick is 1 unit + 1 poll up and 1 unit down (`09` open question 5).
+- **One-way writes:** writes and cover carry 0 SURBs, so a tick is 1 unit + 1 poll up and 1 unit down (`09` open question 5). Done: messages, self-copies, group posts, typing and unit cover go one way, with delivery receipts and re-sends (`09` §6.1). Left: confining reply-bearing unit requests to bulk windows, and poll-sized directory reads.
 - **Bulk cap:** 40 packets/s (`09` §6.4).
 - **Maximum privacy:** push off, fallback forbidden, waits for all 3 KEMs (`09` §6.6, `04` §8).
 

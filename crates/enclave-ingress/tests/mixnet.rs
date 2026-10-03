@@ -315,3 +315,78 @@ async fn wakes_cross_the_mixnet_one_way() {
     assert_eq!(ingress_stats.dropped.load(Ordering::Relaxed), 2);
     assert_eq!(ingress_stats.answered.load(Ordering::Relaxed), 2);
 }
+
+/// A write sent one way carries no reply blocks: the ingress hands it to
+/// the server and drops the answer, nothing comes back over the mixnet, and
+/// the envelope is there for the owner's next poll (`docs/09-transport.md`
+/// §6.1).
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_go_one_way() {
+    let (addr, id) = spawn_server().await;
+    let net = FakeMixnet::default();
+    let stats = Arc::new(Stats::default());
+    tokio::spawn(serve(
+        Arc::new(net.client("ingress-a")),
+        addr,
+        Arc::clone(&stats),
+    ));
+    let t = Arc::new(NymTransport::new(
+        Arc::new(net.client("phone")),
+        HashMap::from([(id, "ingress-a".to_string())]),
+        Duration::from_secs(10),
+    ));
+    let key = t.server_key(&id).await.unwrap();
+    let mut rng = HedgedRng::new().unwrap();
+    let (owner, mailbox, token) = ([3u8; 32], [4u8; 32], [5u8; 32]);
+    let ok = |reply: Vec<u8>, ex: enclave_rpc::Exchange| {
+        let (rh, body) = ex.open_reply(&reply).unwrap();
+        assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+        (rh, body)
+    };
+    for (flags, body) in [
+        (FLAG_CREATE, Vec::new()),
+        (0, enclave_tokens::token_hash(&token).to_vec()),
+    ] {
+        let h = RequestHeader {
+            op: Op::RegisterTokens,
+            flags,
+            mailbox,
+            token: owner,
+        };
+        let (bytes, ex) =
+            seal_request(&key, &h, &api::frame(&body, &mut rng).unwrap(), &mut rng).unwrap();
+        ok(t.exchange(&id, bytes).await.unwrap(), ex);
+    }
+    let replies_before = net.stats().replies;
+
+    let envelope = vec![0x24; ENVELOPE_LEN];
+    let write = RequestHeader {
+        op: Op::Write,
+        flags: 0,
+        mailbox,
+        token,
+    };
+    let (bytes, _) = seal_request(&key, &write, &envelope, &mut rng).unwrap();
+    assert_eq!(t.exchange_oneway(&id, bytes).await.unwrap(), None);
+    for _ in 0..100 {
+        if stats.oneway.load(Ordering::Relaxed) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(stats.oneway.load(Ordering::Relaxed), 1);
+    assert_eq!(net.stats().replies, replies_before, "nothing came back");
+
+    let mut cred = [0u8; 32];
+    cred[..24].copy_from_slice(&api::read_credential(&owner));
+    let poll = RequestHeader {
+        op: Op::Poll,
+        flags: 0,
+        mailbox,
+        token: cred,
+    };
+    let (bytes, ex) = seal_poll(&key, &poll, &mut rng).unwrap();
+    let (rh, env) = ok(t.exchange(&id, bytes).await.unwrap(), ex);
+    assert!(rh.flags & FLAG_FOUND != 0);
+    assert_eq!(env, envelope);
+}

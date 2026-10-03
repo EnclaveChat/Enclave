@@ -690,10 +690,7 @@ impl Client {
             mailbox: addr,
             token: secret,
         };
-        self.rpc
-            .call_ok(&host, h, &unit, now, &mut self.rng)
-            .await?;
-        Ok(())
+        self.rpc.write(&host, h, &unit, now, &mut self.rng).await
     }
 
     /// Rotate our chain for every reachable member device and post the

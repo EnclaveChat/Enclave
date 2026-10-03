@@ -174,7 +174,7 @@ Buttons: **Check now** and **Later**. The first send after a change needs a tap-
 - "Private" is the default and is never labelled; only exceptions show.
 - Contact state has three shapes plus words: a filled Seal for "Checked in person", an outline for "Not checked yet", and a notched Seal for "Code changed".
 - The mode chip reads **"Off the record"**: "Nobody can prove to others who wrote these messages." Or **"On the record"**: "Your messages carry your signature. Anyone who gets a copy can prove you wrote them."
-- Delivery shapes: hollow dot "Sending privately…", half dot "On its way", full dot "Delivered", ring "Read". The first time only: "Private delivery takes a few seconds. That pause is part of what hides who you talk to."
+- Delivery shapes: hollow dot "Sending privately…", half dot "On its way" (sent one way), full dot "Delivered" (the recipient's receipt came), ring "Read", and a hollow dot in the warning color "Not delivered yet" (no receipt after every re-send, `09-transport.md` §6.1). The first time only: "Private delivery takes a few seconds. That pause is part of what hides who you talk to."
 - The pre-call sheet offers **"Private route (hides where you are)"** or **"Direct (clearer, but Sam can see your internet address)"**.
 - Settings → Privacy: "Standard" or "Maximum (hides even when you're using Enclave; uses about 1.5 GB a day)". On iPhone it adds: "iPhone pauses apps in the background, so Maximum only works while Enclave is open."
 - "Extra protection: finishing…" (the McEliece braid) and "Backup route" appear only on the contact-info and settings screens.

@@ -113,6 +113,10 @@ pub enum Content {
     },
     /// Read receipts.
     Read(Vec<MsgId>),
+    /// Delivery receipts: these messages reached one of our devices.
+    /// Messages go one way over the mixnet, so this is how their sender
+    /// learns they arrived (`docs/09-transport.md` §6.1).
+    Delivered(Vec<MsgId>),
     /// The conversation's disappearing timer changed.
     Timer(u32),
     /// The sender's device list changed: fetch its manifest, at least this
@@ -245,6 +249,7 @@ const K_TYPING: u8 = 23;
 const K_MIGRATION: u8 = 24;
 const K_SERVER_MOVED: u8 = 25;
 const K_HOME_MOVED: u8 = 26;
+const K_DELIVERED: u8 = 27;
 /// Largest encoded location.
 const MAX_LOCATION: usize = 512;
 /// Longest recovery share (33 words of at most 8 letters).
@@ -379,11 +384,16 @@ impl Content {
             Content::Delete { target } => {
                 w.u8(K_DELETE).fixed(target);
             }
-            Content::Read(ids) => {
+            Content::Read(ids) | Content::Delivered(ids) => {
                 if ids.len() > MAX_RECEIPTS {
                     return too_large;
                 }
-                w.u8(K_READ).u8(ids.len() as u8);
+                let k = if matches!(self, Content::Read(_)) {
+                    K_READ
+                } else {
+                    K_DELIVERED
+                };
+                w.u8(k).u8(ids.len() as u8);
                 for i in ids {
                     w.fixed(i);
                 }
@@ -569,6 +579,13 @@ impl Content {
                 }
                 Content::Read((0..n).map(|_| r.array()).collect::<Result<_>>()?)
             }
+            K_DELIVERED => {
+                let n = r.u8()? as usize;
+                if n > MAX_RECEIPTS {
+                    return Err(ProtoError::Decode);
+                }
+                Content::Delivered((0..n).map(|_| r.array()).collect::<Result<_>>()?)
+            }
             K_TIMER => Content::Timer(timer(r.u32()?)?),
             K_DEVICES => Content::Devices(r.u64()?),
             K_HISTORY => Content::History(r.bytes(MAX_ATTACHMENT_REF)?.to_vec()),
@@ -689,6 +706,7 @@ mod tests {
             },
             Content::Delete { target: [4; 16] },
             Content::Read(vec![[5; 16]; 10]),
+            Content::Delivered(vec![[6; 16]; 3]),
             Content::Timer(86_400),
             Content::Pin {
                 target: [4; 16],

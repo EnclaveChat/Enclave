@@ -44,9 +44,9 @@ impl Client {
             id,
             card: card.clone(),
         };
-        self.send_content(to, &content, now).await?;
+        self.send_tracked(to, id, &content, now).await?;
         self.send_self_copy(to, &content, now).await?;
-        m.delivered = true;
+        m.sent = true;
         self.put_message(to, &m)?;
         Ok(m)
     }
@@ -98,7 +98,7 @@ impl Client {
         let mut m = self.new_message(root, id, outgoing, "", 0, now)?;
         self.keep_shared_card(root, &id, &parsed.encode())?;
         if outgoing {
-            m.delivered = true;
+            m.sent = true;
             self.put_message(root, &m)?;
         }
         Ok(Some(Event::Message {

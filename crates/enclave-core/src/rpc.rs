@@ -104,6 +104,33 @@ impl Rpc {
         Ok(r)
     }
 
+    /// A write whose answer isn't needed (a message, a self-copy, a group
+    /// post): one way over the mixnet ([`Transport::exchange_oneway`]),
+    /// where whether it arrived is learned from a delivery receipt. When a
+    /// transport does bring the reply back, its status is checked as
+    /// [`Rpc::call_ok`] would.
+    pub async fn write(
+        &mut self,
+        server: &ServerId,
+        h: RequestHeader,
+        env: &[u8],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<()> {
+        let key = self.key(server, now).await?;
+        let (bytes, ex) = enclave_rpc::seal_request(&key, &h, env, rng)?;
+        match self.transport.exchange_oneway(server, bytes).await? {
+            None => Ok(()),
+            Some(reply) => {
+                let (rh, _) = ex.open_reply(&reply)?;
+                match Status::from_u8(rh.flags) {
+                    Status::Ok => Ok(()),
+                    s => Err(CoreError::Server(s)),
+                }
+            }
+        }
+    }
+
     /// Seal a write that may be dropped rather than add traffic
     /// ([`Transport::exchange_droppable`]), and return the sending as a
     /// future that borrows nothing, so the caller needn't wait for a slot.
@@ -120,7 +147,9 @@ impl Rpc {
         let transport = Arc::clone(&self.transport);
         let server = *server;
         Ok(Box::pin(async move {
-            let reply = transport.exchange_droppable(&server, bytes).await?;
+            let Some(reply) = transport.exchange_droppable_oneway(&server, bytes).await? else {
+                return Ok(());
+            };
             let (rh, _) = ex.open_reply(&reply)?;
             match Status::from_u8(rh.flags) {
                 Status::Ok => Ok(()),

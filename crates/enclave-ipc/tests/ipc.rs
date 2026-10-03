@@ -317,6 +317,11 @@ fn net_messages_round_trip_and_refuse_garbage() {
             server: [5; 16],
             route: "nym:abc.def@ghi".into(),
         },
+        NetRequest::Oneway {
+            id: 9,
+            server: [6; 16],
+            bytes: vec![1; 16_384],
+        },
     ] {
         let e = r.encode();
         assert_eq!(NetRequest::decode(&e).unwrap(), r);

@@ -50,7 +50,7 @@ PLAN's model (1 unit up, 1 poll up, 1 reply down):
 packets per tick  = k (unit up) + p (poll up) + k (poll reply down) = 2k + p
 ```
 
-As implemented today (a reply for the write or cover unit too):
+With a reply for the write or cover unit too (before one-way writes; what TCP and Tor transports still do, since only the mixnet can carry a request without reply blocks):
 
 ```
 packets per tick  = k + p + k + k (write reply down) = 3k + p
@@ -65,7 +65,7 @@ packets per tick  = k + p + k + k (write reply down) = 3k + p
 | 11 | 1 | 23 | 55,499 | 34 | 82,042 |
 | 11 | 2 | 24 | 57,912 | 35 | 84,455 |
 
-With a reply for every request, the rates in §3 to §5 grow by a factor of `(3k + p) / (2k + p)` ≈ 1.46 to 1.47 before loop cover: Foreground ≈91–104 MB/h, Background ≈57–65 MB/day, Maximum ≈2.2–2.5 GB/day (with loop cover and `o` = 1.10, `k` = 9 to 10). That is outside PLAN's ±20% band, so the M4 gate cannot pass without dropping write replies.
+With a reply for every request, the rates in §3 to §5 grow by a factor of `(3k + p) / (2k + p)` ≈ 1.46 to 1.47 before loop cover: Foreground ≈91–104 MB/h, Background ≈57–65 MB/day, Maximum ≈2.2–2.5 GB/day (with loop cover and `o` = 1.10, `k` = 9 to 10). That is outside PLAN's ±20% band, so writes and cover now go one way over the mixnet (`09-transport.md` §6.1), which restores PLAN's `2k + p`; delivery comes from receipts instead.
 
 Loop cover: each loop packet goes up and comes back down, so it costs 2 × 2,413 = 4,826 B.
 

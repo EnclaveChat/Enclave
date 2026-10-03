@@ -446,6 +446,7 @@ impl LinkingDevice {
             recovery_alert: None,
             meet: None,
             pending_bond: None,
+            pending_receipts: BTreeMap::new(),
         };
         let own = client.card();
         for (card, name, verified, timer, inbox, server, tokens) in contacts {
@@ -836,9 +837,6 @@ impl Client {
             token,
         };
         let server = self.profile.server;
-        self.rpc
-            .call_ok(&server, h, &env, now, &mut self.rng)
-            .await?;
-        Ok(())
+        self.rpc.write(&server, h, &env, now, &mut self.rng).await
     }
 }
