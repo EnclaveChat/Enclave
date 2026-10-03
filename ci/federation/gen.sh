@@ -233,11 +233,16 @@ EOF
   echo "== start"
   for s in "${STACKS[@]}"; do
     cp "$WORK/foundation/server-list.bin" "$WORK/$s/foundation/"
-    # Without the mixnet the push relay's ingress has nothing to join.
-    local scale=()
-    [ "$s" = b ] && [ "$TRANSPORT" != nym ] && scale=(--scale push-ingress=0)
+    # Without the mixnet the push relay's ingress has nothing to join (and
+    # its image isn't built): name the services to start without it, since
+    # compose pulls images even for services scaled to zero.
+    local only=()
+    if [ "$s" = b ] && [ "$TRANSPORT" != nym ]; then
+      # shellcheck disable=SC2046
+      mapfile -t only < <(dc "$s" $(profiles "$s") config --services | grep -vx push-ingress)
+    fi
     # shellcheck disable=SC2046
-    dc "$s" $(profiles "$s") up -d "${scale[@]}"
+    dc "$s" $(profiles "$s") up -d "${only[@]}"
   done
   for s in "${STACKS[@]}"; do wait_healthy "$s"; done
   if [ "$TRANSPORT" = nym ]; then
