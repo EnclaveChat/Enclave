@@ -77,6 +77,23 @@ async fn main() {
         assert_eq!(r, reply);
         println!("round trip {n}: {:?}", t.elapsed());
     }
+
+    // One way, then flushed: by the time the flush returns, the far gateway
+    // has acknowledged every packet (what a client does before exiting).
+    let t = Instant::now();
+    let req = Request::oneway([9; 16], vec![9; enclave_wire::UNIT_LEN]).unwrap();
+    device.send(&to, req.encode(), 0).await.unwrap();
+    assert!(
+        device.flush(Duration::from_secs(60)).await,
+        "flushed in time"
+    );
+    assert_eq!(nym_client_core::enclave::outstanding(), 0);
+    println!("one-way send flushed in {:?}", t.elapsed());
+    let m = tokio::time::timeout(Duration::from_secs(60), ingress.recv())
+        .await
+        .expect("one-way request arrives")
+        .unwrap();
+    assert_eq!(Request::decode(&m.data).unwrap(), req);
     let _ = std::fs::remove_dir_all(dir);
     println!("ok");
 }

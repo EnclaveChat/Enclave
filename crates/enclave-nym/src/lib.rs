@@ -70,4 +70,12 @@ pub trait MixnetDriver: Send + Sync {
     async fn reply(&self, tag: ReplyTag, data: Vec<u8>) -> Result<()>;
     /// The next message for this client; `None` once it's shut down.
     async fn recv(&self) -> Option<Incoming>;
+    /// Wait until everything sent so far has left and reached the far
+    /// gateway, for at most `within`: a client about to exit calls this, as
+    /// a one-way send still queued in the client is lost with the process.
+    /// `false` if time ran out first.
+    async fn flush(&self, within: std::time::Duration) -> bool {
+        let _ = within;
+        true
+    }
 }

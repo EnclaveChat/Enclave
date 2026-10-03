@@ -169,6 +169,8 @@ impl ActionController {
                 debug!("Tried to REMOVE pending ack that is already gone! - {frag_id}");
             }
             Some((_, queue_key)) => {
+                // ENCLAVE PATCH: acknowledged or given up (crate::enclave).
+                crate::enclave::settle(1);
                 if let Some(queue_key) = queue_key {
                     // there are no possible checks here, we must GUARANTEE that we NEVER try
                     // to remove an entry that doesn't exist (and we MUST GUARANTEE that

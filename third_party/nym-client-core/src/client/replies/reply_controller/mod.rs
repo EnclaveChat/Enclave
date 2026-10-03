@@ -109,7 +109,9 @@ where
             } => {
                 self.receiver_controller
                     .handle_send_reply(recipient, message, lane, max_retransmissions)
-                    .await
+                    .await;
+                // ENCLAVE PATCH: the reply is prepared (crate::enclave).
+                crate::enclave::settle(1);
             }
             ReplyControllerMessage::AdditionalSurbs {
                 sender_tag,

@@ -87,6 +87,13 @@ fn main() -> ExitCode {
             Some("setup") => setup(&w, &args).await,
             Some("after-restart") => after_restart(&w).await,
             _ => Err("usage: enclave-e2e setup|after-restart (see the module docs)".into()),
+        }?;
+        // What went one way (the message B is to keep across its restart)
+        // must leave before this process and its mixnet client exit.
+        match w.transport.flush(PATIENCE).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!("sends still unacknowledged after {PATIENCE:?}")),
+            Err(x) => Err(format!("flush: {x}")),
         }
     });
     match result {

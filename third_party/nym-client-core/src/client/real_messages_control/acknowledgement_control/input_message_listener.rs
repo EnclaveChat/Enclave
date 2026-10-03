@@ -54,7 +54,9 @@ where
                     .collect(),
                 lane,
             )
-            .await
+            .await;
+        // ENCLAVE PATCH: the message is prepared (crate::enclave).
+        crate::enclave::settle(1);
     }
 
     async fn handle_reply(
@@ -65,9 +67,14 @@ where
         max_retransmissions: Option<u32>,
     ) {
         // offload reply handling to the dedicated task
-        let _ =
-            self.reply_controller_sender
-                .send_reply(recipient_tag, data, lane, max_retransmissions);
+        // ENCLAVE PATCH: the reply controller settles it (crate::enclave).
+        if self
+            .reply_controller_sender
+            .send_reply(recipient_tag, data, lane, max_retransmissions)
+            .is_err()
+        {
+            crate::enclave::settle(1);
+        }
     }
 
     async fn handle_plain_message(
@@ -85,6 +92,8 @@ where
         {
             warn!("failed to send a plain message - {err}")
         }
+        // ENCLAVE PATCH: the message is prepared (crate::enclave).
+        crate::enclave::settle(1);
     }
 
     async fn handle_repliable_message(
@@ -110,6 +119,8 @@ where
         {
             warn!("failed to send a repliable message - {err}")
         }
+        // ENCLAVE PATCH: the message is prepared (crate::enclave).
+        crate::enclave::settle(1);
     }
 
     #[allow(clippy::panic)]

@@ -72,6 +72,15 @@ pub trait Transport: Send + Sync {
     /// server list or a descriptor). A transport that can't carry that
     /// kind of route ignores it.
     fn set_route(&self, _server: ServerId, _route: Route) {}
+    /// Wait, for at most `within`, until everything sent so far has left
+    /// this device (over the mixnet: reached the far gateway). Called
+    /// before exiting, since a one-way send still queued is lost with the
+    /// process (its outbox re-sends it, but only much later). `false` if
+    /// time ran out.
+    async fn flush(&self, within: std::time::Duration) -> Result<bool> {
+        let _ = within;
+        Ok(true)
+    }
     /// Current time, Unix seconds. The system clock, except in simulations
     /// that move time forward.
     fn now(&self) -> u64 {
@@ -413,6 +422,10 @@ impl Transport for NymTransport {
     async fn server_key(&self, server: &ServerId) -> Result<ServerKey> {
         let bundle = self.roundtrip(server, Vec::new()).await?;
         verify_key_bundle(server, &bundle, self.now())
+    }
+
+    async fn flush(&self, within: std::time::Duration) -> Result<bool> {
+        Ok(self.driver.flush(within).await)
     }
 
     async fn exchange_oneway(

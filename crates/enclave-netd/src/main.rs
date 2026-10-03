@@ -24,6 +24,9 @@ use std::collections::{HashMap, HashSet};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// How long netd waits on exit for what was sent to leave.
+const EXIT_FLUSH: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// `--server` routes: TCP addresses and Nym addresses.
 fn parse_servers(
     args: &[String],
@@ -87,6 +90,13 @@ impl Transport for Routed {
         request: Vec<u8>,
     ) -> enclave_net::Result<Option<Vec<u8>>> {
         self.pick(server).exchange_oneway(server, request).await
+    }
+
+    async fn flush(&self, within: std::time::Duration) -> enclave_net::Result<bool> {
+        match &self.nym {
+            Some(n) => n.flush(within).await,
+            None => Ok(true),
+        }
     }
 
     fn set_route(&self, server: ServerId, route: Route) {
@@ -214,7 +224,11 @@ fn main() -> ExitCode {
                 }
             }
         });
+        // One-way sends still being handed to the mixnet client, which the
+        // flush at the end must come after.
+        let mut oneway = tokio::task::JoinSet::new();
         while let Ok(body) = frame::read_frame(&mut stdin).await {
+            while oneway.try_join_next().is_some() {}
             let req = match NetRequest::decode(&body) {
                 Ok(NetRequest::SetRoute { server, route }) => {
                     match Route::parse(&route) {
@@ -228,8 +242,9 @@ fn main() -> ExitCode {
             };
             let t = Arc::clone(&transport);
             let tx = tx.clone();
+            let is_oneway = matches!(req, NetRequest::Oneway { .. });
             // Requests run concurrently; replies carry their request's id.
-            tokio::spawn(async move {
+            let task = async move {
                 let (id, result) = match req {
                     NetRequest::Exchange { id, server, bytes } => (
                         id,
@@ -253,7 +268,18 @@ fn main() -> ExitCode {
                     NetRequest::SetRoute { .. } => return,
                 };
                 let _ = tx.send(NetReply { id, result }.encode());
-            });
+            };
+            if is_oneway {
+                oneway.spawn(task);
+            } else {
+                tokio::spawn(task);
+            }
+        }
+        // The vault is gone (closed or quit): what it sent one way leaves
+        // before the mixnet client does (`docs/09-transport.md` §6.1).
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), oneway.join_all()).await;
+        if let Ok(false) = transport.flush(EXIT_FLUSH).await {
+            eprintln!("enclave-netd: exiting with sends not yet acknowledged");
         }
         drop(tx);
         let _ = writer.await;

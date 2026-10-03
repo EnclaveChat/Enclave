@@ -35,7 +35,9 @@ struct Link {
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Pending,
     alive: Arc<AtomicBool>,
-    // Kept so the child is killed when the transport goes away.
+    // Kept with the transport. When it goes, netd's stdin closes and netd
+    // exits by itself once what was sent one way has left (at most 10 s),
+    // so it isn't killed.
     _child: Mutex<Child>,
 }
 
@@ -61,7 +63,6 @@ impl Link {
         let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true)
             .spawn()?;
         let mut stdin = child
             .stdin

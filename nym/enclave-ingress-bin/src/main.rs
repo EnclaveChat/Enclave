@@ -131,6 +131,7 @@ async fn run(mode: &str, args: &[String], public: &std::path::Path) -> Result<()
         });
     }
     let driver: Arc<dyn MixnetDriver> = Arc::new(driver);
+    let flusher = Arc::clone(&driver);
     let work: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = match mode {
         "forward" => {
             let listen = flag(args, "--listen").unwrap_or_else(|| "0.0.0.0:7446".into());
@@ -162,6 +163,28 @@ async fn run(mode: &str, args: &[String], public: &std::path::Path) -> Result<()
     };
     tokio::select! {
         () = work => Err("the mixnet client stopped".into()),
-        _ = tokio::signal::ctrl_c() => Ok(()),
+        () = stop_signal() => {
+            // Answers and wakes already handed to the client leave first.
+            if !flusher.flush(Duration::from_secs(5)).await {
+                eprintln!("enclave-ingress: stopping with sends not yet acknowledged");
+            }
+            Ok(())
+        }
     }
+}
+
+/// Ctrl-C, or SIGTERM (`docker stop`).
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

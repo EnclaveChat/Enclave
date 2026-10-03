@@ -13,7 +13,9 @@
 //!
 //! Every message gets a fresh sender tag (our patch to nym-client-core,
 //! `third_party/PATCHES.md`) and, when it expects an answer, enough single-use
-//! reply blocks for all of it ([`surbs_for`]).
+//! reply blocks for all of it ([`surbs_for`]). Another patch counts what is
+//! still in flight, so [`MixnetDriver::flush`] can wait for it before the
+//! process exits.
 
 use enclave_nym::{Incoming, MixnetDriver, NymError, ReplyTag, Result};
 use nym_sdk::mixnet::{
@@ -231,21 +233,38 @@ impl MixnetDriver for NymDriver {
         } else {
             IncludedSurbs::new(surbs_for(reply_len))
         };
+        nym_client_core::enclave::note_submitted();
         self.sender
             .send_message(recipient, data, surbs)
             .await
+            .inspect_err(|_| nym_client_core::enclave::note_unsubmitted())
             .map_err(client_error)
     }
 
     async fn reply(&self, tag: ReplyTag, data: Vec<u8>) -> Result<()> {
+        nym_client_core::enclave::note_submitted();
         self.sender
             .send_reply(AnonymousSenderTag::from_bytes(tag.0), data)
             .await
+            .inspect_err(|_| nym_client_core::enclave::note_unsubmitted())
             .map_err(client_error)
     }
 
     async fn recv(&self) -> Option<Incoming> {
         self.rx.lock().await.recv().await
+    }
+
+    async fn flush(&self, within: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            if nym_client_core::enclave::outstanding() == 0 {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use std::future::Future;
 pub mod cli_helpers;
 pub mod client;
 pub mod config;
+pub mod enclave;
 pub mod error;
 pub mod init;
 

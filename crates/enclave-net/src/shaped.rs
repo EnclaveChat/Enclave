@@ -389,6 +389,12 @@ impl ShapedTransport {
 
 #[async_trait::async_trait]
 impl Transport for ShapedTransport {
+    /// What was sent leaves; what is still queued for a tick stays queued
+    /// (sending it now would break the shape; the outbox re-sends it).
+    async fn flush(&self, within: std::time::Duration) -> Result<bool> {
+        self.inner.flush(within).await
+    }
+
     async fn exchange(&self, server: &ServerId, request: Vec<u8>) -> Result<Vec<u8>> {
         self.enqueue(server, request, false, false)
             .await?

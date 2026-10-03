@@ -1802,6 +1802,7 @@ dependencies = [
  "async-trait",
  "enclave-nym",
  "enclave-wire",
+ "nym-client-core",
  "nym-client-core-gateways-storage",
  "nym-sdk",
  "nym-sphinx",

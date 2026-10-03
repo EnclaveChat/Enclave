@@ -9,8 +9,10 @@
 //! ```text
 //! to nymd:   1 ‖ u16 len ‖ address ‖ u32 reply_len ‖ data      send
 //!            2 ‖ tag (16) ‖ data                               reply
+//!            3 ‖ u32 millis                                    flush
 //! from nymd: 1 ‖ address                                       ready (first)
 //!            2 ‖ u8 has_tag ‖ [tag (16)] ‖ data                a message
+//!            3 ‖ u8 done                                       flushed
 //! ```
 //!
 //! Sends are fire and forget, as on the mixnet itself: a lost one shows as
@@ -18,8 +20,11 @@
 
 use crate::{Incoming, MixnetDriver, NymError, ReplyTag, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+type FlushWaiter = Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>;
 
 /// Longest frame either way (a mixframe and its header, with room).
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -49,6 +54,8 @@ pub struct PipeDriver {
     writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
     rx: Mutex<mpsc::UnboundedReceiver<Incoming>>,
     reader: tokio::task::JoinHandle<()>,
+    flushed: FlushWaiter,
+    flushing: Mutex<()>,
 }
 
 impl PipeDriver {
@@ -64,8 +71,16 @@ impl PipeDriver {
             _ => return Err(NymError::Malformed),
         };
         let (tx, rx) = mpsc::unbounded_channel();
+        let flushed: FlushWaiter = Arc::default();
+        let waiter = Arc::clone(&flushed);
         let reader = tokio::spawn(async move {
             while let Some(b) = read_frame(&mut reader).await {
+                if let Some((3, [done])) = b.split_first() {
+                    if let Some(w) = waiter.lock().ok().and_then(|mut w| w.take()) {
+                        let _ = w.send(*done == 1);
+                    }
+                    continue;
+                }
                 let m = match b.split_first() {
                     Some((2, [0, data @ ..])) => Incoming {
                         data: data.to_vec(),
@@ -90,6 +105,8 @@ impl PipeDriver {
             writer: Mutex::new(Box::new(writer)),
             rx: Mutex::new(rx),
             reader,
+            flushed,
+            flushing: Mutex::new(()),
         })
     }
 
@@ -136,6 +153,28 @@ impl MixnetDriver for PipeDriver {
     async fn recv(&self) -> Option<Incoming> {
         self.rx.lock().await.recv().await
     }
+
+    async fn flush(&self, within: Duration) -> bool {
+        // One flush at a time: the answer carries no id.
+        let _one = self.flushing.lock().await;
+        let (tx, rx) = oneshot::channel();
+        match self.flushed.lock() {
+            Ok(mut w) => *w = Some(tx),
+            Err(_) => return false,
+        }
+        let millis = u32::try_from(within.as_millis()).unwrap_or(u32::MAX);
+        let mut b = vec![3u8];
+        b.extend_from_slice(&millis.to_be_bytes());
+        if self.write(&b).await.is_err() {
+            return false;
+        }
+        // A little longer than nymd's own limit, for the answer to come.
+        tokio::time::timeout(within + Duration::from_secs(2), rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
+    }
 }
 
 /// The `enclave-nymd` side: announce `driver`'s address, then carry sends
@@ -174,7 +213,11 @@ pub async fn serve(
             }
         })
     };
+    // Sends and replies being handed to the client: a flush waits for those
+    // that came before it.
+    let mut handing: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     while let Some(b) = read_frame(&mut reader).await {
+        handing.retain(|h| !h.is_finished());
         let driver = Arc::clone(&driver);
         match b.split_first() {
             Some((1, rest)) if rest.len() >= 2 => {
@@ -190,9 +233,9 @@ pub async fn serve(
                 };
                 let reply_len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
                 let data = rest[6 + n..].to_vec();
-                tokio::spawn(async move {
+                handing.push(tokio::spawn(async move {
                     let _ = driver.send(&to, data, reply_len).await;
-                });
+                }));
             }
             Some((2, rest)) if rest.len() >= 16 => {
                 let (tag, data) = rest.split_at(16);
@@ -200,13 +243,30 @@ pub async fn serve(
                     break;
                 };
                 let data = data.to_vec();
-                tokio::spawn(async move {
+                handing.push(tokio::spawn(async move {
                     let _ = driver.reply(tag, data).await;
+                }));
+            }
+            Some((3, &[a, b, c, d])) => {
+                let within = Duration::from_millis(u64::from(u32::from_be_bytes([a, b, c, d])));
+                let writer = Arc::clone(&writer);
+                let before = std::mem::take(&mut handing);
+                tokio::spawn(async move {
+                    for h in before {
+                        let _ = h.await;
+                    }
+                    let done = driver.flush(within).await;
+                    let _ = write_frame(&mut *writer.lock().await, &[3, u8::from(done)]).await;
                 });
             }
             _ => break,
         }
     }
+    // netd went away: let what it handed over leave before nymd exits.
+    for h in handing {
+        let _ = h.await;
+    }
+    let _ = driver.flush(Duration::from_secs(10)).await;
     incoming.abort();
 }
 
@@ -247,5 +307,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(server.recv().await.unwrap().data, b"answer");
+
+        // A flush is answered (the fake mixnet has nothing in flight).
+        assert!(pipe.flush(Duration::from_secs(1)).await);
+        assert!(pipe.flush(Duration::from_secs(1)).await);
     }
 }

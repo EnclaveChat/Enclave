@@ -721,10 +721,15 @@ where
     }
 
     pub(crate) fn insert_pending_acks(&self, pending_acks: Vec<PendingAcknowledgement>) {
+        // ENCLAVE PATCH: each fragment is outstanding until its ack
+        // (crate::enclave).
+        let n = pending_acks.len();
+        crate::enclave::add(n);
         if let Err(err) = self
             .action_sender
             .unbounded_send(Action::new_insert(pending_acks))
         {
+            crate::enclave::settle(n);
             if !self.shutdown_token.is_cancelled() {
                 error!("Failed to send insert action to the controller: {err}");
             }
