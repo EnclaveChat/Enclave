@@ -390,3 +390,139 @@ async fn writes_go_one_way() {
     assert!(rh.flags & FLAG_FOUND != 0);
     assert_eq!(env, envelope);
 }
+
+/// A request whose answer is needed goes one way too, marked
+/// `FLAG_DEFER`: its answer comes back through a poll-sized status poll
+/// (`Op::Status`, keyed by the request's own status id), once, so every
+/// unit on the wire looks alike (`docs/09-transport.md` §6.1).
+#[tokio::test(flavor = "multi_thread")]
+async fn deferred_answers_come_back_through_status_polls() {
+    let (addr, id) = spawn_server().await;
+    let net = FakeMixnet::default();
+    let stats = Arc::new(Stats::default());
+    tokio::spawn(serve(
+        Arc::new(net.client("ingress-a")),
+        addr,
+        Arc::clone(&stats),
+    ));
+    let t = Arc::new(NymTransport::new(
+        Arc::new(net.client("phone")),
+        HashMap::from([(id, "ingress-a".to_string())]),
+        Duration::from_secs(10),
+    ));
+    let key = t.server_key(&id).await.unwrap();
+    let mut rng = HedgedRng::new().unwrap();
+    let status = |status_id: [u8; 32], rng: &mut HedgedRng| {
+        let h = RequestHeader {
+            op: Op::Status,
+            flags: 0,
+            mailbox: status_id,
+            token: [9; 32],
+        };
+        let (bytes, ex) = seal_poll(&key, &h, rng).unwrap();
+        let t = Arc::clone(&t);
+        async move {
+            let reply = t.exchange(&id, bytes).await.unwrap();
+            ex.open_reply(&reply).unwrap()
+        }
+    };
+
+    // Create an inbox, one way.
+    let create = RequestHeader {
+        op: Op::RegisterTokens,
+        flags: FLAG_CREATE | api::FLAG_DEFER,
+        mailbox: [4; 32],
+        token: [3; 32],
+    };
+    let (bytes, ex) =
+        seal_request(&key, &create, &api::frame(&[], &mut rng).unwrap(), &mut rng).unwrap();
+    assert_eq!(t.exchange_oneway(&id, bytes).await.unwrap(), None);
+    let mut answer = None;
+    for _ in 0..100 {
+        let (rh, _) = status(ex.status_id(), &mut rng).await;
+        if !(rh.op == Op::Status && Status::from_u8(rh.flags) == Status::NotFound) {
+            answer = Some(rh);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rh = answer.expect("the answer arrives");
+    assert_eq!(rh.op, Op::RegisterTokens);
+    assert_eq!(Status::from_u8(rh.flags), Status::Ok);
+
+    // Fetched once; an id nobody made finds nothing.
+    let (rh, _) = status(ex.status_id(), &mut rng).await;
+    assert_eq!(
+        (rh.op, Status::from_u8(rh.flags)),
+        (Op::Status, Status::NotFound)
+    );
+    let (rh, _) = status([0x55; 32], &mut rng).await;
+    assert_eq!(Status::from_u8(rh.flags), Status::NotFound);
+}
+
+/// Two people on one server reached only through its ingress over the
+/// mixnet: account creation, a first-contact request, accepting, talking
+/// and delivery receipts, with every unit sent one way and every answer
+/// fetched by a status poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn clients_over_the_mixnet() {
+    use enclave_core::{Client, Event, Options};
+    let (addr, id) = spawn_server().await;
+    let net = FakeMixnet::new(
+        Faults {
+            loss: 0.0,
+            max_delay: Duration::from_millis(20),
+        },
+        7,
+    );
+    tokio::spawn(serve(
+        Arc::new(net.client("ingress-a")),
+        addr,
+        Arc::new(Stats::default()),
+    ));
+    let transport = |name: &str| -> Arc<dyn Transport> {
+        Arc::new(NymTransport::new(
+            Arc::new(net.client(name)),
+            HashMap::from([(id, "ingress-a".to_string())]),
+            Duration::from_secs(10),
+        ))
+    };
+    let opts = || Options {
+        path: None,
+        keystore: Arc::new(enclave_store::MemoryKeystore::default()),
+        passphrase: None,
+        pw_params: enclave_crypto::pwhash::PwParams::FLOOR,
+    };
+    let replies_at_start = net.stats().replies;
+    let (mut ada, _) = Client::create(opts(), transport("ada"), id, "Ada")
+        .await
+        .unwrap();
+    let (mut ben, _) = Client::create(opts(), transport("ben"), id, "Ben")
+        .await
+        .unwrap();
+    ada.add_contact(&ben.card(), "hi Ben").await.unwrap();
+    let ev = ben.sync().await.unwrap();
+    assert!(
+        ev.iter().any(|e| matches!(e, Event::Request { .. })),
+        "{ev:?}"
+    );
+    ben.accept(&ada.root()).await.unwrap();
+    ada.sync().await.unwrap();
+    ada.send_text(&ben.root(), "over the mixnet").await.unwrap();
+    let ev = ben.sync().await.unwrap();
+    assert!(
+        ev.iter().any(
+            |e| matches!(e, Event::Message { message, .. } if message.text == "over the mixnet")
+        ),
+        "{ev:?}"
+    );
+    ben.send_text(&ada.root(), "and back").await.unwrap();
+    ada.sync().await.unwrap();
+    let mine = ada.messages(&ben.root()).unwrap();
+    let m = mine.iter().find(|m| m.text == "over the mixnet").unwrap();
+    assert!(m.delivered, "Ben's receipt rode on his answer: {m:?}");
+    assert!(
+        net.stats().replies > replies_at_start,
+        "polls were answered"
+    );
+}

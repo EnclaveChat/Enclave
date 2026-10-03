@@ -72,11 +72,13 @@ Proof-of-work contexts (`enclave_rpc::api`), each passed to `enclave_tokens::ver
 | `BlobGet` | Return the chunk, or `NotFound`. No credential. |
 | `Directory` | §2. A payload that does not parse gets `Malformed`. |
 | `KeyTransparency` | Not wired to `enclave-kt` yet: `NotFound`. |
+| `Status` | Return the kept answer whose status id is the mailbox, once, sealed to this poll; or `Status` with `NotFound`. |
+| any unit op + `DEFER` (0x80) | Handled as usual; the reply is also kept in memory (not in the database) under the request's status id for 10 minutes, at most 65,536 answers and 64 MiB of them (`08-envelope.md` §2.2). |
 | `Report` | The mailbox must be one of this server's request inboxes (`NotFound`). Verify and spend the PoW at the request effort (`Pow`); the payload must parse as a `ReportBody` (`Malformed`). Queue it for the operator with the day it arrived; at most 1,000 are kept, oldest dropped first. `Server::take_reports()` hands them to the operator and `Server::disable_request_inbox()` closes a reported account's request inbox. |
 
 A storage failure answers `Unavailable` (status 7) and applies nothing; the client tries again later.
 
-`Server::expire(now)` deletes envelopes and blobs older than `ttl_secs`, bundle claims older than 600 s and unfinished uploads older than 600 s. `Server::install_key(key)` makes a request key from the chain (§1.4) current and keeps one previous (`09-transport.md` §2.1); in-memory servers use `Server::rotate(day)`, which draws a random one. `Server::stats()` returns aggregate counters only (requests, cover, stored, tokens burned, denied). `Server::reports()` lists queued reports without removing them; `Server::take_reports()` removes them.
+`Server::expire(now)` deletes envelopes and blobs older than `ttl_secs`, bundle claims older than 600 s, unfinished uploads older than 600 s and kept answers older than 600 s. `Server::install_key(key)` makes a request key from the chain (§1.4) current and keeps one previous (`09-transport.md` §2.1); in-memory servers use `Server::rotate(day)`, which draws a random one. `Server::stats()` returns aggregate counters only (requests, cover, stored, tokens burned, denied). `Server::reports()` lists queued reports without removing them; `Server::take_reports()` removes them.
 
 ### 1.3 State the server holds
 

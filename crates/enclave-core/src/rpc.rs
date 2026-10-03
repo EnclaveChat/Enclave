@@ -4,7 +4,9 @@ use crate::{CoreError, Result};
 use enclave_crypto::rng::HedgedRng;
 use enclave_net::transport::{ServerId, Transport};
 use enclave_rpc::ServerKey;
-use enclave_rpc::api::{self, DirAction, DirKind, DirReply, DirRequest, FLAG_FOUND, Status};
+use enclave_rpc::api::{
+    self, DirAction, DirKind, DirReply, DirRequest, FLAG_DEFER, FLAG_FOUND, Status,
+};
 use enclave_wire::{Op, RequestHeader};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +25,11 @@ pub(crate) const EFFORT_LADDER: [u32; 7] = [8, 16, 64, 256, 1024, 4096, 16_384];
 /// A sealed request on its way: resolves once it was sent and answered,
 /// or dropped.
 pub type Sending = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+/// Status polls for one answer before giving up (`Rpc::fetch_answer`).
+/// Each is a round trip through the mixnet (and, shaped, waits for its
+/// poll slot), so they pace themselves: a minute or more in all.
+const STATUS_TRIES: u32 = 120;
 
 pub(crate) struct Rpc {
     transport: Arc<dyn Transport>,
@@ -73,19 +80,58 @@ impl Rpc {
         rng: &mut HedgedRng,
     ) -> Result<Reply> {
         let key = self.key(server, now).await?;
-        let (bytes, ex) = if matches!(h.op, Op::Poll | Op::Ack | Op::BlobGet) {
-            enclave_rpc::seal_poll(&key, &h, rng)?
+        let (rh, renv) = if matches!(h.op, Op::Poll | Op::Ack | Op::BlobGet | Op::Status) {
+            let (bytes, ex) = enclave_rpc::seal_poll(&key, &h, rng)?;
+            let reply = self.transport.exchange(server, bytes).await?;
+            ex.open_reply(&reply)?
         } else {
-            enclave_rpc::seal_request(&key, &h, env, rng)?
+            // Every unit goes one way over the mixnet; the server keeps the
+            // answer for a status poll, which comes back in the poll slot
+            // like any poll reply (`docs/09-transport.md` §6.1).
+            let mut h = h;
+            h.flags |= FLAG_DEFER;
+            let (bytes, ex) = enclave_rpc::seal_request(&key, &h, env, rng)?;
+            match self.transport.exchange_deferred(server, bytes).await? {
+                Some(reply) => ex.open_reply(&reply)?,
+                None => self.fetch_answer(server, ex.status_id(), now, rng).await?,
+            }
         };
-        let reply = self.transport.exchange(server, bytes).await?;
-        let (rh, renv) = ex.open_reply(&reply)?;
         Ok(Reply {
             status: Status::from_u8(rh.flags),
             flags: rh.flags,
             header: rh,
             envelope: renv,
         })
+    }
+
+    /// The answer to a request sent one way: status polls until the server
+    /// has it (the request may still be on its way).
+    async fn fetch_answer(
+        &mut self,
+        server: &ServerId,
+        id: [u8; 32],
+        now: u64,
+        rng: &mut HedgedRng,
+    ) -> Result<(RequestHeader, Vec<u8>)> {
+        for _ in 0..STATUS_TRIES {
+            let key = self.key(server, now).await?;
+            let h = RequestHeader {
+                op: Op::Status,
+                flags: 0,
+                mailbox: id,
+                token: rng.array("rpc/status-token")?,
+            };
+            let (bytes, ex) = enclave_rpc::seal_poll(&key, &h, rng)?;
+            let reply = self.transport.exchange(server, bytes).await?;
+            let (rh, env) = ex.open_reply(&reply)?;
+            let waiting = rh.op == Op::Status && Status::from_u8(rh.flags) == Status::NotFound;
+            if !waiting {
+                return Ok((rh, env));
+            }
+        }
+        Err(CoreError::Net(enclave_net::NetError::Unreachable(
+            "no answer from the server".into(),
+        )))
     }
 
     /// A call that must succeed.

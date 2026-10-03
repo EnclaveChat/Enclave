@@ -40,6 +40,17 @@ pub trait Transport: Send + Sync {
     ) -> Result<Option<Vec<u8>>> {
         self.exchange(server, request).await.map(Some)
     }
+    /// Send a sealed request whose answer is fetched afterwards by a status
+    /// poll (`docs/09-transport.md` §6.1). The same as
+    /// [`Transport::exchange_oneway`] unless a transport needs to tell
+    /// questions from writes (a test network that loses only writes).
+    async fn exchange_deferred(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.exchange_oneway(server, request).await
+    }
     /// [`Transport::exchange_oneway`] for something that may be dropped
     /// (see [`Transport::exchange_droppable`]).
     async fn exchange_droppable_oneway(

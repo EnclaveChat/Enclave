@@ -74,6 +74,12 @@ pub const FLAG_REVOKE: u8 = 0x08;
 /// [`MAX_INBOX_EFFORT`]. Its owner raises it after reporting spam
 /// (`13-operators.md` §2).
 pub const FLAG_EFFORT: u8 = 0x40;
+/// Request flag: the request goes one way (no reply over the mixnet), so
+/// the server keeps its answer for a status poll (`Op::Status`) under the
+/// request's status id (`Exchange::status_id`), for [`DEFER_TTL_SECS`].
+pub const FLAG_DEFER: u8 = 0x80;
+/// How long a deferred answer waits for its status poll.
+pub const DEFER_TTL_SECS: u64 = 600;
 /// Highest effort an owner can ask of writers to its request inbox (the
 /// top of the clients' effort ladder).
 pub const MAX_INBOX_EFFORT: u32 = 16_384;

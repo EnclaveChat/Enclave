@@ -18,6 +18,8 @@ enclave-wire = { path = "../enclave-wire" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
 
 [dev-dependencies]
+enclave-core = { path = "../enclave-core" }
+enclave-store = { path = "../enclave-store" }
 enclave-crypto = { path = "../enclave-crypto" }
 enclave-rpc = { path = "../enclave-rpc" }
 enclave-server = { path = "../enclave-server" }

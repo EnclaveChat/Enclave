@@ -96,6 +96,7 @@ Every label in this section appears in the code. "Where" names the crate, file a
 | `enclave/v1/rpc/read-credential` | KMAC | 256 (first 192 bits used) | `api.rs` `read_credential` | 24 B inbox read credential from the owner secret |
 | `enclave/v1/rpc/credential-hash` | KMAC | 256 | `api.rs` `credential_hash` | Server-stored hash of an owner secret or read credential |
 | `enclave/v1/net/replay-id` | HASH | 256 | `lib.rs` `replay_id` | Replay-cache key of a sealed request: `SHAKE256(label ‖ u32 key_id ‖ eph X448 ‖ ML-KEM ct)` (09 §2.3) |
+| `enclave/v1/net/status-id` | KMAC | 256 | `lib.rs` `derive` | Where a deferred answer waits for its status poll: `KMAC256(exchange secret, "", label)`, known to both ends of one request (09 §6.1) |
 | `enclave/v1/server/request-key` | KMAC | 960 | `lib.rs` `ServerSecret::from_seed` | A day's X448 secret (56 B) and ML-KEM-1024 seed (64 B) from that day's chain seed; data is the day index (12 §1.4) |
 | `enclave/v1/server/request-chain` | KMAC | 256 | `lib.rs` `ServerSecret::next_seed` | Next day's chain seed; the old one is erased (forward secrecy, 12 §1.4) |
 

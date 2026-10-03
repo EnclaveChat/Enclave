@@ -41,7 +41,8 @@ fn memory() -> Options {
 }
 
 /// The network as a one-way sender sees it: writes go one way (no answer),
-/// and while `lose` is set they vanish after leaving.
+/// and while `lose` is set they vanish after leaving. Questions go one way
+/// too and their answers are fetched by status polls; they always arrive.
 struct OneWay {
     net: LocalTransport,
     lose: AtomicBool,
@@ -66,6 +67,14 @@ impl Transport for OneWay {
         if !self.lose.load(Ordering::SeqCst) {
             self.net.exchange(server, request).await?;
         }
+        Ok(None)
+    }
+    async fn exchange_deferred(
+        &self,
+        server: &ServerId,
+        request: Vec<u8>,
+    ) -> enclave_net::Result<Option<Vec<u8>>> {
+        self.net.exchange(server, request).await?;
         Ok(None)
     }
 }

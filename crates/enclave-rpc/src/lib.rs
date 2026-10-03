@@ -38,6 +38,10 @@ pub const RPC_REPLY: &str = "enclave/v1/rpc/reply";
 /// What a server remembers of each request it opened, to refuse a replay:
 /// `SHAKE256(label ‖ u32 key_id ‖ ephemeral X448 key ‖ ML-KEM ciphertext)`.
 pub const NET_REPLAY_ID: &str = "enclave/v1/net/replay-id";
+/// Names a request's answer kept for a later status poll
+/// (`docs/09-transport.md` §6.1): both ends derive it from the request's
+/// own key exchange, so the request carries no id of its own.
+pub const NET_STATUS_ID: &str = "enclave/v1/net/status-id";
 
 /// Errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
@@ -191,9 +195,16 @@ impl ServerSecret {
 pub struct Exchange {
     request: SealKey,
     reply: SealKey,
+    status: [u8; 32],
 }
 
 impl Exchange {
+    /// Where a deferred answer to this request waits for a status poll
+    /// (`Op::Status`): the same on both ends, unknown to anyone else.
+    pub fn status_id(&self) -> [u8; 32] {
+        self.status
+    }
+
     /// Seal a reply (header ‖ envelope) into a 16,384-byte reply unit.
     pub fn seal_reply(
         &self,
@@ -228,6 +239,7 @@ fn derive(suite_secrets: &[&[u8]], public: &[&[u8]]) -> Exchange {
     Exchange {
         request: seal::derive_key(&s[..], b"", RPC_REQUEST),
         reply: seal::derive_key(&s[..], b"", RPC_REPLY),
+        status: enclave_crypto::kmac::kmac256(&s[..], b"", NET_STATUS_ID),
     }
 }
 

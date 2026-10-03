@@ -133,6 +133,10 @@ pub enum Op {
     /// Report an account to this server's operator (`docs/13-operators.md`
     /// §2); needs a proof of work.
     Report = 11,
+    /// Fetch the answer to an earlier request sent one way with
+    /// `FLAG_DEFER` (poll-sized; `mailbox` is the request's status id,
+    /// `docs/09-transport.md` §6.1).
+    Status = 12,
 }
 
 impl Op {
@@ -150,6 +154,7 @@ impl Op {
             9 => Op::KeyTransparency,
             10 => Op::PushRegister,
             11 => Op::Report,
+            12 => Op::Status,
             _ => return Err(WireError::Malformed),
         })
     }

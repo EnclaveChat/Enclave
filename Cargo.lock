@@ -2573,12 +2573,14 @@ dependencies = [
 name = "enclave-ingress"
 version = "0.1.0"
 dependencies = [
+ "enclave-core",
  "enclave-crypto",
  "enclave-federation",
  "enclave-net",
  "enclave-nym",
  "enclave-rpc",
  "enclave-server",
+ "enclave-store",
  "enclave-tokens",
  "enclave-wire",
  "tokio",

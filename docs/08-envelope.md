@@ -71,10 +71,13 @@ Sum: 1 + 1 + 6 + 32 + 32 = **72**.
 | 9 | `KeyTransparency` | — | — | — | — | not implemented: always `NotFound` |
 | 10 | `PushRegister` | unit | inbox address | owner secret | API payload: sealed push token (empty removes it) | status only |
 | 11 | `Report` | unit | the reported account's request inbox | proof of work | API payload: `ReportBody` (`13-operators.md` §2) | status only |
+| 12 | `Status` | poll | status id of an earlier `DEFER` request | random | — | that request's reply (its op, status and payload), or `Status` with `NotFound` while it hasn't arrived |
 
-`flags` for `RegisterTokens`: bit 0 (`0x01`) `CREATE` creates the inbox; bit 1 (`0x02`) `REQUEST_INBOX` makes the new inbox a request inbox. Other ops ignore `flags`.
+`flags` for `RegisterTokens`: bit 0 (`0x01`) `CREATE` creates the inbox; bit 1 (`0x02`) `REQUEST_INBOX` makes the new inbox a request inbox. Other ops ignore the low bits.
 
-The server accepts any op in either object size; a poll object has an empty envelope region. The reference client (`enclave-sim`) sends `Poll` and `Ack` as poll objects and every other op as a unit. Server semantics are in `12-servers.md` §1.
+`DEFER` (`0x80`, any unit op): the sender went one way and will fetch the answer with a `Status` poll. The server keeps the reply for 10 minutes under the request's **status id**, `KMAC256(exchange secret, "", "enclave/v1/net/status-id")` (only the sender and server know it), and hands it over once. It keeps at most 65,536 answers and 64 MiB of them; past that, new answers are not kept (`docs/09-transport.md` §6.1).
+
+The server accepts any op in either object size; a poll object has an empty envelope region. The reference client sends `Poll`, `Ack`, `BlobGet` and `Status` as poll objects and every other op as a unit, with `DEFER` on each unit that needs an answer. Server semantics are in `12-servers.md` §1.
 
 ### 2.3 API framing
 

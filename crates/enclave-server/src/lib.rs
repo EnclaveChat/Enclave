@@ -266,6 +266,12 @@ pub struct Stats {
     pub replays: u64,
 }
 
+/// Answers kept for status polls at most at once.
+pub const MAX_DEFERRED: usize = 65_536;
+/// Bytes of kept answers at most at once (they are kept unpadded and padded
+/// when fetched).
+pub const MAX_DEFERRED_BYTES: usize = 64 << 20;
+
 /// An Enclave server.
 pub struct Server {
     cfg: Config,
@@ -291,6 +297,11 @@ pub struct Server {
     token_log: (Vec<Vec<[u8; 32]>>, Vec<[u8; 32]>),
     /// Chunked lookup replies by reply id.
     kt_replies: HashMap<[u8; 32], (Vec<u8>, u64)>,
+    /// Answers to requests sent one way (`FLAG_DEFER`), by status id,
+    /// with when they were made, until their status poll fetches them.
+    deferred: HashMap<[u8; 32], (RequestHeader, Reply, u64)>,
+    /// Their total size.
+    deferred_bytes: usize,
     stats: Stats,
     /// Every object ever stored, by length, for invariant checks in tests.
     stored_lengths: HashSet<usize>,
@@ -370,6 +381,8 @@ impl Server {
             #[cfg(feature = "test-hooks")]
             token_log: (Vec::new(), Vec::new()),
             kt_replies: HashMap::new(),
+            deferred: HashMap::new(),
+            deferred_bytes: 0,
             stats: Stats::default(),
             stored_lengths: HashSet::new(),
             key_bundle: Vec::new(),
@@ -609,6 +622,7 @@ impl Server {
         });
         self.claims.retain(|_, (_, t)| now <= *t + 600);
         self.kt_replies.retain(|_, (_, t)| now <= *t + 600);
+        self.expire_deferred(now);
         self.uploads
             .retain(|_, u| now <= u.started + UPLOAD_TTL_SECS);
     }
@@ -679,6 +693,30 @@ impl Server {
             self.stats.replays += 1;
             return self.garbage();
         }
+        // A status poll: the answer to an earlier one-way request, sealed
+        // to this poll (`09-transport.md` §6.1).
+        if opened.header.op == Op::Status {
+            let (header, body) = match self.deferred.remove(&opened.header.mailbox) {
+                Some((h, body, _)) => {
+                    self.deferred_bytes -= body.len();
+                    (h, body)
+                }
+                None => (
+                    RequestHeader {
+                        op: Op::Status,
+                        flags: Status::NotFound as u8,
+                        mailbox: opened.header.mailbox,
+                        token: [0; 32],
+                    },
+                    Reply::Empty,
+                ),
+            };
+            let envelope = self.reply_envelope(body);
+            return opened
+                .exchange
+                .seal_reply(&header, &envelope, &mut self.rng)
+                .unwrap_or_else(|_| vec![0u8; enclave_wire::UNIT_LEN]);
+        }
         let (status, extra_flags, reply_token, payload) =
             self.dispatch(&opened.header, &opened.envelope, now);
         if status == Status::Denied {
@@ -690,7 +728,40 @@ impl Server {
             mailbox: opened.header.mailbox,
             token: reply_token,
         };
-        let envelope = match payload {
+        if opened.header.flags & api::FLAG_DEFER != 0 {
+            // Kept for the status poll, which brings the answer back in
+            // the poll slot. Bounded: past the limits, new answers aren't
+            // kept (their senders' status polls find nothing and give up).
+            let full = |s: &Self| {
+                s.deferred.len() >= MAX_DEFERRED
+                    || s.deferred_bytes + payload.len() > MAX_DEFERRED_BYTES
+            };
+            if full(self) {
+                self.expire_deferred(now);
+            }
+            if !full(self) {
+                self.deferred_bytes += payload.len();
+                if let Some((_, old, _)) = self.deferred.insert(
+                    opened.exchange.status_id(),
+                    (reply_header, payload.clone(), now),
+                ) {
+                    self.deferred_bytes -= old.len();
+                }
+            }
+        }
+        // Over the mixnet nobody reads a deferred request's direct reply
+        // (the ingress drops it); over TCP it is the answer.
+        let envelope = self.reply_envelope(payload);
+        opened
+            .exchange
+            .seal_reply(&reply_header, &envelope, &mut self.rng)
+            .unwrap_or_else(|_| vec![0u8; enclave_wire::UNIT_LEN])
+    }
+
+    /// A reply's envelope region: stored bytes as they are, or an API frame
+    /// padded with random bytes.
+    fn reply_envelope(&mut self, body: Reply) -> Vec<u8> {
+        match body {
             Reply::Envelope(e) => e,
             Reply::Payload(p) => {
                 api::frame(&p, &mut self.rng).unwrap_or_else(|_| vec![0u8; ENVELOPE_LEN])
@@ -698,11 +769,13 @@ impl Server {
             Reply::Empty => {
                 api::frame(&[], &mut self.rng).unwrap_or_else(|_| vec![0u8; ENVELOPE_LEN])
             }
-        };
-        opened
-            .exchange
-            .seal_reply(&reply_header, &envelope, &mut self.rng)
-            .unwrap_or_else(|_| vec![0u8; enclave_wire::UNIT_LEN])
+        }
+    }
+
+    fn expire_deferred(&mut self, now: u64) {
+        self.deferred
+            .retain(|_, (_, _, t)| now <= *t + api::DEFER_TTL_SECS);
+        self.deferred_bytes = self.deferred.values().map(|(_, b, _)| b.len()).sum();
     }
 
     fn dispatch(
@@ -741,6 +814,8 @@ impl Server {
             Op::KeyTransparency => (Status::NotFound, 0, none, Reply::Empty),
             Op::PushRegister => (self.push_register(h, env), 0, none, Reply::Empty),
             Op::Report => (self.report(h, env, now), 0, none, Reply::Empty),
+            // Answered in `handle`.
+            Op::Status => (Status::NotFound, 0, none, Reply::Empty),
         }
     }
 
@@ -1905,8 +1980,18 @@ fn log_db_error(e: &db::DbError) {
     eprintln!("enclave-server: {e}");
 }
 
+#[derive(Clone)]
 enum Reply {
     Envelope(Vec<u8>),
     Payload(Vec<u8>),
     Empty,
+}
+
+impl Reply {
+    fn len(&self) -> usize {
+        match self {
+            Reply::Envelope(b) | Reply::Payload(b) => b.len(),
+            Reply::Empty => 0,
+        }
+    }
 }
